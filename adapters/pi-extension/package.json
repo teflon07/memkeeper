@@ -1,0 +1,14 @@
+{
+  "name": "memkeeper-pi-extension",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "keywords": ["pi-package"],
+  "description": "Pi extension adapter for the local-first memkeeper Rust memory module.",
+  "pi": {
+    "extensions": ["./index.ts"]
+  },
+  "scripts": {
+    "check": "node --input-type=module --check < index.ts && node --check transport.mjs && node --test test/*.test.mjs"
+  }
+}

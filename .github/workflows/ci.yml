@@ -1,0 +1,74 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable, pinned
+        with:
+          toolchain: stable
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - name: Format
+        run: cargo fmt --all --check
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Build
+        run: cargo build --workspace
+      - name: Test
+        run: cargo test --workspace
+
+  mcp-adapter:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+      - name: Install MCP adapter (with test deps)
+        run: pip install "./adapters/mcp[test]"
+      - name: Test MCP adapter
+        run: python -m pytest adapters/mcp -q
+
+  leak-guard:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - name: No secrets or absolute home paths
+        run: |
+          # Generic leak indicators only — absolute home paths and private keys.
+          # Project-specific scrubbing (stale brand, maintainer identity) runs in
+          # the maintainer's private publish tooling before anything is pushed
+          # here; enumerating those identifiers in this public file would itself
+          # disclose them.
+          # The /[U]sers/ character class matches a real macOS home path without
+          # the pattern text containing that literal string, so this job never
+          # matches its own definition (and neither does the maintainer's private
+          # pre-publish guard).
+          if grep -rniE '/[U]sers/|/home/[a-z][a-z0-9._-]+/|BEGIN [A-Z ]*PRIVATE KEY|AKIA[0-9A-Z]{16}' \
+               --exclude-dir=.git --exclude-dir=target .; then
+            echo "::error::leak guard found a secret or absolute home path"
+            exit 1
+          fi
+          echo "leak guard clean"
+
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable, pinned
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+      - name: Audit dependencies for security advisories
+        # Fails on known vulnerabilities; unmaintained/yanked crates are reported
+        # as warnings only (non-blocking). Tune with an audit.toml if needed.
+        run: cargo audit

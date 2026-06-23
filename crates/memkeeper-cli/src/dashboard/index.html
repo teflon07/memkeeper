@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>memkeeper dashboard</title>
+    <link rel="stylesheet" href="/assets/style.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand">
+        <span class="brand-mark">memkeeper</span>
+        <span class="brand-sub">memory dashboard</span>
+      </div>
+      <div class="store-info" id="store-info" title="active store"></div>
+    </header>
+
+    <!-- Graph view ----------------------------------------------------- -->
+    <section class="view is-active" id="view-graph">
+      <div class="graph-controls">
+        <form id="entity-form" autocomplete="off">
+          <input
+            id="entity-input"
+            type="search"
+            placeholder="Find an entity to explore (e.g. a thread or system)…"
+            aria-label="search entities"
+          />
+          <button type="submit">Find entity</button>
+          <label class="opt">depth
+            <select id="graph-depth">
+              <option value="1">1</option>
+              <option value="2" selected>2</option>
+              <option value="3">3</option>
+            </select>
+          </label>
+        </form>
+        <div class="meta" id="graph-meta"></div>
+      </div>
+      <div class="graph-body">
+        <ul class="result-list graph-memory-list" id="graph-memory-list"></ul>
+        <div class="graph-canvas-wrap">
+          <div id="cy"></div>
+          <div class="graph-hint" id="graph-hint">
+            Search for an entity, then click a node to expand its neighbors.
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <div class="toast" id="toast" hidden></div>
+
+    <script src="/assets/app.js"></script>
+  </body>
+</html>

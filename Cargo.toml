@@ -1,0 +1,23 @@
+[workspace]
+members = [
+  "crates/memkeeper-core",
+  "crates/memkeeper-protocol",
+  "crates/memkeeper-store",
+  "crates/memkeeper-cli",
+  "crates/memkeeper-embed",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/teflon07/memkeeper"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+
+[workspace.lints.clippy]
+all = "warn"
+pedantic = "warn"

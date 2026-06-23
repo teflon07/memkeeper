@@ -1,0 +1,53 @@
+name: release
+
+# Tag a release to build and publish binaries:
+#   git tag v0.1.0 && git push origin v0.1.0
+#
+# Builds the lean, lexical-only (BM25/FTS) `memkeeper` binary for macOS (arm64 +
+# x86_64) and Linux x86_64. `--no-default-features` keeps the release artifact
+# free of bundled ONNX model runtimes; for semantic retrieval (embeddings +
+# rerank) build the default features from source — see the README. Archives are
+# attached to a GitHub Release.
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14
+            target: aarch64-apple-darwin
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable, pinned
+        with:
+          toolchain: stable
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - name: Build
+        run: cargo build --release --no-default-features --bin memkeeper --target ${{ matrix.target }}
+      - name: Package
+        run: |
+          staging="memkeeper-${GITHUB_REF_NAME}-${{ matrix.target }}"
+          mkdir "$staging"
+          cp "target/${{ matrix.target }}/release/memkeeper" "$staging/"
+          cp README.md LICENSE-MIT LICENSE-APACHE "$staging/"
+          tar czf "$staging.tar.gz" "$staging"
+          shasum -a 256 "$staging.tar.gz" > "$staging.tar.gz.sha256"
+      - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
+        with:
+          files: |
+            memkeeper-*.tar.gz
+            memkeeper-*.tar.gz.sha256

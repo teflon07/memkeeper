@@ -1,0 +1,43 @@
+[package]
+name = "memkeeper-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Local-first, deterministic memory store for AI agents: SQLite-backed, BM25 with optional local semantic search and rerank, no required network or LLM. Installs the `memkeeper` binary."
+keywords = ["memory", "mcp", "local-first", "ai", "sqlite"]
+categories = ["command-line-utilities", "database"]
+# Distributed via git + prebuilt release binaries (see README). Installs the
+# `memkeeper` binary: semantic (local ONNX) search + rerank by default;
+# `--no-default-features` builds the deterministic lexical-only core.
+
+[[bin]]
+name = "memkeeper"
+path = "src/main.rs"
+
+[dependencies]
+memkeeper-core = { path = "../memkeeper-core" }
+memkeeper-protocol = { path = "../memkeeper-protocol" }
+memkeeper-store = { path = "../memkeeper-store" }
+memkeeper-embed = { path = "../memkeeper-embed", optional = true }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+[features]
+# Semantic (local ONNX models) is the DEFAULT: this binary is deployed as an
+# always-semantic production daemon, and a plain `cargo build` previously
+# produced a silent FTS-only downgrade that overwrote the running binary
+# (2026-06-13 incident). Build the lean deterministic-only core with
+# `--no-default-features`. The `default_build_includes_semantic` test fails
+# loudly if this is ever reverted.
+default = ["semantic"]
+embed = ["memkeeper-store/semantic", "dep:memkeeper-embed"]
+semantic = ["embed", "memkeeper-embed/local"]
+api = ["embed", "memkeeper-embed/api"]
+
+[dev-dependencies]
+rusqlite = { version = "0.39.0", features = ["bundled"] }
+tempfile = "3"
+serde_json = "1.0"
+
+[lints]
+workspace = true
