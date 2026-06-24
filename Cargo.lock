@@ -602,7 +602,7 @@ checksum = "88904434abc2901f197fe8cc55f0445e7ded921dba5911dad2e2b39b48e663c4"
 
 [[package]]
 name = "memkeeper-cli"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "memkeeper-core",
  "memkeeper-embed",
@@ -616,11 +616,11 @@ dependencies = [
 
 [[package]]
 name = "memkeeper-core"
-version = "0.2.1"
+version = "0.2.2"
 
 [[package]]
 name = "memkeeper-embed"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "anyhow",
  "ndarray",
@@ -634,11 +634,11 @@ dependencies = [
 
 [[package]]
 name = "memkeeper-protocol"
-version = "0.2.1"
+version = "0.2.2"
 
 [[package]]
 name = "memkeeper-store"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "memkeeper-core",
  "rusqlite",

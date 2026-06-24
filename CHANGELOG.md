@@ -6,6 +6,26 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html) once it reache
 1.0. Until then, minor releases may include breaking changes to the storage
 schema and wire protocol.
 
+## [0.2.2] - 2026-06-24
+
+### Added
+- **Windows (experimental)** — verified to build and run from source. New
+  [docs/windows.md](docs/windows.md) covers prerequisites (rustup + MSVC C++ build
+  tools), the build, and the two common Rust-on-Windows blockers (`link.exe`, the
+  Schannel `CARGO_HTTP_CHECK_REVOKE` workaround). CI now compiles + smoke-tests on
+  Windows to catch regressions. No prebuilt Windows binary — build from source;
+  Windows is best-effort, not a first-class platform.
+- **"Capturing memories"** README section — memkeeper is curated memory you
+  populate deliberately (`remember`, or the MCP bridge from an agent), not an
+  automatic transcript logger; the `hook retrieve` client is the retrieval half.
+- **"The dashboard"** README section — explains that a fresh store starts empty
+  and that the **graph** is built from entities/relationships (which accrue from
+  `dream` synthesis or explicit upserts), distinct from the memory list.
+
+### Changed
+- The dashboard's empty-graph message is now actionable (how to populate the graph)
+  instead of just noting a fresh store may be empty.
+
 ## [0.2.1] - 2026-06-24
 
 ### Changed
@@ -81,6 +101,7 @@ Initial public release. A local-first memory engine for AI agents.
 - **Adapters**: an MCP bridge and a thin extension client.
 - Dual-licensed **MIT OR Apache-2.0**.
 
+[0.2.2]: https://github.com/teflon07/memkeeper/releases/tag/v0.2.2
 [0.2.1]: https://github.com/teflon07/memkeeper/releases/tag/v0.2.1
 [0.2.0]: https://github.com/teflon07/memkeeper/releases/tag/v0.2.0
 [0.1.0]: https://github.com/teflon07/memkeeper/releases/tag/v0.1.0

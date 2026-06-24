@@ -78,6 +78,22 @@ Two ends to avoid:
   add-on imports whole folders this way). Or distill the document down to its
   takeaways and store those as memories.
 
+## Capturing memories
+
+memkeeper is **curated** memory you populate deliberately — not an automatic
+transcript logger. Memories get in two ways:
+
+- **Directly** — `memkeeper remember --json '{"content":"…"}'`, from the CLI or a
+  script.
+- **From an agent** — the [MCP bridge](adapters/mcp) lets an MCP client (Claude and
+  other agents) call `remember` during a session, so durable facts are captured as
+  they come up.
+
+On the *retrieval* side, `memkeeper hook retrieve` is a Claude Code
+UserPromptSubmit hook client that injects relevant memories into the prompt — so an
+agent recalls without an explicit search. It retrieves; capture stays a deliberate
+`remember`.
+
 ## Semantic retrieval (default)
 
 memkeeper has three retrieval modes. **Local semantic is the default and the
@@ -174,10 +190,9 @@ They carry no local model runtime, so for fully on-device semantic, build from
 source (`cargo build --release`) and use local models as above.
 
 Prebuilt binaries are published for **macOS (Apple Silicon)** and **Linux x86_64**.
-**Windows support is in progress** — for now, build from source on Windows
-(`cargo build --release --no-default-features --features api`). The Unix-socket
-daemon mode (`serve --socket`) will be Unix-only; the http dashboard and stdio
-serve are cross-platform.
+**Windows is experimental** — there's no prebuilt binary, but it builds and runs
+from source; see [docs/windows.md](docs/windows.md). (`serve --socket` is Unix-only
+there; the http dashboard and stdio serve are cross-platform.)
 
 ### Switching the embedding model
 
@@ -223,6 +238,22 @@ dashboard. Writes (`ingest`, `document-prune`) are disabled unless you set a
 write token: start the server with `MEMKEEPER_HTTP_WRITE_TOKEN=<secret>` in the
 environment, then send it on write requests as `Authorization: Bearer <secret>`.
 With no token set, the HTTP server is read-only.
+
+## The dashboard
+
+`memkeeper serve --http` starts a read-only local dashboard (default
+`http://127.0.0.1:7777`) for browsing memories and the entity graph.
+
+**A fresh store starts empty — that's expected.** Two views, populated
+differently:
+
+- The **memory list** fills as you `remember`.
+- The **graph** visualizes *entities and relationships*, which are a separate layer
+  from raw memories. They accrue from memories that carry an entity, from the
+  `dream` synthesis pipeline extracting them over time, or from explicit
+  `entity-upsert` / `relationship-upsert`. So a handful of plain memories fill the
+  list but leave the **Graph** tab empty until entities and links exist — add a few
+  connected memories (or run `dream`) and it builds out.
 
 ## Benchmarks
 

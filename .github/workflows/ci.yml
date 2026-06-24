@@ -34,6 +34,30 @@ jobs:
       - name: Test
         run: cargo test --workspace
 
+  windows-build:
+    # Windows is experimental (build-from-source only, no published binary). This
+    # job guards the non-Unix `#[cfg(not(unix))]` paths from silently breaking —
+    # they don't compile on the Unix dev boxes or the other CI jobs. Build + smoke
+    # only; the full test suite includes Unix-socket tests that don't apply here.
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable, pinned
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - name: Build (off-device api config)
+        run: cargo build --release --no-default-features --features api --bin memkeeper -p memkeeper-cli
+      - name: Smoke test
+        shell: bash
+        run: |
+          bin="target/release/memkeeper.exe"
+          store="${RUNNER_TEMP:-/tmp}/memkeeper-smoke.sqlite"
+          rm -f "$store"
+          "$bin" init     --store "$store" --json
+          "$bin" remember --store "$store" --json '{"content":"windows ci smoke test"}'
+          "$bin" search   --store "$store" --json '{"query":"smoke","limit":1}'
+
   mcp-adapter:
     runs-on: ubuntu-latest
     steps:

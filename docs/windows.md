@@ -1,0 +1,86 @@
+# Building memkeeper on Windows (experimental)
+
+> **Status: experimental, community-supported.** Windows is not a first-class
+> memkeeper platform. The project is developed and tested on macOS and Linux, and
+> there are no prebuilt Windows binaries — you build from source. CI compiles the
+> codebase on Windows to catch breakage, but Windows fixes are best-effort and
+> prioritized behind the Unix platforms. Issues and pull requests are welcome.
+
+## What works, what doesn't
+
+- **Works:** the CLI (`init`, `remember`, `search`, `pack`, `reindex`, …), the HTTP
+  dashboard (`serve --http`), and `serve --stdio` for MCP / editor integrations.
+- **Retrieval:** the `--features api` build does deterministic lexical (BM25/FTS)
+  out of the box, or off-device semantic (embeddings + rerank over an API) once you
+  configure a key — see "Off-device semantic" in the main [README](../README.md).
+- **Not available on Windows:** the Unix-socket warm-daemon mode (`serve --socket`);
+  use the HTTP or stdio transports instead. Local on-device ONNX-model semantic is
+  untested on Windows — the supported semantic path here is off-device (API).
+
+## Prerequisites
+
+1. **Rust**, via [rustup](https://rustup.rs).
+2. **The MSVC C++ build tools.** The default `x86_64-pc-windows-msvc` toolchain
+   links with the Visual C++ linker (`link.exe`). Install the **"Desktop development
+   with C++"** workload from the
+   [Visual Studio Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/)
+   — the standalone Build Tools installer is enough; you don't need full Visual
+   Studio. Then open a fresh terminal so the toolchain is on `PATH`.
+
+## Build
+
+```powershell
+git clone https://github.com/teflon07/memkeeper.git
+cd memkeeper
+cargo build --release --no-default-features --features api
+```
+
+The binary lands at `target\release\memkeeper.exe`.
+
+## Quick check
+
+```powershell
+$bin   = ".\target\release\memkeeper.exe"
+$store = "$env:USERPROFILE\.memkeeper\store.sqlite"   # also the default when --store is omitted
+
+& $bin init     --store $store --json
+& $bin remember --store $store --json '{"content":"windows test memory"}'
+& $bin search   --store $store --json '{"query":"test","limit":1}'
+& $bin serve --http      # dashboard at http://127.0.0.1:7777 (Ctrl+C to stop)
+```
+
+(PowerShell single-quoted strings pass JSON through literally, so the inner
+double-quotes are fine. A brand-new store's **Graph** tab is expected to be empty
+until entities and relationships accrue — see "Why is the dashboard empty?" in the
+main README.)
+
+## Troubleshooting
+
+These are **generic Rust-on-Windows** issues, not memkeeper-specific, but they're
+the two most likely to block a first build, so they're collected here.
+
+- **`error: linker \`link.exe\` not found`** — the MSVC C++ build tools aren't
+  installed, or aren't visible in this shell. Install "Desktop development with C++"
+  (see Prerequisites) and retry in a fresh terminal. `rustc` locates the Visual
+  Studio install automatically (via `vswhere`), so no manual `PATH` setup is needed.
+
+- **cargo fails to fetch crates with a TLS error such as `SEC_E_NO_CREDENTIALS`** —
+  cargo's Windows TLS stack (Schannel) is failing a certificate-revocation check it
+  can't complete. This is common on locked-down or freshly-provisioned machines that
+  can't reach the revocation servers, and is unrelated to your general connectivity
+  (other tools such as Node may download fine because they use a different TLS
+  stack). Disable the revocation check for cargo:
+
+  ```powershell
+  $env:CARGO_HTTP_CHECK_REVOKE = "false"
+  # to persist across shells:  setx CARGO_HTTP_CHECK_REVOKE false   (then reopen the shell)
+  ```
+
+  If it still fails, also try `$env:CARGO_NET_GIT_FETCH_WITH_CLI = "true"`.
+
+## Reporting issues
+
+Windows is best-effort. If a build or command fails after the prerequisites above
+are in place, please open an issue with: the exact command, the full error output,
+your Windows version, and `rustc -Vv`. Pull requests that improve Windows support
+are welcome.

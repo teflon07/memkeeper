@@ -360,7 +360,7 @@ function renderEntityList(results) {
   if (!list) return;
   list.innerHTML = "";
   if (!results.length) {
-    list.appendChild(el("li", "empty-state", "No entities found. The graph is populated by the synthesis pipeline; a fresh store may be empty."));
+    list.appendChild(el("li", "empty-state", "No entities yet — a fresh store's graph is empty. Entities and relationships build up from your memories (via the `dream` synthesis pipeline) or explicit entity/relationship upserts."));
     return;
   }
   results.forEach((r) => {
