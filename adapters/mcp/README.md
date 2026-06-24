@@ -43,8 +43,10 @@ environments where running the binary directly is inconvenient.
 
 ## Prerequisites
 
-1. The `memkeeper` binary on your `PATH` (`cargo install --git <repo-url> memkeeper-cli`),
-   or point `MEMKEEPER_BIN` at it.
+1. The `memkeeper` binary on your `PATH`, or point `MEMKEEPER_BIN` at it. Install it
+   pinned to a release tag (this is a generated release mirror — `main` may be
+   regenerated, so pin rather than tracking it):
+   `cargo install --git <repo-url> --tag <release-tag> memkeeper-cli`.
 2. An initialized store: `memkeeper init` creates `~/.memkeeper/store.sqlite`.
 3. Python 3.10+ with the `mcp` package. Either `pip install mcp` into the
    environment you run the bridge from, or run it with [`uv`](https://docs.astral.sh/uv/)

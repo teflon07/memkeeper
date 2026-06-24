@@ -223,7 +223,8 @@ def _run_memkeeper(
             return response
     if not MEMKEEPER_BIN.exists():
         raise RuntimeError(
-            f"memkeeper binary not found ({MEMKEEPER_BIN}). Install memkeeper (cargo install --git ...) "
+            f"memkeeper binary not found ({MEMKEEPER_BIN}). Install memkeeper "
+            "(cargo install --git <repo-url> --tag <release-tag> memkeeper-cli) "
             "or set MEMKEEPER_BIN to its path."
         )
     args = [str(MEMKEEPER_BIN), command, "--store", str(STORE)]

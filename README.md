@@ -23,7 +23,7 @@ no required network or LLM calls.
 - **Durable by design.** Atomic writes, schema-versioned storage, and a
   retention model that promotes recurring, high-signal memories to a durable tier.
 
-> Status: pre-release (v0.1). APIs and the wire protocol may change before 1.0.
+> Status: pre-release (v0.2). APIs and the wire protocol may change before 1.0.
 
 ## Prerequisites
 
@@ -32,10 +32,11 @@ no required network or LLM calls.
 - **A C toolchain**, for the native dependencies a default build compiles
   (bundled SQLite, plus the ONNX runtime for semantic search). On macOS: Xcode
   Command Line Tools (`xcode-select --install`); on Debian/Ubuntu: `build-essential`.
-- **No network, LLM, or API key** is needed to build or run memkeeper. The ONNX
-  models for semantic search are fetched separately (see below), and `pull-models`
-  needs `curl`. A `--no-default-features` build is lexical-only and needs neither
-  the models nor `curl`.
+- **No network, LLM, or API key is needed at runtime.** Building fetches crate
+  dependencies from crates.io the first time, like any Rust project; after that a
+  clean build is offline. The ONNX models for semantic search are fetched
+  separately (see below), and `pull-models` needs `curl`. A `--no-default-features`
+  build is lexical-only and needs neither the models nor `curl`.
 
 ## Quickstart
 
@@ -79,15 +80,37 @@ Two ends to avoid:
 
 ## Semantic retrieval (default)
 
+memkeeper has three retrieval modes. **Local semantic is the default and the
+recommended, fully on-device mode.** Pick one up front — the embedding backend is
+recorded in the store, so changing it means re-embedding (`reindex --embed`), not a
+flip.
+
+| Mode | Network | Setup |
+|---|---|---|
+| **Local semantic** (default) | none | build from source, `pull-models` |
+| **Lexical only** | none | no models; `--no-default-features`, or just skip model setup |
+| **Off-device semantic** | embeds via an API | set `MEMKEEPER_EMBED_PROVIDER=openai` + base URL + key |
+
+> **Privacy:** off-device semantic sends your memory **text** to the embeddings
+> provider to be vectorized. Use it only where that is acceptable; the two on-device
+> modes never send memory content anywhere.
+
+### Local semantic (default)
+
 Semantic embeddings + cross-encoder reranking are enabled by default, so a plain
 `cargo build --release` produces a semantic binary. It needs the ONNX models,
 which are not downloaded automatically. Fetch them once with `pull-models` or
-the script:
+the script.
+
+`cargo build --release` does not put `memkeeper` on your `PATH`; the binary lands
+at `./target/release/memkeeper`. Either call it by that path (as below) or install
+it to your `PATH` with `cargo install --path crates/memkeeper-cli`, after which a
+bare `memkeeper` works.
 
 ```sh
 # Fetch the embed + rerank models (needs curl; ~2.1GB, or --quantized for ~0.6GB).
 # Either the built-in subcommand:
-memkeeper pull-models
+./target/release/memkeeper pull-models
 # ...or, equivalently, the bundled script if you have the repo checked out:
 scripts/fetch-models.sh
 
@@ -109,10 +132,12 @@ lexical-only and won't appear in semantic-only queries until they are embedded.
 After setting the model env vars, backfill existing memories once with:
 
 ```sh
-memkeeper reindex --embed --store ~/.memkeeper/store.sqlite
+./target/release/memkeeper reindex --embed --store ~/.memkeeper/store.sqlite
 ```
 
 New memories written with the models in place are embedded automatically.
+
+### Lexical only
 
 To build a deterministic, model-free **lexical-only** (BM25/FTS) binary, disable
 the default feature:
@@ -121,8 +146,47 @@ the default feature:
 cargo build --release --no-default-features
 ```
 
-Prebuilt release binaries are lexical-only for this reason (no bundled model
-runtime); build from source for semantic retrieval.
+### Off-device semantic (no model download)
+
+To get semantic quality without downloading the ONNX models, point memkeeper at an
+OpenAI-compatible embeddings API (OpenAI, OpenRouter, or any compatible proxy). This
+mode embeds and reranks over the network instead of loading local models, so it
+needs no `pull-models` and carries no ONNX runtime:
+
+```sh
+# Embeddings (required for semantic): any OpenAI-compatible /embeddings endpoint.
+export MEMKEEPER_EMBED_PROVIDER=openai     # "openai" = the OpenAI-compatible API dialect
+export MEMKEEPER_EMBED_BASE_URL=https://api.openai.com/v1/embeddings   # or your provider, e.g. OpenRouter
+export MEMKEEPER_EMBED_API_KEY=sk-...
+export MEMKEEPER_EMBED_MODEL=text-embedding-3-small
+export MEMKEEPER_EMBED_DIMS=1536
+
+# Reranking (optional, recommended): Cohere /rerank dialect, which OpenRouter speaks.
+export MEMKEEPER_RERANK_PROVIDER=openrouter
+export MEMKEEPER_RERANK_API_KEY=sk-...
+export MEMKEEPER_RERANK_MODEL=cohere/rerank-v3.5
+```
+
+The **prebuilt release binaries are built this way** (`--features api`): with a key
+configured they do off-device semantic; with no key they serve lexical (BM25/FTS),
+and `MEMKEEPER_REQUIRE_SEMANTIC=1` makes them refuse rather than serve degraded.
+They carry no local model runtime, so for fully on-device semantic, build from
+source (`cargo build --release`) and use local models as above.
+
+### Switching the embedding model
+
+The embedding backend is recorded per store, and memkeeper refuses to mix vectors
+from different models (they live in different vector spaces). To switch — local↔
+off-device, or between models — change the embedding env vars, then re-embed every
+memory under the new model in one step:
+
+```sh
+./target/release/memkeeper reindex --embed --store ~/.memkeeper/store.sqlite
+```
+
+This wipes the old vectors, records the new active model, and re-embeds all active
+memories in one transaction. It is the supported way to change models; there is no
+partial mix.
 
 ## Document store (RAG)
 

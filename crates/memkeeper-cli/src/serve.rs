@@ -63,59 +63,116 @@ pub(crate) fn runtime_semantic_guard(embed_active: bool, require_semantic: bool)
     }
 }
 
-/// Fail loud (not silent) when a non-semantic binary serves: such a daemon
-/// silently degrades retrieval to FTS-only, which has bitten production. Emits
-/// a prominent stderr line and a best-effort macOS desktop notification.
+/// Surface the retrieval mode when a non-semantic (lexical-only) binary serves.
+/// Semantic is the default and preferred build; a lexical-only daemon is a
+/// supported but lesser mode, so state it visibly without crying wolf — a calm
+/// NOTE, no desktop alarm. When the operator has *demanded* semantic via
+/// `MEMKEEPER_REQUIRE_SEMANTIC`, serving lexical-only is a genuine failure: escalate
+/// to a loud ERROR plus a best-effort macOS desktop notification, and the caller
+/// refuses to serve. This keeps the loud-failure floor intact (the require path
+/// still fails closed) without mislabeling the expected lexical-only mode.
 fn warn_non_semantic(refusing: bool) {
-    let tail = if refusing {
-        "MEMKEEPER_REQUIRE_SEMANTIC is set — refusing to serve."
-    } else {
-        "Serving FTS-only (degraded). Rebuild with `cargo build --release` (semantic is default)."
-    };
-    eprintln!(
-        "[memkeeper] ERROR: built WITHOUT semantic features — embeddings, rerank, and \
-         late-interaction are OFF. {tail}"
-    );
-    #[cfg(target_os = "macos")]
-    {
-        let _ = std::process::Command::new("osascript")
-            .args([
-                "-e",
-                "display notification \"daemon is FTS-only — non-semantic build\" \
-                 with title \"memkeeper degraded\"",
-            ])
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn();
+    if refusing {
+        eprintln!(
+            "[memkeeper] ERROR: MEMKEEPER_REQUIRE_SEMANTIC is set, but this binary was built \
+             WITHOUT semantic features — embeddings, rerank, and late-interaction are OFF. \
+             Refusing to serve. Rebuild with `cargo build --release` (semantic is the default)."
+        );
+        #[cfg(target_os = "macos")]
+        {
+            let _ = std::process::Command::new("osascript")
+                .args([
+                    "-e",
+                    "display notification \"required semantic, but this is a lexical-only build\" \
+                     with title \"memkeeper: refusing to serve\"",
+                ])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn();
+        }
+        return;
     }
+    eprintln!(
+        "[memkeeper] NOTE: this is a lexical-only (BM25/FTS) build — semantic embeddings and \
+         rerank are OFF. Semantic retrieval is the default and preferred mode; build from \
+         source with `cargo build --release` to enable it. Set MEMKEEPER_REQUIRE_SEMANTIC=1 to \
+         refuse lexical-only rather than serve it."
+    );
 }
 
-/// Fail loud when a *semantic build* serves with no embedder loaded: the model
-/// files are missing at runtime, so retrieval silently falls back to BM25. Same
-/// hazard as `warn_non_semantic`, but for missing models rather than a lean build.
+/// Surface that a semantic-capable build is serving with no embedder loaded. The
+/// hazard (silently falling back to BM25) and tone depend on the backend the
+/// binary was built for:
+///
+/// - **Local build, model files missing** is a setup gap for a binary that
+///   *intends* local semantic — keep it loud (ERROR + desktop alarm) and point at
+///   `pull-models`, matching `warn_non_semantic`'s posture.
+/// - **Off-device (api-only) build with no provider configured** is the expected
+///   default of the prebuilt binary (bring-a-key is opt-in) — a calm NOTE that
+///   points at the provider/key, no alarm, same as the lexical-only binary.
+///
+/// Either way, `MEMKEEPER_REQUIRE_SEMANTIC` escalates to a loud ERROR and refuses to
+/// serve, so the fail-closed floor holds regardless of backend.
 #[cfg(feature = "embed")]
 fn warn_models_absent(refusing: bool) {
-    let tail = if refusing {
-        "MEMKEEPER_REQUIRE_SEMANTIC is set — refusing to serve."
-    } else {
-        "Serving FTS-only (degraded). Set MEMKEEPER_EMBED_MODEL_DIR (try `memkeeper pull-models`)."
-    };
-    eprintln!(
-        "[memkeeper] ERROR: semantic build but the embed model did not load \
-         (MEMKEEPER_EMBED_MODEL_DIR unset or model files missing) — embeddings and \
-         rerank are OFF. {tail}"
-    );
-    #[cfg(target_os = "macos")]
+    // Off-device build (api compiled, local not): the embedder is a remote API,
+    // not local model files. Point at the provider/key and stay calm when degraded.
+    #[cfg(all(feature = "api", not(feature = "semantic")))]
     {
-        let _ = std::process::Command::new("osascript")
-            .args([
-                "-e",
-                "display notification \"daemon is FTS-only — embed model missing\" \
-                 with title \"memkeeper degraded\"",
-            ])
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn();
+        if refusing {
+            eprintln!(
+                "[memkeeper] ERROR: MEMKEEPER_REQUIRE_SEMANTIC is set, but no embeddings provider \
+                 is configured — embeddings and rerank are OFF. Refusing to serve. Set \
+                 MEMKEEPER_EMBED_PROVIDER=openai with an embeddings API key (e.g. OpenRouter)."
+            );
+            #[cfg(target_os = "macos")]
+            {
+                let _ = std::process::Command::new("osascript")
+                    .args([
+                        "-e",
+                        "display notification \"required semantic, but no embeddings API key set\" \
+                         with title \"memkeeper: refusing to serve\"",
+                    ])
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .spawn();
+            }
+            return;
+        }
+        eprintln!(
+            "[memkeeper] NOTE: serving lexical (BM25/FTS) — no embeddings provider configured. \
+             This build does off-device semantic: set MEMKEEPER_EMBED_PROVIDER=openai with an \
+             embeddings API key (e.g. OpenRouter) to enable it. Set MEMKEEPER_REQUIRE_SEMANTIC=1 \
+             to refuse lexical-only rather than serve it."
+        );
+    }
+
+    // Local-model build (the `semantic` feature): a binary that intends on-device
+    // semantic whose model files did not load at runtime. Keep loud.
+    #[cfg(feature = "semantic")]
+    {
+        let tail = if refusing {
+            "MEMKEEPER_REQUIRE_SEMANTIC is set — refusing to serve."
+        } else {
+            "Serving FTS-only (degraded). Set MEMKEEPER_EMBED_MODEL_DIR (try `memkeeper pull-models`)."
+        };
+        eprintln!(
+            "[memkeeper] ERROR: semantic build but the embed model did not load \
+             (MEMKEEPER_EMBED_MODEL_DIR unset or model files missing) — embeddings and \
+             rerank are OFF. {tail}"
+        );
+        #[cfg(target_os = "macos")]
+        {
+            let _ = std::process::Command::new("osascript")
+                .args([
+                    "-e",
+                    "display notification \"daemon is FTS-only — embed model missing\" \
+                     with title \"memkeeper degraded\"",
+                ])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn();
+        }
     }
 }
 

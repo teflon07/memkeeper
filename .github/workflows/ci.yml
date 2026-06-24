@@ -22,6 +22,13 @@ jobs:
         run: cargo fmt --all --check
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
+      # The CLI ships in non-default feature configs too; lint them so a
+      # config-specific warning can't go latent (CI default-features clippy
+      # would miss it). Lexical = `--no-default-features`; off-device = `api`.
+      - name: Clippy (lexical)
+        run: cargo clippy -p memkeeper-cli --no-default-features --all-targets -- -D warnings
+      - name: Clippy (off-device api)
+        run: cargo clippy -p memkeeper-cli --no-default-features --features api --all-targets -- -D warnings
       - name: Build
         run: cargo build --workspace
       - name: Test

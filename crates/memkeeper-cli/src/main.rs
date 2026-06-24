@@ -17,41 +17,45 @@ use std::{
 };
 
 use memkeeper_protocol::{Command, ErrorCode, PROTOCOL_VERSION};
+// Only used by the embed-gated rerank path; gate the import so a lexical-only
+// (`--no-default-features`) build doesn't warn on an unused symbol.
+#[cfg(feature = "embed")]
+use memkeeper_store::build_hybrid_rerank_pool_with_expansion;
 use memkeeper_store::{
-    approve_candidate, backup_store, batch_search_memories,
-    build_hybrid_rerank_pool_with_expansion, build_pack, create_space, document_duplicates,
-    dream_store, expanded_pack_queries, export_store, forget_memory, get_document, get_memory,
-    graph_context, graph_full, graph_neighbors, import_store, ingest_source, init_store,
-    inspect_store_stats, last_synthesis_run, list_candidates, list_memories, list_silos,
-    list_spaces, mark_source_episodes_extracted, memory_history, merge_entity,
-    promotion_candidates, prune_documents, record_recall, reject_candidate, remember_memory,
-    schema_mentions_required_objects, search_documents, search_entities, search_memories,
-    store_stats, store_stats_with_health, submit_candidate, upsert_entity, upsert_relationship,
-    verify_memory, BackupReport, BackupRequest, BatchSearchItemReport, BatchSearchQuery,
-    BatchSearchReport, BatchSearchRequest, CandidateApproveReport, CandidateApproveRequest,
-    CandidateListReport, CandidateListRequest, CandidateRecord, CandidateRejectReport,
-    CandidateRejectRequest, CandidateSubmitReport, CandidateSubmitRequest, DocumentChunk,
-    DocumentDuplicatesReport, DocumentDuplicatesRequest, DocumentGetReport, DocumentGetRequest,
-    DocumentPruneReport, DocumentPruneRequest, DocumentSearchReport, DocumentSearchRequest,
-    DocumentSearchResult, DreamDedupeReport, DreamDuplicateProposal, DreamExpireReport,
-    DreamGraphReport, DreamPromoteReport, DreamReindexReport, DreamRelationshipProposal,
-    DreamReport, DreamRequest, DuplicateChunkCluster, DuplicateChunkMember, EntityMergeReport,
-    EntityMergeRequest, EntityRecord, EntitySearchReport, EntitySearchRequest, EntitySearchResult,
-    EntityUpsertReport, EntityUpsertRequest, Error as StoreError, ExportReport, ExportRequest,
-    ExportTableReport, ForgetReport, ForgetRequest, GetOptions, GraphContextReport,
-    GraphContextRequest, GraphEntityRecord, GraphFullReport, GraphNeighborsReport,
-    GraphNeighborsRequest, GraphRelationshipRecord, HealthStats, HistoryOptions, HistoryReport,
-    ImportReport, ImportRequest, IndexStats, IngestReport, IngestRequest, InitReport,
-    MarkExtractedReport, MarkExtractedRequest, MemoryEventRecord, MemoryLinkRecord, MemoryListItem,
-    MemoryListReport, MemoryListRequest, MemoryRecord, MemoryVersionRecord, PackExpansionOptions,
-    PackReport, PackRequest, PromotionCandidate, PromotionCandidatesReport,
-    PromotionCandidatesRequest, RecallEvent, RecallLogReport, RecallLogRequest, RelationshipRecord,
-    RelationshipUpsertReport, RelationshipUpsertRequest, RememberCandidate,
-    RememberConflictCandidate, RememberReport, RememberRequest, SearchFilters, SearchReport,
-    SearchRequest, SearchResult, SiloListReport, SiloListRequest, SiloRecord, SpaceCreateReport,
-    SpaceCreateRequest, SpaceListReport, SpaceRecord, Stats, VerifyReport, VerifyRequest,
-    DEFAULT_DREAM_MAX_MEMORIES, DEFAULT_PROMOTE_RANK_CAP, DEFAULT_PROMOTE_SCORE_FLOOR,
-    DEFAULT_PROMOTE_THRESHOLD, PROJECT_STORE_RELATIVE_PATH, SCHEMA_VERSION, USER_STORE_PATH_HINT,
+    approve_candidate, backup_store, batch_search_memories, build_pack, create_space,
+    document_duplicates, dream_store, expanded_pack_queries, export_store, forget_memory,
+    get_document, get_memory, graph_context, graph_full, graph_neighbors, import_store,
+    ingest_source, init_store, inspect_store_stats, last_synthesis_run, list_candidates,
+    list_memories, list_silos, list_spaces, mark_source_episodes_extracted, memory_history,
+    merge_entity, promotion_candidates, prune_documents, record_recall, reject_candidate,
+    remember_memory, schema_mentions_required_objects, search_documents, search_entities,
+    search_memories, store_stats, store_stats_with_health, submit_candidate, upsert_entity,
+    upsert_relationship, verify_memory, BackupReport, BackupRequest, BatchSearchItemReport,
+    BatchSearchQuery, BatchSearchReport, BatchSearchRequest, CandidateApproveReport,
+    CandidateApproveRequest, CandidateListReport, CandidateListRequest, CandidateRecord,
+    CandidateRejectReport, CandidateRejectRequest, CandidateSubmitReport, CandidateSubmitRequest,
+    DocumentChunk, DocumentDuplicatesReport, DocumentDuplicatesRequest, DocumentGetReport,
+    DocumentGetRequest, DocumentPruneReport, DocumentPruneRequest, DocumentSearchReport,
+    DocumentSearchRequest, DocumentSearchResult, DreamDedupeReport, DreamDuplicateProposal,
+    DreamExpireReport, DreamGraphReport, DreamPromoteReport, DreamReindexReport,
+    DreamRelationshipProposal, DreamReport, DreamRequest, DuplicateChunkCluster,
+    DuplicateChunkMember, EntityMergeReport, EntityMergeRequest, EntityRecord, EntitySearchReport,
+    EntitySearchRequest, EntitySearchResult, EntityUpsertReport, EntityUpsertRequest,
+    Error as StoreError, ExportReport, ExportRequest, ExportTableReport, ForgetReport,
+    ForgetRequest, GetOptions, GraphContextReport, GraphContextRequest, GraphEntityRecord,
+    GraphFullReport, GraphNeighborsReport, GraphNeighborsRequest, GraphRelationshipRecord,
+    HealthStats, HistoryOptions, HistoryReport, ImportReport, ImportRequest, IndexStats,
+    IngestReport, IngestRequest, InitReport, MarkExtractedReport, MarkExtractedRequest,
+    MemoryEventRecord, MemoryLinkRecord, MemoryListItem, MemoryListReport, MemoryListRequest,
+    MemoryRecord, MemoryVersionRecord, PackExpansionOptions, PackReport, PackRequest,
+    PromotionCandidate, PromotionCandidatesReport, PromotionCandidatesRequest, RecallEvent,
+    RecallLogReport, RecallLogRequest, RelationshipRecord, RelationshipUpsertReport,
+    RelationshipUpsertRequest, RememberCandidate, RememberConflictCandidate, RememberReport,
+    RememberRequest, SearchFilters, SearchReport, SearchRequest, SearchResult, SiloListReport,
+    SiloListRequest, SiloRecord, SpaceCreateReport, SpaceCreateRequest, SpaceListReport,
+    SpaceRecord, Stats, VerifyReport, VerifyRequest, DEFAULT_DREAM_MAX_MEMORIES,
+    DEFAULT_PROMOTE_RANK_CAP, DEFAULT_PROMOTE_SCORE_FLOOR, DEFAULT_PROMOTE_THRESHOLD,
+    PROJECT_STORE_RELATIVE_PATH, SCHEMA_VERSION, USER_STORE_PATH_HINT,
 };
 #[cfg(feature = "embed")]
 use std::sync::Mutex;
@@ -1249,7 +1253,11 @@ fn maybe_embed_search_request(
     }
 }
 
+// Mirrors the `embed` variant's fallible signature for a shared call site; the
+// lexical stub can only ever return `Ok`, so silence `unnecessary_wraps` as the
+// sibling non-embed stubs (reindex_count, reembed_store, ...) already do.
 #[cfg(not(feature = "embed"))]
+#[allow(clippy::unnecessary_wraps)]
 fn maybe_embed_search_request(
     _request: &mut SearchRequest,
     _semantic_models: &SemanticModels,
@@ -2134,6 +2142,19 @@ fn run_backup(args: &[String]) -> i32 {
 }
 
 fn run_reindex(args: &[String]) -> i32 {
+    if args.iter().any(|a| a == "--help" || a == "-h") {
+        println!(
+            "Usage: memkeeper reindex [--store <path>] [--embed] [--tokens] [--force]\n\n  \
+             Backfill derived data for memories already in the store. Needs a build with\n  \
+             the 'semantic' (or 'api') feature; a lexical-only binary reports an error.\n\n  \
+             --embed   recompute embedding vectors (run once after `pull-models`, so\n            \
+             memories stored before the models were present become semantically searchable)\n  \
+             --tokens  backfill token counts only (no model required beyond tokenizer)\n  \
+             --force   re-run even for entries that already have up-to-date vectors\n  \
+             --store   store path (defaults to the usual user/project resolution)"
+        );
+        return 0;
+    }
     let started = Instant::now();
     let command = Command::Reindex;
     let result = parse_reindex_args(args).and_then(|parsed| {
@@ -2578,9 +2599,10 @@ impl std::fmt::Display for CliError {
 /// Resolve the store path when no explicit `--store` flag was supplied.
 ///
 /// Precedence is `--store` flag (handled by callers) > `MEMKEEPER_STORE` env >
-/// the default `~/.memkeeper/store.sqlite`. When `$HOME` is unset (minimal CI
-/// containers, some service managers) the default falls back to the
-/// project-relative `.memkeeper/store.sqlite` so the CLI still resolves to a
+/// the default `~/.memkeeper/store.sqlite` (`%USERPROFILE%\.memkeeper\store.sqlite`
+/// on Windows, where `$HOME` is normally unset). When neither home variable is
+/// set (minimal CI containers, some service managers) the default falls back to
+/// the project-relative `.memkeeper/store.sqlite` so the CLI still resolves to a
 /// deterministic location instead of an empty path.
 fn resolve_store_default() -> PathBuf {
     if let Ok(env_store) = std::env::var("MEMKEEPER_STORE") {
@@ -2592,6 +2614,15 @@ fn resolve_store_default() -> PathBuf {
     if let Some(home) = std::env::var_os("HOME") {
         if !home.is_empty() {
             return PathBuf::from(home).join(".memkeeper").join("store.sqlite");
+        }
+    }
+    // Windows rarely sets HOME; use the native profile dir instead.
+    #[cfg(windows)]
+    if let Some(profile) = std::env::var_os("USERPROFILE") {
+        if !profile.is_empty() {
+            return PathBuf::from(profile)
+                .join(".memkeeper")
+                .join("store.sqlite");
         }
     }
     PathBuf::from(PROJECT_STORE_RELATIVE_PATH)
@@ -3963,6 +3994,7 @@ fn print_help() {
            dream --store <path> [--task promote|expire|reindex|dedupe|graph] [--promote-threshold <N>] [--promote-score-floor <F>] [--promote-rank-cap <N>] [--dry-run|--apply] --json '{{}}' Run bounded maintenance tasks.\n\
            (--dry-run previews; --apply/--commit mutates. forget/import/dream accept both; mutating commands always report dry_run + changed ids.)\n\
            backup --store <path> --output <path> --json Create physical SQLite backup.\n\
+           reindex --store <path> [--embed] [--tokens] [--force] Backfill semantic vectors for memories written before the models were present (needs a semantic build). `reindex --help` for details.\n\
            hook retrieve [--store <path>] [--sock <path>]  Claude Code UserPromptSubmit hook client.\n\
            serve --stdio | --socket <path>       Serve newline-delimited JSON requests (stdio or Unix socket).\n\
            mcp [--store <path>]                  Speak MCP (JSON-RPC 2.0) over stdio for any MCP client.\n\
