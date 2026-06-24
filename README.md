@@ -23,6 +23,12 @@ no required network or LLM calls.
 - **Durable by design.** Atomic writes, schema-versioned storage, and a
   retention model that promotes recurring, high-signal memories to a durable tier.
 
+<p align="center">
+  <img src="assets/hero.gif" alt="memkeeper demo: store two memories, then a semantic search whose query shares no keywords with the stored memory still surfaces the right one" width="820" />
+</p>
+
+<p align="center"><sub>Real CLI output, formatted for readability via <a href="scripts/mkfmt"><code>scripts/mkfmt</code></a>. The search query shares no keywords with the memory it surfaces.</sub></p>
+
 > Status: pre-release (v0.2). APIs and the wire protocol may change before 1.0.
 
 ## Prerequisites

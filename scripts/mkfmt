@@ -1,0 +1,55 @@
+#!/usr/bin/env python3
+"""Pretty-print memkeeper --json output as a few human-readable lines.
+
+A tiny presentation helper for demos and interactive use: pipe any memkeeper
+command's --json output through it. It only reshapes fields for readability;
+the data is memkeeper's own output, unchanged.
+
+    memkeeper search --json '{"query":"..."}' | scripts/mkfmt
+"""
+import json
+import sys
+
+D = "\033[0;90m"; C = "\033[1;36m"; K = "\033[1;33m"
+G = "\033[0;32m"; E = "\033[0;31m"; R = "\033[0m"
+
+
+def trunc(s, n=68):
+    return s if len(s) <= n else s[: n - 1] + "…"
+
+
+def main():
+    try:
+        obj = json.load(sys.stdin)
+    except json.JSONDecodeError:
+        sys.exit("mkfmt: expected one JSON object on stdin")
+
+    if not obj.get("ok", True):
+        err = obj.get("error", {})
+        print(f"{E}✗{R} {err.get('code', 'error')}: {err.get('message', '')}")
+        return
+
+    cmd = obj.get("command")
+    res = obj.get("result", {})
+
+    if cmd == "init":
+        s = obj.get("store", {})
+        print(f"{G}✓{R} store ready  {D}schema v{s.get('schema_version')} · "
+              f"{res.get('journal_mode')} · {res.get('default_space')}{R}")
+    elif cmd == "remember":
+        m = res.get("memory", {})
+        print(f"{G}✓{R} remembered  {D}{(m.get('id') or '')[:16]}… · "
+              f"{m.get('silo')} · {res.get('processing_status')}{R}")
+    elif cmd == "search":
+        sr = res.get("search", {})
+        sem = sr.get("semantic", {})
+        print(f"  {K}strategy{R}: {C}{sr.get('strategy')}{R}   "
+              f"{D}semantic.attempted={str(sem.get('attempted')).lower()}{R}")
+        for r in res.get("results", [])[:3]:
+            print(f"  {D}#{r.get('rank')}{R}  {r.get('score', 0):.2f}  {trunc(r.get('snippet', ''))}")
+    else:
+        print(json.dumps(obj.get("result", obj))[:200])
+
+
+if __name__ == "__main__":
+    main()
