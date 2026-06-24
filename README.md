@@ -128,6 +128,12 @@ recommended, fully on-device mode.** Pick one up front — the embedding backend
 recorded in the store, so changing it means re-embedding (`reindex --embed`), not a
 flip.
 
+<p align="center">
+  <img src="assets/retrieval.gif" alt="memkeeper retrieval: the deterministic BM25/FTS floor returns an exact-keyword match with zero models, then with the ONNX models loaded a semantic query that shares no keywords still finds the right memory" width="820" />
+</p>
+
+<p align="center"><sub>The deterministic floor (zero models, zero network) and semantic + rerank on top — same store, same query path. Real output via <a href="scripts/mkfmt"><code>scripts/mkfmt</code></a>.</sub></p>
+
 | Mode | Network | Setup |
 |---|---|---|
 | **Local semantic** (default) | none | build from source, `pull-models` |
