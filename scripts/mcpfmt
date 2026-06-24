@@ -1,0 +1,58 @@
+#!/usr/bin/env python3
+"""Format a memkeeper MCP (JSON-RPC) response stream into agent-style lines.
+Reads all JSON-RPC responses on stdin, prints the meaningful one for the beat:
+a connect line (from initialize + tools/list) or a tools/call result."""
+import json
+import sys
+
+D = "\033[0;90m"; C = "\033[1;36m"; K = "\033[1;33m"; G = "\033[0;32m"; R = "\033[0m"
+
+
+def trunc(s, n=58):
+    return s if len(s) <= n else s[: n - 1] + "…"
+
+
+server = None
+ntools = None
+calls = []
+for line in sys.stdin:
+    line = line.strip()
+    if not line:
+        continue
+    try:
+        o = json.loads(line)
+    except json.JSONDecodeError:
+        continue
+    res = o.get("result")
+    if not isinstance(res, dict):
+        continue
+    if "serverInfo" in res:
+        si = res["serverInfo"]
+        server = (si.get("name", "memkeeper"), si.get("version", "?"))
+    if isinstance(res.get("tools"), list):
+        ntools = len(res["tools"])
+    if "content" in res:  # tools/call wraps a memkeeper --json envelope as text
+        try:
+            calls.append(json.loads(res["content"][0]["text"]))
+        except (json.JSONDecodeError, KeyError, IndexError):
+            calls.append({})
+
+if calls:
+    for env in calls:
+        cmd = env.get("command")
+        r = env.get("result", {})
+        if cmd == "remember":
+            m = r.get("memory", {})
+            print(f"  {G}✓{R} stored  {D}{(m.get('id') or '')[:16]}… · "
+                  f"{m.get('silo')} · {r.get('processing_status')}{R}")
+        elif cmd == "search":
+            sr = r.get("search", {})
+            print(f"  {K}strategy{R}: {C}{sr.get('strategy')}{R} "
+                  f"{D}· reranked={str(sr.get('reranked')).lower()}{R}")
+            for it in r.get("results", [])[:3]:
+                print(f"  {D}#{it.get('rank')}{R}  {it.get('score', 0):.2f}  {trunc(it.get('snippet', ''))}")
+        else:
+            print(f"  {G}✓{R} {cmd}")
+elif ntools is not None:
+    name, ver = server or ("memkeeper", "?")
+    print(f"  {G}✓{R} connected to {C}{name} v{ver}{R}  {D}· {ntools} tools available{R}")

@@ -102,6 +102,25 @@ UserPromptSubmit hook client that injects relevant memories into the prompt — 
 agent recalls without an explicit search. It retrieves; capture stays a deliberate
 `remember`.
 
+## Use it from an agent (MCP)
+
+memkeeper speaks [MCP](adapters/mcp) (JSON-RPC 2.0 over stdio), so any MCP client —
+Claude Code, Cursor, and others — can read and write memory during a session. Point
+your client's MCP config at the binary:
+
+```json
+{ "mcpServers": { "memkeeper": { "command": "memkeeper", "args": ["mcp"] } } }
+```
+
+The agent calls `remember` to capture a durable fact and `search` to recall it later
+— across separate sessions, with the same semantic retrieval as the CLI:
+
+<p align="center">
+  <img src="assets/mcp.gif" alt="memkeeper over MCP: an agent connects, calls remember to store a fact, then in a later session calls search and recalls it via semantic retrieval" width="820" />
+</p>
+
+<p align="center"><sub>Real <code>memkeeper mcp</code> JSON-RPC round-trips, formatted for readability via <a href="scripts/mcpfmt"><code>scripts/mcpfmt</code></a>.</sub></p>
+
 ## Semantic retrieval (default)
 
 memkeeper has three retrieval modes. **Local semantic is the default and the
