@@ -315,7 +315,11 @@ fn addr_is_loopback(addr: &str) -> bool {
 /// Serve the read-only dashboard over HTTP until interrupted. One thread per
 /// connection (store opened per request, models behind mutexes — same safety
 /// model as the Unix-socket serve mode).
-pub(crate) fn run_serve_http(addr: &str, models: &SemanticModels) -> i32 {
+pub(crate) fn run_serve_http(
+    addr: &str,
+    models: &SemanticModels,
+    store_override: Option<&Path>,
+) -> i32 {
     // Binding off-loopback publishes the entire read-only store (search, get,
     // history, stats, full graph, doctor config) to the network with no auth.
     // Fail closed: refuse unless the operator explicitly opts in, and warn
@@ -352,7 +356,9 @@ pub(crate) fn run_serve_http(addr: &str, models: &SemanticModels) -> i32 {
         }
     }
 
-    let store = resolve_store_default();
+    // `--store` overrides the default resolution (env `MEMKEEPER_STORE`, then the
+    // user/project default). The dashboard never learns this from the client.
+    let store = store_override.map_or_else(resolve_store_default, Path::to_path_buf);
     let listener = match TcpListener::bind(addr) {
         Ok(listener) => listener,
         Err(error) => {

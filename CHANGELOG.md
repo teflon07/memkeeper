@@ -6,6 +6,26 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html) once it reache
 1.0. Until then, minor releases may include breaking changes to the storage
 schema and wire protocol.
 
+## [0.2.3] - 2026-06-24
+
+Cross-platform usability fixes (surfaced testing on Windows, but general).
+
+### Added
+- **`--json @<file>` / `--json -` (stdin).** Any command's `--json` payload can be
+  read from a file or stdin instead of an inline string, avoiding shell-quoting
+  pitfalls (notably Windows PowerShell 5.1, which mangles inline JSON).
+- **`serve --http --store <path>`.** The dashboard now takes `--store` like every
+  other command, instead of requiring the `MEMKEEPER_STORE` env var.
+
+### Changed
+- **`pull-models`** prints env-setup lines in the host shell's dialect — PowerShell
+  (`$env:... = "..."` / `setx`) on Windows, POSIX `export` elsewhere.
+- **Windows docs** now reflect that the default on-device semantic build works on
+  Windows (verified: local embeddings + reranker + warm-daemon HTTP), with an
+  expanded troubleshooting section (`reindex --embed` after configuring models,
+  dashboard `--store`, inline-JSON in PowerShell, "Access is denied" on rebuild,
+  git "dubious ownership").
+
 ## [0.2.2] - 2026-06-24
 
 ### Added
@@ -101,6 +121,7 @@ Initial public release. A local-first memory engine for AI agents.
 - **Adapters**: an MCP bridge and a thin extension client.
 - Dual-licensed **MIT OR Apache-2.0**.
 
+[0.2.3]: https://github.com/teflon07/memkeeper/releases/tag/v0.2.3
 [0.2.2]: https://github.com/teflon07/memkeeper/releases/tag/v0.2.2
 [0.2.1]: https://github.com/teflon07/memkeeper/releases/tag/v0.2.1
 [0.2.0]: https://github.com/teflon07/memkeeper/releases/tag/v0.2.0

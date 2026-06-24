@@ -89,9 +89,63 @@ pub(crate) use requests::*;
 #[allow(clippy::wildcard_imports)]
 pub(crate) use serve::*;
 
+/// Resolve curl-style `--json @<file>` / `--json -` (stdin) sentinels in the raw
+/// arg list to the literal payload, so every command's `--json` handling sees
+/// plain JSON. Applies to `--json` / `--request-json` / `--request`, space- or
+/// `=`-separated. Anything not starting with `@` (or equal to `-`) is unchanged.
+fn resolve_json_args(args: Vec<String>) -> Result<Vec<String>, CliError> {
+    const FLAGS: [&str; 3] = ["--json", "--request-json", "--request"];
+    let mut out = Vec::with_capacity(args.len());
+    let mut iter = args.into_iter();
+    while let Some(arg) = iter.next() {
+        if FLAGS.contains(&arg.as_str()) {
+            out.push(arg);
+            if let Some(value) = iter.next() {
+                out.push(resolve_json_payload(&value)?);
+            }
+        } else if let Some((flag, value)) = FLAGS.iter().find_map(|flag| {
+            arg.strip_prefix(&format!("{flag}="))
+                .map(|v| (*flag, v.to_owned()))
+        }) {
+            out.push(format!("{flag}={}", resolve_json_payload(&value)?));
+        } else {
+            out.push(arg);
+        }
+    }
+    Ok(out)
+}
+
+/// `@<path>` -> file contents; `-` -> stdin; anything else -> unchanged.
+fn resolve_json_payload(value: &str) -> Result<String, CliError> {
+    if value == "-" {
+        let mut buf = String::new();
+        let mut stdin = std::io::stdin();
+        std::io::Read::read_to_string(&mut stdin, &mut buf).map_err(|error| {
+            CliError::InvalidRequest(format!("failed to read --json from stdin: {error}"))
+        })?;
+        Ok(buf)
+    } else if let Some(path) = value.strip_prefix('@') {
+        std::fs::read_to_string(path).map_err(|error| {
+            CliError::InvalidRequest(format!("failed to read --json file '{path}': {error}"))
+        })
+    } else {
+        Ok(value.to_string())
+    }
+}
+
 #[allow(clippy::too_many_lines)]
 fn main() {
-    let mut args = env::args().skip(1);
+    // Resolve `--json @file` / `--json -` (stdin) up front so every command's
+    // `--json` handling sees a literal payload (avoids brittle inline JSON quoting,
+    // especially in Windows PowerShell).
+    let resolved_args = match resolve_json_args(env::args().skip(1).collect()) {
+        Ok(resolved) => resolved,
+        Err(error) => {
+            eprintln!("[memkeeper] {error}");
+            process::exit(error.exit_code());
+        }
+    };
+    let mut args = resolved_args.into_iter();
     let Some(command) = args.next() else {
         print_help();
         return;
@@ -3921,18 +3975,39 @@ fn run_pull_models(args: &[String]) -> i32 {
 
     let embed = dir.join("mxbai-embed-large");
     let rerank = dir.join("mxbai-rerank-base");
-    println!(
-        "\nDone. Models installed under: {}\n\
-         Point the daemon at them (add to your shell profile or memkeeper launch env):\n\n  \
-         export MEMKEEPER_EMBED_MODEL_DIR=\"{}\"\n  \
-         export MEMKEEPER_RERANK_MODEL_DIR=\"{}\"\n\n\
-         Then `memkeeper serve` runs with semantics on. To require it (fail closed if\n\
-         the models go missing), also set MEMKEEPER_REQUIRE_SEMANTIC=1.",
-        dir.display(),
-        embed.display(),
-        rerank.display(),
+    print_models_env_hint(
+        &dir.display().to_string(),
+        &embed.display().to_string(),
+        &rerank.display().to_string(),
     );
     0
+}
+
+/// Print the post-download env-setup hint in the host shell's dialect (PowerShell
+/// on Windows, POSIX `export` elsewhere) so a copy-paste just works.
+fn print_models_env_hint(root: &str, embed_path: &str, rerank_path: &str) {
+    if cfg!(windows) {
+        println!(
+            "\nDone. Models installed under: {root}\n\
+             Point the daemon at them — in PowerShell:\n\n  \
+             $env:MEMKEEPER_EMBED_MODEL_DIR = \"{embed_path}\"\n  \
+             $env:MEMKEEPER_RERANK_MODEL_DIR = \"{rerank_path}\"\n\n  \
+             # persist across sessions (new shells):\n  \
+             setx MEMKEEPER_EMBED_MODEL_DIR \"{embed_path}\"\n  \
+             setx MEMKEEPER_RERANK_MODEL_DIR \"{rerank_path}\"\n\n\
+             Then `memkeeper serve` runs with semantics on. To require it (fail closed if\n\
+             the models go missing), also set MEMKEEPER_REQUIRE_SEMANTIC=1.",
+        );
+    } else {
+        println!(
+            "\nDone. Models installed under: {root}\n\
+             Point the daemon at them (add to your shell profile or memkeeper launch env):\n\n  \
+             export MEMKEEPER_EMBED_MODEL_DIR=\"{embed_path}\"\n  \
+             export MEMKEEPER_RERANK_MODEL_DIR=\"{rerank_path}\"\n\n\
+             Then `memkeeper serve` runs with semantics on. To require it (fail closed if\n\
+             the models go missing), also set MEMKEEPER_REQUIRE_SEMANTIC=1.",
+        );
+    }
 }
 
 /// `curl -fL --retry 3 --proto =https --tlsv1.2 -o <out> <url>` — fail loud on
@@ -3998,13 +4073,15 @@ fn print_help() {
            hook retrieve [--store <path>] [--sock <path>]  Claude Code UserPromptSubmit hook client.\n\
            serve --stdio | --socket <path>       Serve newline-delimited JSON requests (stdio or Unix socket).\n\
            mcp [--store <path>]                  Speak MCP (JSON-RPC 2.0) over stdio for any MCP client.\n\
-           serve --http [addr]                   Serve the read-only local dashboard (default 127.0.0.1:7777).\n\
+           serve --http [addr] [--store <path>]  Serve the read-only local dashboard (default 127.0.0.1:7777).\n\
            schema [command] [--json]              Show accepted JSON payload fields for a command (or list all).\n\
            schema-status                          Check embedded schema metadata.\n\
            pull-models [--quantized] [--dir <path>] Download the ONNX embed+rerank models (needs curl).\n\
            --help, help                           Show this help.\n\
            --version, version                     Show protocol/schema version.\n\n\
          Per-command request/response shapes: run `memkeeper schema <command>`.\n\
+         A `--json` value may be `@<file>` (read the payload from a file) or `-` (read it from stdin),\n\
+         which avoids inline-quoting pitfalls (e.g. in Windows PowerShell).\n\
          CLI commands are store-path explicit except read-only doctor diagnostics; hints are user={USER_STORE_PATH_HINT} project={PROJECT_STORE_RELATIVE_PATH}"
     );
 }

@@ -55,7 +55,9 @@ cargo build --release
   --json '{"query":"where are memories stored","limit":3}'
 ```
 
-The store defaults to `~/.memkeeper/store.sqlite` when `--store` is omitted.
+The store defaults to `~/.memkeeper/store.sqlite` when `--store` is omitted. A
+`--json` value can also be `@<file>` or `-` (stdin) instead of an inline string,
+which avoids shell-quoting pitfalls (handy in Windows PowerShell).
 
 ## What to store
 
@@ -242,7 +244,9 @@ With no token set, the HTTP server is read-only.
 ## The dashboard
 
 `memkeeper serve --http` starts a read-only local dashboard (default
-`http://127.0.0.1:7777`) for browsing memories and the entity graph.
+`http://127.0.0.1:7777`) for browsing memories and the entity graph. Point it at a
+store with `--store <path>` (or `MEMKEEPER_STORE`); it uses the default store
+otherwise.
 
 **A fresh store starts empty — that's expected.** Two views, populated
 differently:

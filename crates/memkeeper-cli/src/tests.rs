@@ -1249,3 +1249,41 @@ fn dream_flags_override_json_payload() {
     let parsed = parse_dream_args(&args).expect("parse succeeds");
     assert!(!parsed.request.dry_run);
 }
+
+#[test]
+fn resolve_json_args_inlines_file_and_passes_through_literals() {
+    use std::io::Write;
+
+    // A literal JSON payload is left untouched.
+    let literal = super::resolve_json_args(vec![
+        "remember".to_string(),
+        "--json".to_string(),
+        r#"{"content":"x"}"#.to_string(),
+    ])
+    .expect("literal passes through");
+    assert_eq!(literal[2], r#"{"content":"x"}"#);
+
+    // `--json=@<file>` inlines the file contents (and the `=` form is preserved).
+    let mut path = std::env::temp_dir();
+    path.push(format!("memkeeper-json-arg-{}.json", std::process::id()));
+    write!(
+        std::fs::File::create(&path).expect("create temp"),
+        r#"{{"content":"from file"}}"#
+    )
+    .expect("write temp");
+    let from_file = super::resolve_json_args(vec![
+        "remember".to_string(),
+        format!("--json=@{}", path.display()),
+    ])
+    .expect("file resolves");
+    assert_eq!(from_file[1], r#"--json={"content":"from file"}"#);
+    let _ = std::fs::remove_file(&path);
+
+    // A missing `@<file>` is a loud error, not a silent literal.
+    assert!(super::resolve_json_args(vec![
+        "remember".to_string(),
+        "--json".to_string(),
+        "@/no/such/memkeeper/file.json".to_string(),
+    ])
+    .is_err());
+}

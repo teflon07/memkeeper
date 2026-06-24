@@ -232,8 +232,8 @@ pub(crate) fn run_serve(args: &[String]) -> i32 {
         }
     }
 
-    let mode = match parse_serve_args(args) {
-        Ok(args) => args.mode,
+    let parsed = match parse_serve_args(args) {
+        Ok(parsed) => parsed,
         Err(error) => {
             println!(
                 "{}",
@@ -242,6 +242,7 @@ pub(crate) fn run_serve(args: &[String]) -> i32 {
             return error.exit_code();
         }
     };
+    let ServeArgs { mode, store_path } = parsed;
 
     let semantic_models = SemanticModels::for_serve();
     // Second guard, one layer deeper: a semantic build whose model files are
@@ -259,7 +260,9 @@ pub(crate) fn run_serve(args: &[String]) -> i32 {
     match mode {
         ServeMode::Stdio => run_serve_stdio(&semantic_models),
         ServeMode::Socket(path) => run_serve_socket(&path, &semantic_models),
-        ServeMode::Http(addr) => crate::dashboard::run_serve_http(&addr, &semantic_models),
+        ServeMode::Http(addr) => {
+            crate::dashboard::run_serve_http(&addr, &semantic_models, store_path.as_deref())
+        }
     }
 }
 
@@ -372,6 +375,9 @@ pub(crate) enum ServeMode {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ServeArgs {
     pub(crate) mode: ServeMode,
+    /// Default store for the HTTP dashboard (`--store`). Unused by stdio/socket
+    /// modes, where each request carries its own `store_path`.
+    pub(crate) store_path: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -388,10 +394,15 @@ pub(crate) fn parse_serve_args(args: &[String]) -> Result<ServeArgs, CliError> {
     let mut stdio = false;
     let mut socket: Option<PathBuf> = None;
     let mut http: Option<String> = None;
+    let mut store: Option<PathBuf> = None;
 
     while let Some(arg) = parser.next() {
         match arg.as_str() {
             "--stdio" => stdio = true,
+            "--store" => store = Some(parser.required_value("--store")?),
+            value if value.starts_with("--store=") => {
+                store = Some(PathBuf::from(value.trim_start_matches("--store=")));
+            }
             "--socket" => socket = Some(parser.required_value("--socket")?),
             "--http" => {
                 // Optional address: `--http` alone binds the loopback default;
@@ -425,16 +436,19 @@ pub(crate) fn parse_serve_args(args: &[String]) -> Result<ServeArgs, CliError> {
     if stdio {
         return Ok(ServeArgs {
             mode: ServeMode::Stdio,
+            store_path: store,
         });
     }
     if let Some(path) = socket {
         return Ok(ServeArgs {
             mode: ServeMode::Socket(path),
+            store_path: store,
         });
     }
     if let Some(addr) = http {
         return Ok(ServeArgs {
             mode: ServeMode::Http(addr),
+            store_path: store,
         });
     }
     Err(CliError::InvalidRequest(
@@ -1118,6 +1132,32 @@ mod tests {
         );
         // `--http` followed by another flag uses the default and the flag errors
         // as a duplicate mode — either way it must not silently swallow --stdio.
+    }
+
+    #[test]
+    fn parse_serve_args_accepts_store_for_dashboard() {
+        // `--store` sets the dashboard's default store; `--http` before it binds
+        // the default address (the next token starts with `-`).
+        let spaced = parse_serve_args(&[
+            "--http".to_string(),
+            "--store".to_string(),
+            "/tmp/dash.sqlite".to_string(),
+        ])
+        .expect("http + store parses");
+        assert_eq!(
+            spaced.mode,
+            ServeMode::Http(crate::dashboard::DEFAULT_HTTP_ADDR.to_string())
+        );
+        assert_eq!(spaced.store_path, Some(PathBuf::from("/tmp/dash.sqlite")));
+
+        let eq_form =
+            parse_serve_args(&["--http".to_string(), "--store=/tmp/x.sqlite".to_string()])
+                .expect("store eq form");
+        assert_eq!(eq_form.store_path, Some(PathBuf::from("/tmp/x.sqlite")));
+
+        // No `--store` leaves it unset (server falls back to default resolution).
+        let none = parse_serve_args(&["--stdio".to_string()]).expect("stdio");
+        assert_eq!(none.store_path, None);
     }
 
     #[test]
