@@ -231,6 +231,7 @@ pub(crate) fn hook_query_text(prompt: &str) -> String {
     prompt.chars().take(500).collect()
 }
 
+#[cfg(unix)]
 pub(crate) fn hook_unix_request(
     sock_path: &str,
     request: &str,
@@ -261,6 +262,21 @@ pub(crate) fn hook_unix_request(
         .position(|&byte| byte == b'\n')
         .unwrap_or(response.len());
     Ok(String::from_utf8_lossy(&response[..line_end]).into_owned())
+}
+
+/// Unix-socket daemon routing is unavailable on non-Unix platforms (Rust's
+/// `UnixStream` is Unix-only). Every caller already handles an `Err` by
+/// degrading (direct dispatch / in-process models), so report it as unsupported.
+#[cfg(not(unix))]
+pub(crate) fn hook_unix_request(
+    _sock_path: &str,
+    _request: &str,
+    _timeout: std::time::Duration,
+) -> Result<String, std::io::Error> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "Unix-socket daemon is not supported on this platform",
+    ))
 }
 
 #[cfg(test)]

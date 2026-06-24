@@ -57,6 +57,7 @@ enum McpBackend {
 /// connection right now. When the var is set but the daemon is unreachable we
 /// emit a loud stderr warning and return `None` (degrade to in-process) rather
 /// than fail silently — a misconfigured socket should be visible, not masked.
+#[cfg(unix)]
 fn daemon_socket_target() -> Option<String> {
     use std::os::unix::net::UnixStream;
     let sock = non_empty_env("MEMKEEPER_SOCK")?;
@@ -70,6 +71,19 @@ fn daemon_socket_target() -> Option<String> {
             None
         }
     }
+}
+
+/// Warm-daemon socket routing is Unix-only (`UnixStream`). On other platforms
+/// always use in-process models, but stay loud if the operator set the var.
+#[cfg(not(unix))]
+fn daemon_socket_target() -> Option<String> {
+    if non_empty_env("MEMKEEPER_SOCK").is_some() {
+        eprintln!(
+            "[memkeeper] mcp: WARNING MEMKEEPER_SOCK is set but Unix-socket daemon routing is not \
+             supported on this platform; using in-process models"
+        );
+    }
+    None
 }
 
 pub(crate) fn run_mcp(args: &[String]) -> i32 {

@@ -6,6 +6,20 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html) once it reache
 1.0. Until then, minor releases may include breaking changes to the storage
 schema and wire protocol.
 
+## [0.2.1] - 2026-06-24
+
+### Changed
+- Re-published the macOS (Apple Silicon) and Linux x86_64 binaries with a clean
+  build (the v0.2.0 release workflow's Windows job failed; macOS/Linux were
+  unaffected).
+
+### In progress
+- **Windows support.** The Unix-socket code paths are now gated for non-Unix
+  targets (a prerequisite for compiling on Windows), but a Windows binary is not
+  yet published — pending build verification and a Windows CI job. When it lands,
+  `serve --socket` will be Unix-only; the http dashboard and stdio serve are
+  cross-platform.
+
 ## [0.2.0] - 2026-06-24
 
 Semantic stays the default, now with two opt-in alternatives and a download path
@@ -20,8 +34,7 @@ that can reach semantic without building from source.
 - **Prebuilt binaries now ship off-device support** (built `--features api`):
   lexical out of the box, or set an embeddings API key for semantic, with no 2GB
   model download. `MEMKEEPER_REQUIRE_SEMANTIC=1` still fails closed.
-- **Windows x86_64** release binaries (`.zip`), alongside macOS (Apple Silicon) and
-  Linux x86_64. `serve --http` and `--stdio` work; `serve --socket` is Unix-only.
+- Prebuilt binaries for macOS (Apple Silicon) and Linux x86_64.
 - Documented the embedding-model **switch** path (`reindex --embed` atomically
   re-embeds the whole store under a new model), and made `reindex` discoverable in
   `--help` with its own `reindex --help`.
@@ -68,5 +81,6 @@ Initial public release. A local-first memory engine for AI agents.
 - **Adapters**: an MCP bridge and a thin extension client.
 - Dual-licensed **MIT OR Apache-2.0**.
 
+[0.2.1]: https://github.com/teflon07/memkeeper/releases/tag/v0.2.1
 [0.2.0]: https://github.com/teflon07/memkeeper/releases/tag/v0.2.0
 [0.1.0]: https://github.com/teflon07/memkeeper/releases/tag/v0.1.0

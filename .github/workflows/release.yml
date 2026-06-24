@@ -1,10 +1,10 @@
 name: release
 
 # Tag a release to build and publish binaries:
-#   git tag v0.2.0 && git push origin v0.2.0
+#   git tag v0.2.1 && git push origin v0.2.1
 #
-# Builds the `memkeeper` binary for macOS (Apple Silicon), Linux x86_64, and
-# Windows x86_64.
+# Builds the `memkeeper` binary for macOS (Apple Silicon) and Linux x86_64.
+# (Windows is not yet published — its build is unverified; see the README/debt.)
 # `--no-default-features --features api` keeps the release artifact free of the
 # bundled ONNX model runtime (no local model download), while still supporting
 # off-device semantic: set an embeddings API key (OpenRouter / any OpenAI-compatible
@@ -32,8 +32,6 @@ jobs:
             target: aarch64-apple-darwin
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable, pinned
@@ -44,20 +42,17 @@ jobs:
       - name: Build
         run: cargo build --release --no-default-features --features api --bin memkeeper --target ${{ matrix.target }}
       - name: Smoke test
-        # Runs on every target (Git Bash on the Windows runner). `bash` runs with
-        # `-eo pipefail`, so any non-zero exit fails the job. Exercises the core
-        # path with no key configured: the binary serves lexical (BM25/FTS) here.
-        shell: bash
+        # `bash` runs with `-eo pipefail`, so any non-zero exit fails the job.
+        # Exercises the core path with no key configured: the binary serves
+        # lexical (BM25/FTS) here.
         run: |
           bin="target/${{ matrix.target }}/release/memkeeper"
-          [ -f "$bin.exe" ] && bin="$bin.exe"
           store="${RUNNER_TEMP:-/tmp}/memkeeper-smoke.sqlite"
           rm -f "$store"
           "$bin" init --store "$store" --json
           "$bin" remember --store "$store" --json '{"content":"memkeeper smoke test memory"}'
           "$bin" search --store "$store" --json '{"query":"smoke test","limit":1}'
-      - name: Package (Unix)
-        if: matrix.os != 'windows-latest'
+      - name: Package
         run: |
           staging="memkeeper-${GITHUB_REF_NAME}-${{ matrix.target }}"
           mkdir "$staging"
@@ -65,21 +60,8 @@ jobs:
           cp README.md LICENSE-MIT LICENSE-APACHE "$staging/"
           tar czf "$staging.tar.gz" "$staging"
           shasum -a 256 "$staging.tar.gz" > "$staging.tar.gz.sha256"
-      - name: Package (Windows)
-        if: matrix.os == 'windows-latest'
-        shell: pwsh
-        run: |
-          $staging = "memkeeper-$env:GITHUB_REF_NAME-${{ matrix.target }}"
-          New-Item -ItemType Directory -Path $staging | Out-Null
-          Copy-Item "target/${{ matrix.target }}/release/memkeeper.exe" $staging/
-          Copy-Item README.md, LICENSE-MIT, LICENSE-APACHE $staging/
-          Compress-Archive -Path $staging -DestinationPath "$staging.zip"
-          $hash = (Get-FileHash "$staging.zip" -Algorithm SHA256).Hash.ToLower()
-          "$hash  $staging.zip" | Out-File -Encoding ascii "$staging.zip.sha256"
       - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           files: |
             memkeeper-*.tar.gz
             memkeeper-*.tar.gz.sha256
-            memkeeper-*.zip
-            memkeeper-*.zip.sha256

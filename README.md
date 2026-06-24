@@ -173,6 +173,12 @@ and `MEMKEEPER_REQUIRE_SEMANTIC=1` makes them refuse rather than serve degraded.
 They carry no local model runtime, so for fully on-device semantic, build from
 source (`cargo build --release`) and use local models as above.
 
+Prebuilt binaries are published for **macOS (Apple Silicon)** and **Linux x86_64**.
+**Windows support is in progress** — for now, build from source on Windows
+(`cargo build --release --no-default-features --features api`). The Unix-socket
+daemon mode (`serve --socket`) will be Unix-only; the http dashboard and stdio
+serve are cross-platform.
+
 ### Switching the embedding model
 
 The embedding backend is recorded per store, and memkeeper refuses to mix vectors
