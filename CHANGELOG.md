@@ -6,6 +6,20 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html) once it reache
 1.0. Until then, minor releases may include breaking changes to the storage
 schema and wire protocol.
 
+## [0.2.4] - 2026-06-27
+
+### Changed
+- **Validity-aware retrieval.** Search now excludes logically stale facts: a
+  memory whose `valid_to` has passed, or whose `expires_at` is reached, no longer
+  surfaces in recall, even before the `dream` expire task deletes it. This changes
+  default search behavior. `memory-list` still returns stale memories so they stay
+  visible for review and cleanup.
+
+### Added
+- **Estimated context-token reporting** in the LoCoMo retrieval harness. It reports
+  `pack_tokens_est` per query (estimated as characters / 4, since no model
+  tokenizer is bundled), pairing recall accuracy with its context cost.
+
 ## [0.2.3] - 2026-06-24
 
 Cross-platform usability fixes (surfaced testing on Windows, but general).
@@ -121,6 +135,7 @@ Initial public release. A local-first memory engine for AI agents.
 - **Adapters**: an MCP bridge and a thin extension client.
 - Dual-licensed **MIT OR Apache-2.0**.
 
+[0.2.4]: https://github.com/teflon07/memkeeper/releases/tag/v0.2.4
 [0.2.3]: https://github.com/teflon07/memkeeper/releases/tag/v0.2.3
 [0.2.2]: https://github.com/teflon07/memkeeper/releases/tag/v0.2.2
 [0.2.1]: https://github.com/teflon07/memkeeper/releases/tag/v0.2.1
