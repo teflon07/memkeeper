@@ -663,6 +663,8 @@ pub(crate) fn search_filters_from_json(object: &JsonObject) -> Result<SearchFilt
         tags: optional_string_array_field(object, "tags")?.unwrap_or_default(),
         entity_keys: optional_string_array_field(object, "entity_keys")?.unwrap_or_default(),
         claim_keys: optional_string_array_field(object, "claim_keys")?.unwrap_or_default(),
+        // Search forces this on in prepare_search_request; not exposed via JSON yet.
+        hide_expired: false,
     })
 }
 

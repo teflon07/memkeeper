@@ -2977,6 +2977,98 @@ fn search_without_source_does_not_match_source_only_terms() {
 }
 
 #[test]
+fn search_excludes_expired_and_past_valid_to_but_memory_list_keeps_them() {
+    let path = temp_store_path("search_excludes_expired_and_past_valid_to");
+    cleanup_store(&path);
+    init_store(&path).expect("init succeeds");
+
+    // All four share the query terms "retention policy" and a "rtest" tag.
+    let mut fresh = basic_request("retention policy stays fresh");
+    fresh.tags = vec!["rtest".to_string()];
+    let fresh = remember_memory(&path, &fresh).expect("fresh");
+
+    let mut future = basic_request("retention policy valid into the future");
+    future.tags = vec!["rtest".to_string()];
+    future.valid_to = Some("2999-01-01T00:00:00Z".to_string());
+    let future = remember_memory(&path, &future).expect("future");
+
+    let mut stale = basic_request("retention policy went stale long ago");
+    stale.tags = vec!["rtest".to_string()];
+    stale.valid_to = Some("2000-01-01T00:00:00Z".to_string());
+    let stale = remember_memory(&path, &stale).expect("stale");
+
+    let mut expired = basic_request("retention policy has already expired");
+    expired.tags = vec!["rtest".to_string()];
+    expired.expires_at = Some("2000-01-01T00:00:00Z".to_string());
+    let expired = remember_memory(&path, &expired).expect("expired");
+
+    // Search hides the past-valid_to and reached-expires_at memories.
+    let report = search_memories(
+        &path,
+        &SearchRequest {
+            query: "retention policy".to_string(),
+            filters: SearchFilters::default(),
+            limit: 10,
+            offset: 0,
+            snippet_chars: 120,
+            include_content: false,
+            include_source: false,
+            semantic_fallback: "disabled".to_string(),
+            lexical_fallback: "conservative".to_string(),
+            embedding: None,
+            query_token_embedding: None,
+            token_model_id: None,
+        },
+    )
+    .expect("search succeeds");
+
+    let returned: Vec<&str> = report
+        .results
+        .iter()
+        .map(|r| r.memory_id.as_str())
+        .collect();
+    assert!(returned.contains(&fresh.memory.id.as_str()), "fresh kept");
+    assert!(
+        returned.contains(&future.memory.id.as_str()),
+        "future valid_to kept"
+    );
+    assert!(
+        !returned.contains(&stale.memory.id.as_str()),
+        "past valid_to hidden from search"
+    );
+    assert!(
+        !returned.contains(&expired.memory.id.as_str()),
+        "reached expires_at hidden from search"
+    );
+    assert_eq!(report.results.len(), 2, "only the two current memories");
+
+    // memory-list is for review and must still surface the stale ones.
+    let listed = list_memories(
+        &path,
+        &MemoryListRequest {
+            filters: SearchFilters {
+                tags: vec!["rtest".to_string()],
+                ..SearchFilters::default()
+            },
+            limit: 10,
+            offset: 0,
+            snippet_chars: 40,
+            include_content: false,
+            include_source: false,
+            order: "updated_desc".to_string(),
+        },
+    )
+    .expect("list succeeds");
+    assert_eq!(
+        listed.results.len(),
+        4,
+        "memory-list keeps stale memories visible for cleanup"
+    );
+
+    cleanup_store(&path);
+}
+
+#[test]
 fn search_defaults_to_active_workspace_and_supports_explicit_superseded_filter() {
     let path = temp_store_path(
         "search_defaults_to_active_workspace_and_supports_explicit_superseded_filter",

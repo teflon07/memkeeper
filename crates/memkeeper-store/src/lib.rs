@@ -966,6 +966,11 @@ pub struct SearchFilters {
     pub entity_keys: Vec<String>,
     /// Claim keys.
     pub claim_keys: Vec<String>,
+    /// When true, exclude memories that are no longer valid: `valid_to` in the
+    /// past or `expires_at` reached. Set on the search path so recall never
+    /// surfaces logically stale facts; left false for review listings
+    /// (memory-list) so stale memories stay visible for cleanup.
+    pub hide_expired: bool,
 }
 
 /// Deterministic graph entity upsert request.
@@ -11017,6 +11022,11 @@ fn prepare_search_request(request: &SearchRequest) -> Result<PreparedSearchReque
     if filters.statuses.is_empty() {
         filters.statuses.push(status::ACTIVE.to_string());
     }
+    // Recall must not surface logically stale facts. Past-`valid_to` and
+    // reached-`expires_at` memories are excluded from search even before the
+    // dream expire task deletes them. (An API escape hatch can later set this
+    // false; the search path forces it on for now.)
+    filters.hide_expired = true;
     filters = normalize_search_filters(filters)?;
     validate_search_filters(&filters)?;
 
@@ -12504,6 +12514,18 @@ fn filter_predicates(filters: &SearchFilters, args: &mut SqlArgs) -> Vec<String>
             "EXISTS (SELECT 1 FROM memory_tags mt WHERE mt.memory_id = m.id AND mt.tag IN ({}))",
             args.placeholder_list(&normalized_tags(&filters.tags).expect("validated tags"))
         ));
+    }
+    if filters.hide_expired {
+        // Exclude logically stale facts from recall: a memory whose `valid_to`
+        // has passed, or whose `expires_at` has been reached, is no longer
+        // current even if the dream expire task has not yet removed it.
+        // Mirrors the `active_past_valid_to` stats diagnostic's clock
+        // (`julianday('now')`, consistent within a single SQLite statement).
+        predicates
+            .push("(m.valid_to IS NULL OR julianday(m.valid_to) >= julianday('now'))".to_string());
+        predicates.push(
+            "(m.expires_at IS NULL OR julianday(m.expires_at) > julianday('now'))".to_string(),
+        );
     }
     predicates
 }

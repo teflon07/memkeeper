@@ -622,8 +622,16 @@ def add_to_bucket(bucket: AggregateBucket, result: RetrievalResult) -> None:
         bucket.semantic_attempted += int(result.semantic_attempted)
 
 
+# Rough LLM-token approximation. No model tokenizer is bundled, so context cost
+# is reported as an estimate of chars / 4 (typical English ratio). Labeled
+# `_est` everywhere it surfaces so it is never mistaken for an exact count.
+CHARS_PER_TOKEN = 4
+
+
 def bucket_summary(bucket: AggregateBucket) -> dict[str, Any]:
     latencies = bucket.latency_values
+    char_avg = (sum(bucket.char_values) / len(bucket.char_values)) if bucket.char_values else 0.0
+    char_max = max(bucket.char_values, default=0)
     return {
         "total": bucket.total,
         "with_evidence": bucket.with_evidence,
@@ -637,9 +645,13 @@ def bucket_summary(bucket: AggregateBucket) -> dict[str, Any]:
             "max": max(latencies, default=0.0),
         },
         "pack_chars": {
-            "avg": (sum(bucket.char_values) / len(bucket.char_values)) if bucket.char_values else 0.0,
-            "max": max(bucket.char_values, default=0),
+            "avg": char_avg,
+            "max": char_max,
             "avg_budget_usage": (sum(bucket.budget_values) / len(bucket.budget_values)) if bucket.budget_values else 0.0,
+        },
+        "pack_tokens_est": {
+            "avg": char_avg / CHARS_PER_TOKEN,
+            "max": char_max / CHARS_PER_TOKEN,
         },
         "truncation_rate": (bucket.truncated / bucket.total) if bucket.total else 0.0,
         "source_leak_rate": (bucket.source_leak_count / bucket.total) if bucket.total else 0.0,
