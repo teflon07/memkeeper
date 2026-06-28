@@ -6,6 +6,16 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html) once it reache
 1.0. Until then, minor releases may include breaking changes to the storage
 schema and wire protocol.
 
+## [0.2.5] - 2026-06-28
+
+### Added
+- **Alias-exact-match retrieval boost.** A query token that exactly matches a
+  memory's reserved `alias::<normalized>` tag now adds a fixed boost to that
+  memory's retrieval score, lifting exact alias hits (e.g. "k8s" → the Kubernetes
+  memory) above semantically-similar neighbors near the abstention floor. Matching
+  uses normalized 1–3-word query shingles, so multi-word aliases ("dead letter
+  queue") resolve too. Reuses tag storage; no schema or wire-protocol change.
+
 ## [0.2.4] - 2026-06-27
 
 ### Changed
@@ -135,6 +145,7 @@ Initial public release. A local-first memory engine for AI agents.
 - **Adapters**: an MCP bridge and a thin extension client.
 - Dual-licensed **MIT OR Apache-2.0**.
 
+[0.2.5]: https://github.com/teflon07/memkeeper/releases/tag/v0.2.5
 [0.2.4]: https://github.com/teflon07/memkeeper/releases/tag/v0.2.4
 [0.2.3]: https://github.com/teflon07/memkeeper/releases/tag/v0.2.3
 [0.2.2]: https://github.com/teflon07/memkeeper/releases/tag/v0.2.2
