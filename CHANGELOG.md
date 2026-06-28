@@ -6,6 +6,16 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html) once it reache
 1.0. Until then, minor releases may include breaking changes to the storage
 schema and wire protocol.
 
+## [0.2.7] - 2026-06-28
+
+### Added
+- **`doctor` reports semantic readiness.** `memkeeper doctor` now includes a
+  `semantic.models` check: `ok` when the local embed model is present, a
+  `warning` pointing at `pull-models` (and naming the resolved model dir) when a
+  semantic-capable build has no models yet, or a note for lexical-only builds.
+  Overall doctor status is unchanged — lexical still works — so it's guidance,
+  not a failure.
+
 ## [0.2.6] - 2026-06-28
 
 ### Changed
@@ -164,6 +174,7 @@ Initial public release. A local-first memory engine for AI agents.
 - **Adapters**: an MCP bridge and a thin extension client.
 - Dual-licensed **MIT OR Apache-2.0**.
 
+[0.2.7]: https://github.com/teflon07/memkeeper/releases/tag/v0.2.7
 [0.2.6]: https://github.com/teflon07/memkeeper/releases/tag/v0.2.6
 [0.2.5]: https://github.com/teflon07/memkeeper/releases/tag/v0.2.5
 [0.2.4]: https://github.com/teflon07/memkeeper/releases/tag/v0.2.4

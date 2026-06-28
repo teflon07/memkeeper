@@ -156,6 +156,23 @@ fn parse_doctor_supports_optional_store_and_no_indexes() {
 }
 
 #[test]
+fn doctor_reports_semantic_models_check() {
+    // The semantic-readiness check is the onboarding signal (does the user need
+    // `pull-models`?). Guard that doctor emits it so a refactor can't silently
+    // drop it. Present in both semantic and lexical-only builds.
+    let args = parse_doctor_args(&[
+        "--store".to_string(),
+        "/nonexistent/doctor-semantic-check.sqlite".to_string(),
+    ])
+    .expect("parse succeeds");
+    let (json, _) = crate::output::doctor_result_json(&args);
+    assert!(
+        json.contains("semantic.models"),
+        "doctor output must include the semantic.models check: {json}"
+    );
+}
+
+#[test]
 fn parse_stats_supports_no_indexes() {
     let args = [
         "--store".to_string(),

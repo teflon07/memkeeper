@@ -188,6 +188,37 @@ fn resolve_local_model_dir(env_var: &str, subdir: &str) -> std::path::PathBuf {
     )
 }
 
+/// Where the local embed/rerank models are expected and whether they're present.
+/// Lets `doctor` report semantic readiness and point at `pull-models` instead of
+/// the user discovering lexical fallback only when a query underperforms.
+#[cfg(feature = "local")]
+#[derive(Debug, Clone)]
+pub struct LocalModelStatus {
+    /// Resolved directory where the embed model is expected.
+    pub embed_dir: std::path::PathBuf,
+    /// Whether the embed `model.onnx` is present in `embed_dir`.
+    pub embed_present: bool,
+    /// Resolved directory where the rerank model is expected.
+    pub rerank_dir: std::path::PathBuf,
+    /// Whether the rerank `model.onnx` is present in `rerank_dir`.
+    pub rerank_present: bool,
+}
+
+/// Report the resolved local model dirs and whether each model file is present.
+/// Presence checks the `model.onnx` file (an empty dir is not "present").
+#[cfg(feature = "local")]
+#[must_use]
+pub fn local_model_status() -> LocalModelStatus {
+    let embed_dir = resolve_local_model_dir("MEMKEEPER_EMBED_MODEL_DIR", "mxbai-embed-large");
+    let rerank_dir = resolve_local_model_dir("MEMKEEPER_RERANK_MODEL_DIR", "mxbai-rerank-base");
+    LocalModelStatus {
+        embed_present: embed_dir.join("model.onnx").is_file(),
+        rerank_present: rerank_dir.join("model.onnx").is_file(),
+        embed_dir,
+        rerank_dir,
+    }
+}
+
 #[cfg(feature = "local")]
 fn local_embedder_from_env() -> Option<EmbedModel> {
     let dir = resolve_local_model_dir("MEMKEEPER_EMBED_MODEL_DIR", "mxbai-embed-large");

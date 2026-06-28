@@ -534,6 +534,39 @@ pub(crate) fn doctor_checks_json(
             "initialized store reports journal mode",
         ));
     }
+    // Semantic readiness: the onboarding-critical signal. A semantic-capable
+    // binary with no models pulled silently serves lexical, so surface it here
+    // and point at `pull-models` rather than leaving the user to infer it.
+    #[cfg(feature = "semantic")]
+    {
+        let model_status = memkeeper_embed::local_model_status();
+        let (level, message) = if model_status.embed_present {
+            (
+                "ok",
+                format!(
+                    "semantic ready (embed model at {})",
+                    model_status.embed_dir.display()
+                ),
+            )
+        } else {
+            (
+                "warning",
+                format!(
+                    "semantic available but models not downloaded — run `memkeeper pull-models` (looked in {})",
+                    model_status.embed_dir.display()
+                ),
+            )
+        };
+        checks.push(doctor_check_json("semantic.models", level, &message));
+    }
+    #[cfg(not(feature = "semantic"))]
+    {
+        checks.push(doctor_check_json(
+            "semantic.models",
+            "ok",
+            "lexical-only build (BM25/FTS); semantic not compiled in",
+        ));
+    }
     format!("[{}]", checks.join(","))
 }
 
