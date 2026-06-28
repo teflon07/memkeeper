@@ -6,6 +6,16 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html) once it reache
 1.0. Until then, minor releases may include breaking changes to the storage
 schema and wire protocol.
 
+## [0.2.8] - 2026-06-28
+
+### Changed
+- **Richer MCP tool definitions.** All 16 tools exposed over `memkeeper mcp` now
+  carry full, agent-facing descriptions: each tool states its purpose, when to
+  use it versus similar tools, and whether it is read-only or mutating, and every
+  parameter documents its type, default, and constraints. No change to the tool
+  surface (names/arguments) — better guidance for agents (and higher
+  tool-definition-quality scores).
+
 ## [0.2.7] - 2026-06-28
 
 ### Added
@@ -174,6 +184,7 @@ Initial public release. A local-first memory engine for AI agents.
 - **Adapters**: an MCP bridge and a thin extension client.
 - Dual-licensed **MIT OR Apache-2.0**.
 
+[0.2.8]: https://github.com/teflon07/memkeeper/releases/tag/v0.2.8
 [0.2.7]: https://github.com/teflon07/memkeeper/releases/tag/v0.2.7
 [0.2.6]: https://github.com/teflon07/memkeeper/releases/tag/v0.2.6
 [0.2.5]: https://github.com/teflon07/memkeeper/releases/tag/v0.2.5
