@@ -14,6 +14,10 @@ RUN apt-get update \
 # MEMKEEPER_VERSION pins a specific release (e.g. v0.2.9) — pass it via
 # `--build-arg` to make the image reproducible; empty (the default, e.g. Glama
 # builds) installs the latest release.
+# Ownership label the official MCP registry checks: its value MUST equal the
+# `name` in server.json, or `mcp-publisher publish` fails OCI verification.
+LABEL io.modelcontextprotocol.server.name="io.github.teflon07/memkeeper"
+
 ARG MEMKEEPER_VERSION=""
 RUN curl -fsSL https://raw.githubusercontent.com/teflon07/memkeeper/main/install.sh \
       | MEMKEEPER_INSTALL_DIR=/usr/local/bin MEMKEEPER_VERSION="$MEMKEEPER_VERSION" bash
