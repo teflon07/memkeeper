@@ -4,6 +4,10 @@
 
 <p align="center"><em>Most software has the memory of a goldfish. This one doesn&rsquo;t.</em></p>
 
+<p align="center">
+  <a href="https://glama.ai/mcp/servers/teflon07/memkeeper"><img src="https://glama.ai/mcp/servers/teflon07/memkeeper/badges/score.svg" alt="memkeeper MCP server quality score on Glama" /></a>
+</p>
+
 # memkeeper
 
 Local-first memory for AI agents. A fast, embeddable memory engine that stores,
