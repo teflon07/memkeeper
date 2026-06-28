@@ -330,6 +330,17 @@ Then `memkeeper pull-models` to enable semantic, exactly as in the Quickstart.
 Editor/agent integrations live under `adapters/` (an MCP bridge and a thin
 extension client).
 
+## Further reading
+
+Design notes and benchmarks on the [memkeeper blog](https://memkeeper.ai/blog/):
+
+- [Local-first memory for AI agents](https://memkeeper.ai/blog/local-first-memory-for-ai-agents): why the default should be your own machine, not a hosted vector DB.
+- [Why hybrid retrieval beats pure vector search](https://memkeeper.ai/blog/hybrid-retrieval-vs-vector-search): what BM25, dense embeddings, and a cross-encoder each cover.
+- [A memory that says "I don't know"](https://memkeeper.ai/blog/memory-that-says-i-dont-know): abstention, and the number we publish to prove it.
+- [Benchmarking agent memory on LoCoMo](https://memkeeper.ai/blog/benchmarking-agent-memory-locomo): the method and a script to reproduce the numbers.
+- [Where memkeeper fits](https://memkeeper.ai/blog/where-memkeeper-fits): an honest comparison to mem0, Zep, and Graphiti.
+- [Getting started in ten minutes](https://memkeeper.ai/blog/getting-started-with-memkeeper): from install to recall, including MCP wiring.
+
 ## Memkeeper family
 
 [Warden](https://github.com/teflon07/memkeeper-warden) is a companion capability
