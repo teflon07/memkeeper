@@ -9719,6 +9719,10 @@ struct PreparedSearchRequest {
     fallback_fts_query: Option<String>,
     prefix_fts_query: Option<String>,
     terms: Vec<String>,
+    /// Normalized 1..=3-word contiguous shingles of the raw query, used to match
+    /// reserved `alias::<normalized>` tags for the alias-exact-match boost. Built
+    /// from the raw query (not `terms`, which is sorted/deduped and loses order).
+    query_alias_shingles: std::collections::HashSet<String>,
     filters: SearchFilters,
     limit: usize,
     /// Inflated SQL LIMIT for the initial candidate fetch. Always >= limit.
@@ -10967,6 +10971,38 @@ fn prepare_memory_list_request(request: &MemoryListRequest) -> Result<PreparedMe
     })
 }
 
+/// Reserved tag prefix marking an alias/canonical surface form for a memory.
+/// A memory tagged `alias::k8s` is boosted when a query contains the token `k8s`.
+pub const ALIAS_TAG_PREFIX: &str = "alias::";
+/// Additive boost applied once when any query shingle matches a candidate's
+/// `alias::` tag. Sized in the `fts_score` band (max 1.0) so an exact alias hit
+/// lifts a topically-weak-but-correct match above semantic noise near the
+/// abstention floor, without overriding a strong topical match outright.
+const ALIAS_MATCH_BOOST: f64 = 0.5;
+/// Longest multi-word alias we shingle for (e.g. "point of view", "ci pipeline").
+const MAX_ALIAS_SHINGLE_WORDS: usize = 3;
+
+/// Build the set of normalized 1..=`MAX_ALIAS_SHINGLE_WORDS`-word contiguous
+/// shingles from the raw query, preserving word order. Normalization matches
+/// `normalized_alias` (lowercase + single-space) so shingles compare directly
+/// against the suffix of an `alias::<normalized>` tag.
+fn query_alias_shingles(query: &str) -> std::collections::HashSet<String> {
+    let words: Vec<String> = query
+        .split(|c: char| !(c.is_alphanumeric() || c == '_'))
+        .filter(|word| !word.is_empty())
+        .map(str::to_ascii_lowercase)
+        .collect();
+    let mut shingles = std::collections::HashSet::new();
+    for start in 0..words.len() {
+        for span in 1..=MAX_ALIAS_SHINGLE_WORDS {
+            if start + span <= words.len() {
+                shingles.insert(words[start..start + span].join(" "));
+            }
+        }
+    }
+    shingles
+}
+
 fn prepare_search_request(request: &SearchRequest) -> Result<PreparedSearchRequest> {
     if request.limit == 0 || request.limit > MAX_SEARCH_LIMIT {
         return Err(Error::InvalidRequest {
@@ -11066,6 +11102,7 @@ fn prepare_search_request(request: &SearchRequest) -> Result<PreparedSearchReque
         fallback_fts_query,
         prefix_fts_query,
         terms,
+        query_alias_shingles: query_alias_shingles(&request.query),
         filters,
         limit: request.limit,
         candidate_pool_limit,
@@ -12686,6 +12723,19 @@ fn metadata_score(candidate: &SearchCandidate, request: &PreparedSearchRequest) 
         .any(|tag| request.filters.tags.contains(tag))
     {
         score += 0.05;
+    }
+    // Alias-exact-match boost: a query token matching a memory's reserved
+    // `alias::<normalized>` tag is a strong, precise relevance signal that BM25
+    // dilutes across a long query. Boosting it lets a topically-weak-but-correct
+    // alias hit (e.g. "TypeScript" -> the TS preference) clear the abstention
+    // floor while semantic neighbors stay below it. Fires at most once.
+    if !request.query_alias_shingles.is_empty()
+        && candidate.tags.iter().any(|tag| {
+            tag.strip_prefix(ALIAS_TAG_PREFIX)
+                .is_some_and(|alias| request.query_alias_shingles.contains(alias))
+        })
+    {
+        score += ALIAS_MATCH_BOOST;
     }
     score
 }

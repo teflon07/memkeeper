@@ -8970,3 +8970,77 @@ fn mark_extracted_rejects_empty_request() {
         Err(Error::InvalidRequest { .. })
     ));
 }
+
+#[test]
+fn query_alias_shingles_builds_ordered_ngrams() {
+    let shingles = super::query_alias_shingles("Replay items from the DLQ pipeline");
+    // single tokens (lowercased)
+    assert!(shingles.contains("dlq"));
+    assert!(shingles.contains("pipeline"));
+    // contiguous multi-word shingles, order-preserving
+    assert!(shingles.contains("dlq pipeline"));
+    assert!(shingles.contains("from the dlq"));
+    // not a contiguous span -> absent
+    assert!(!shingles.contains("replay dlq"));
+    // capped at MAX_ALIAS_SHINGLE_WORDS (3) -> no 4-word shingle
+    assert!(!shingles.contains("replay items from the"));
+}
+
+#[test]
+fn alias_tag_boost_outranks_topical_neighbor() {
+    let path = temp_store_path("alias_tag_boost_outranks_topical_neighbor");
+    init_store(&path).expect("init succeeds");
+
+    // A is reachable by its alias "k8s" only via the reserved alias:: tag;
+    // B is a topical neighbor that shares the "pods" token but has no alias tag.
+    let mut a = remember_request("Container orchestration scheduling pods across nodes.");
+    a.tags = vec![format!("{}k8s", super::ALIAS_TAG_PREFIX)];
+    let a_id = remember_memory(&path, &a).expect("remember A").memory.id;
+
+    let b = remember_request("Container orchestration scheduling pods across cluster nodes.");
+    let b_id = remember_memory(&path, &b).expect("remember B").memory.id;
+
+    let report = search_memories(
+        &path,
+        &SearchRequest {
+            query: "k8s pods".to_string(),
+            filters: SearchFilters::default(),
+            limit: 10,
+            offset: 0,
+            snippet_chars: 20,
+            include_content: false,
+            include_source: false,
+            semantic_fallback: "disabled".to_string(),
+            lexical_fallback: "disabled".to_string(),
+            embedding: None,
+            query_token_embedding: None,
+            token_model_id: None,
+        },
+    )
+    .expect("search succeeds");
+
+    let a_res = report
+        .results
+        .iter()
+        .find(|r| r.memory_id == a_id)
+        .expect("A retrieved");
+    let b_res = report.results.iter().find(|r| r.memory_id == b_id);
+
+    // The alias boost must actually fire on A's metadata component. If a future
+    // edit drops the boost (or the alias:: tag convention), this fails loudly
+    // rather than silently degrading retrieval precision.
+    assert!(
+        a_res.scores.metadata >= super::ALIAS_MATCH_BOOST,
+        "alias-tagged A should carry the alias-match boost in its metadata score, got {}",
+        a_res.scores.metadata
+    );
+    // And the boost must lift A above the topical-only neighbor B.
+    if let Some(b_res) = b_res {
+        assert!(
+            a_res.score > b_res.score,
+            "alias-matched A ({}) should outrank topical neighbor B ({})",
+            a_res.score,
+            b_res.score
+        );
+    }
+}
