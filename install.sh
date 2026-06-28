@@ -72,19 +72,28 @@ install -m 0755 "$bin" "$INSTALL_DIR/memkeeper"
 echo "==> Installed memkeeper $version -> $INSTALL_DIR/memkeeper"
 
 # --- next steps --------------------------------------------------------------
+# Use a bare `memkeeper` in the printed steps only when the install dir is
+# already on PATH; otherwise use the full path so the commands copy-paste and run
+# on a fresh shell, and show how to add it to PATH permanently.
 case ":$PATH:" in
-  *":$INSTALL_DIR:"*) ;;
-  *) echo "    Note: $INSTALL_DIR is not on your PATH. Add:  export PATH=\"$INSTALL_DIR:\$PATH\"" ;;
+  *":$INSTALL_DIR:"*)
+    cmd="memkeeper"
+    ;;
+  *)
+    cmd="$INSTALL_DIR/memkeeper"
+    echo "    Note: $INSTALL_DIR is not on your PATH yet. Add it for a bare \`memkeeper\`:"
+    echo "      export PATH=\"$INSTALL_DIR:\$PATH\""
+    ;;
 esac
 
-cat <<'EOF'
+cat <<EOF
 
 Next steps:
-  memkeeper pull-models    # one-time: fetch on-device embed + rerank models (semantic search)
-  memkeeper doctor         # verify your setup
-  memkeeper init           # create a store
-  memkeeper remember --json '{"content":"memkeeper remembers this across sessions"}'
-  memkeeper search   --json '{"query":"what does memkeeper remember","limit":5}'
+  $cmd pull-models    # one-time: fetch on-device embed + rerank models (semantic search)
+  $cmd doctor         # verify your setup
+  $cmd init           # create a store
+  $cmd remember --json '{"content":"memkeeper remembers this across sessions"}'
+  $cmd search   --json '{"query":"what does memkeeper remember","limit":5}'
 
 Docs: https://github.com/teflon07/memkeeper
 EOF

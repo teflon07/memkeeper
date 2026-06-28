@@ -178,10 +178,10 @@ runtime entirely (see [Build from source](#build-from-source)).
 
 ### Off-device semantic (no model download)
 
-To get semantic quality without downloading the ONNX models, point memkeeper at an
-OpenAI-compatible embeddings API (OpenAI, OpenRouter, or any compatible proxy). This
-mode embeds and reranks over the network instead of loading local models, so it
-needs no `pull-models` and carries no ONNX runtime:
+Prefer not to download the ONNX models? Point memkeeper at an OpenAI-compatible
+embeddings API (OpenAI, OpenRouter, or any compatible proxy) instead. This mode
+embeds and reranks over the network rather than loading the local models, so it
+needs no `pull-models`:
 
 ```sh
 # Embeddings (required for semantic): any OpenAI-compatible /embeddings endpoint.
@@ -197,11 +197,11 @@ export MEMKEEPER_RERANK_API_KEY=sk-...
 export MEMKEEPER_RERANK_MODEL=cohere/rerank-v3.5
 ```
 
-The **prebuilt release binaries are built this way** (`--features api`): with a key
-configured they do off-device semantic; with no key they serve lexical (BM25/FTS),
-and `MEMKEEPER_REQUIRE_SEMANTIC=1` makes them refuse rather than serve degraded.
-They carry no local model runtime, so for fully on-device semantic, build from
-source (`cargo build --release`) and use local models as above.
+The **prebuilt release binaries support all three modes** (`--features semantic,api`):
+run `pull-models` for fully on-device local semantic (the default and recommended
+mode), configure an API key for off-device semantic, or configure neither and they
+serve lexical (BM25/FTS). `MEMKEEPER_REQUIRE_SEMANTIC=1` makes them refuse rather
+than serve degraded.
 
 Prebuilt binaries are published for **macOS (Apple Silicon)** and **Linux x86_64**.
 **Windows is experimental** — there's no prebuilt binary, but it builds and runs
