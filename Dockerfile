@@ -9,10 +9,14 @@ RUN apt-get update \
  && apt-get install -y --no-install-recommends curl ca-certificates tar \
  && rm -rf /var/lib/apt/lists/*
 
-# Install the latest self-contained release binary (the semantic ONNX runtime is
+# Install the self-contained release binary (the semantic ONNX runtime is
 # statically bundled). install.sh detects the platform and verifies the SHA-256.
+# MEMKEEPER_VERSION pins a specific release (e.g. v0.2.9) — pass it via
+# `--build-arg` to make the image reproducible; empty (the default, e.g. Glama
+# builds) installs the latest release.
+ARG MEMKEEPER_VERSION=""
 RUN curl -fsSL https://raw.githubusercontent.com/teflon07/memkeeper/main/install.sh \
-      | MEMKEEPER_INSTALL_DIR=/usr/local/bin bash
+      | MEMKEEPER_INSTALL_DIR=/usr/local/bin MEMKEEPER_VERSION="$MEMKEEPER_VERSION" bash
 
 # Persist the store (and any pulled models) by mounting a volume here.
 VOLUME ["/root/.memkeeper"]

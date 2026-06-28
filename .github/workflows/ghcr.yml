@@ -1,0 +1,52 @@
+name: ghcr
+
+# Build the containerized memkeeper MCP server and push it to GHCR
+# (ghcr.io/teflon07/memkeeper), so it can be referenced as an `oci` package in
+# the official MCP registry's server.json and pulled by MCP clients.
+#
+# Manual by design: run it AFTER a release is published (so the release binary
+# the Dockerfile installs already exists), passing that release tag. Avoids any
+# race with the release workflow. First run also backfills an existing tag.
+#
+# After the first push, make the GHCR package PUBLIC once:
+#   GitHub → your packages → memkeeper → Package settings → Change visibility.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release tag to package, e.g. v0.2.9"
+        required: true
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  push:
+    name: build + push ghcr image
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      # Image tag drops the leading `v` (0.2.9) so it matches the server.json
+      # package version; the build-arg keeps the full tag (v0.2.9) for install.sh.
+      - id: ver
+        env:
+          VERSION: ${{ inputs.version }}
+        run: echo "v=${VERSION#v}" >> "$GITHUB_OUTPUT"
+      - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/amd64
+          push: true
+          build-args: |
+            MEMKEEPER_VERSION=${{ inputs.version }}
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/memkeeper:${{ steps.ver.outputs.v }}
+            ghcr.io/${{ github.repository_owner }}/memkeeper:latest
