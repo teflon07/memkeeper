@@ -104,9 +104,10 @@ fn warn_non_semantic(refusing: bool) {
 /// hazard (silently falling back to BM25) and tone depend on the backend the
 /// binary was built for:
 ///
-/// - **Local build, model files missing** is a setup gap for a binary that
-///   *intends* local semantic — keep it loud (ERROR + desktop alarm) and point at
-///   `pull-models`, matching `warn_non_semantic`'s posture.
+/// - **Local build, model files missing** is the common first-run state of the
+///   prebuilt binary before `pull-models` (the release ships `--features
+///   semantic,api`, and lexical BM25/FTS is a supported default) — a calm NOTE
+///   that points at `pull-models`, no alarm.
 /// - **Off-device (api-only) build with no provider configured** is the expected
 ///   default of the prebuilt binary (bring-a-key is opt-in) — a calm NOTE that
 ///   points at the provider/key, no alarm, same as the lexical-only binary.
@@ -147,27 +148,34 @@ fn warn_models_absent(refusing: bool) {
         );
     }
 
-    // Local-model build (the `semantic` feature): a binary that intends on-device
-    // semantic whose model files did not load at runtime. Keep loud.
+    // Local-model build (the `semantic` feature). Since the release binary ships
+    // `--features semantic,api`, "models not loaded" is the common first-run state
+    // (before `pull-models`) and lexical is a supported default — so stay calm and
+    // alarm-free. Escalate to a loud ERROR + desktop alarm only when the operator
+    // demanded semantic via MEMKEEPER_REQUIRE_SEMANTIC (refusing): the fail-closed
+    // path stays loud.
     #[cfg(feature = "semantic")]
     {
-        let tail = if refusing {
-            "MEMKEEPER_REQUIRE_SEMANTIC is set — refusing to serve."
-        } else {
-            "Serving FTS-only (degraded). Set MEMKEEPER_EMBED_MODEL_DIR (try `memkeeper pull-models`)."
-        };
+        if !refusing {
+            eprintln!(
+                "[memkeeper] NOTE: serving lexical (BM25/FTS) — on-device semantic models not \
+                 loaded yet. Run `memkeeper pull-models` to enable semantic search. Set \
+                 MEMKEEPER_REQUIRE_SEMANTIC=1 to refuse lexical-only rather than serve it."
+            );
+            return;
+        }
         eprintln!(
             "[memkeeper] ERROR: semantic build but the embed model did not load \
              (MEMKEEPER_EMBED_MODEL_DIR unset or model files missing) — embeddings and \
-             rerank are OFF. {tail}"
+             rerank are OFF. MEMKEEPER_REQUIRE_SEMANTIC is set — refusing to serve."
         );
         #[cfg(target_os = "macos")]
         {
             let _ = std::process::Command::new("osascript")
                 .args([
                     "-e",
-                    "display notification \"daemon is FTS-only — embed model missing\" \
-                     with title \"memkeeper degraded\"",
+                    "display notification \"required semantic, but embed model missing\" \
+                     with title \"memkeeper: refusing to serve\"",
                 ])
                 .stdout(std::process::Stdio::null())
                 .stderr(std::process::Stdio::null())

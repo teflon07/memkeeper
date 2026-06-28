@@ -6,6 +6,15 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html) once it reache
 1.0. Until then, minor releases may include breaking changes to the storage
 schema and wire protocol.
 
+## [0.2.9] - 2026-06-28
+
+### Changed
+- **Calmer startup when on-device models aren't present.** A semantic-capable
+  build (the default release binary) running before `pull-models` now logs a calm
+  NOTE and serves lexical BM25/FTS, instead of an ERROR plus a desktop alarm.
+  Lexical-only is a supported default; the loud ERROR + alarm + refuse-to-serve is
+  now reserved for `MEMKEEPER_REQUIRE_SEMANTIC=1` (the fail-closed path).
+
 ## [0.2.8] - 2026-06-28
 
 ### Changed
@@ -184,6 +193,7 @@ Initial public release. A local-first memory engine for AI agents.
 - **Adapters**: an MCP bridge and a thin extension client.
 - Dual-licensed **MIT OR Apache-2.0**.
 
+[0.2.9]: https://github.com/teflon07/memkeeper/releases/tag/v0.2.9
 [0.2.8]: https://github.com/teflon07/memkeeper/releases/tag/v0.2.8
 [0.2.7]: https://github.com/teflon07/memkeeper/releases/tag/v0.2.7
 [0.2.6]: https://github.com/teflon07/memkeeper/releases/tag/v0.2.6
