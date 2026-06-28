@@ -5,12 +5,12 @@ name: release
 #
 # Builds the `memkeeper` binary for macOS (Apple Silicon) and Linux x86_64.
 # (Windows is not yet published — its build is unverified; see the README/debt.)
-# `--no-default-features --features api` keeps the release artifact free of the
-# bundled ONNX model runtime (no local model download), while still supporting
-# off-device semantic: set an embeddings API key (OpenRouter / any OpenAI-compatible
-# endpoint) and it embeds + reranks remotely. With no key configured it serves
-# lexical (BM25/FTS). For fully on-device, local-model semantic, build the default
-# features from source — see the README. Archives are attached to a GitHub Release.
+# Built `--features semantic,api`: the ONNX runtime is statically bundled, so the
+# release binary is self-contained (no system onnxruntime) and fully on-device
+# semantic-capable with no rebuild. The models themselves are not bundled —
+# `memkeeper pull-models` fetches them on first use, and the binary serves lexical
+# BM25/FTS until then. `api` additionally allows off-device embeddings via an
+# OpenAI-compatible endpoint. Archives are attached to a GitHub Release.
 
 on:
   push:
@@ -40,11 +40,11 @@ jobs:
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       - name: Build
-        run: cargo build --release --no-default-features --features api --bin memkeeper --target ${{ matrix.target }}
+        run: cargo build --release --no-default-features --features semantic,api --bin memkeeper --target ${{ matrix.target }}
       - name: Smoke test
         # `bash` runs with `-eo pipefail`, so any non-zero exit fails the job.
-        # Exercises the core path with no key configured: the binary serves
-        # lexical (BM25/FTS) here.
+        # Exercises the core path with no models pulled: semantic is compiled in
+        # but the binary serves lexical (BM25/FTS) until `pull-models` runs.
         run: |
           bin="target/${{ matrix.target }}/release/memkeeper"
           store="${RUNNER_TEMP:-/tmp}/memkeeper-smoke.sqlite"

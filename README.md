@@ -31,39 +31,50 @@ no required network or LLM calls.
 
 > Status: pre-release (v0.2). APIs and the wire protocol may change before 1.0.
 
-## Prerequisites
-
-- **Rust toolchain** (stable, via [rustup](https://rustup.rs)) — provides `cargo`,
-  which builds the CLI. The crates are edition 2021, so Rust 1.56 or newer.
-- **A C toolchain**, for the native dependencies a default build compiles
-  (bundled SQLite, plus the ONNX runtime for semantic search). On macOS: Xcode
-  Command Line Tools (`xcode-select --install`); on Debian/Ubuntu: `build-essential`.
-- **No network, LLM, or API key is needed at runtime.** Building fetches crate
-  dependencies from crates.io the first time, like any Rust project; after that a
-  clean build is offline. The ONNX models for semantic search are fetched
-  separately (see below), and `pull-models` needs `curl`. A `--no-default-features`
-  build is lexical-only and needs neither the models nor `curl`.
-
 ## Quickstart
 
 ```sh
-# Build the CLI. Semantic search + rerank is ON by default and needs the ONNX
-# models (see below); for a lexical-only binary use `--no-default-features`.
-cargo build --release
+# Install the latest release binary (macOS arm64 / Linux x86_64) to ~/.local/bin.
+# It's self-contained — nothing else to install.
+curl -fsSL https://raw.githubusercontent.com/teflon07/memkeeper/main/install.sh | bash
 
-# Initialize a store and remember something
-./target/release/memkeeper init --store ~/.memkeeper/store.sqlite --json
-./target/release/memkeeper remember --store ~/.memkeeper/store.sqlite \
-  --json '{"content":"memkeeper stores memories in a local SQLite database"}'
+# Optional, one-time: fetch on-device semantic models. Lexical search works without it.
+memkeeper pull-models
 
-# Search it back
-./target/release/memkeeper search --store ~/.memkeeper/store.sqlite \
-  --json '{"query":"where are memories stored","limit":3}'
+# Create a store, remember something, search it back.
+memkeeper init
+memkeeper remember --json '{"content":"memkeeper stores memories in a local SQLite database"}'
+memkeeper search   --json '{"query":"where are memories stored","limit":3}'
 ```
 
-The store defaults to `~/.memkeeper/store.sqlite` when `--store` is omitted. A
-`--json` value can also be `@<file>` or `-` (stdin) instead of an inline string,
-which avoids shell-quoting pitfalls (handy in Windows PowerShell).
+That's the whole install: a self-contained binary, no runtime network/LLM/API key.
+Prefer not to pipe a script to your shell? Grab a binary from the
+[releases page](https://github.com/teflon07/memkeeper/releases) and verify its
+`.sha256`, or [build from source](#build-from-source). The store defaults to
+`~/.memkeeper/store.sqlite` when `--store` is omitted; a `--json` value can also be
+`@<file>` or `-` (stdin) instead of an inline string, which avoids shell-quoting
+pitfalls (handy in Windows PowerShell).
+
+## Use it from your agent (MCP)
+
+memkeeper speaks [MCP](adapters/mcp) (JSON-RPC 2.0 over stdio), so any MCP client —
+Claude Code, Cursor, and others — can read and write memory during a session. Point
+your client's MCP config at the **native binary** (no Python, no extra deps):
+
+```json
+{ "mcpServers": { "memkeeper": { "command": "memkeeper", "args": ["mcp"] } } }
+```
+
+The agent calls `remember` to capture a durable fact and `search` to recall it later,
+across separate sessions, with the same retrieval as the CLI.
+
+<p align="center">
+  <img src="assets/mcp.gif" alt="memkeeper over MCP: an agent connects, calls remember to store a fact, then in a later session calls search and recalls it via semantic retrieval" width="820" />
+</p>
+
+<p align="center"><sub>Real <code>memkeeper mcp</code> JSON-RPC round-trips, formatted for readability via <a href="scripts/mcpfmt"><code>scripts/mcpfmt</code></a>.</sub></p>
+
+For native MCP details and the optional Python bridge, see [adapters/mcp](adapters/mcp).
 
 ## What to store
 
@@ -102,25 +113,6 @@ UserPromptSubmit hook client that injects relevant memories into the prompt — 
 agent recalls without an explicit search. It retrieves; capture stays a deliberate
 `remember`.
 
-## Use it from an agent (MCP)
-
-memkeeper speaks [MCP](adapters/mcp) (JSON-RPC 2.0 over stdio), so any MCP client —
-Claude Code, Cursor, and others — can read and write memory during a session. Point
-your client's MCP config at the binary:
-
-```json
-{ "mcpServers": { "memkeeper": { "command": "memkeeper", "args": ["mcp"] } } }
-```
-
-The agent calls `remember` to capture a durable fact and `search` to recall it later
-— across separate sessions, with the same semantic retrieval as the CLI:
-
-<p align="center">
-  <img src="assets/mcp.gif" alt="memkeeper over MCP: an agent connects, calls remember to store a fact, then in a later session calls search and recalls it via semantic retrieval" width="820" />
-</p>
-
-<p align="center"><sub>Real <code>memkeeper mcp</code> JSON-RPC round-trips, formatted for readability via <a href="scripts/mcpfmt"><code>scripts/mcpfmt</code></a>.</sub></p>
-
 ## Semantic retrieval (default)
 
 memkeeper has three retrieval modes. **Local semantic is the default and the
@@ -136,8 +128,8 @@ flip.
 
 | Mode | Network | Setup |
 |---|---|---|
-| **Local semantic** (default) | none | build from source, `pull-models` |
-| **Lexical only** | none | no models; `--no-default-features`, or just skip model setup |
+| **Local semantic** (default) | none | install binary, then `pull-models` |
+| **Lexical only** | none | works out of the box; just skip `pull-models` |
 | **Off-device semantic** | embeds via an API | set `MEMKEEPER_EMBED_PROVIDER=openai` + base URL + key |
 
 > **Privacy:** off-device semantic sends your memory **text** to the embeddings
@@ -146,54 +138,43 @@ flip.
 
 ### Local semantic (default)
 
-Semantic embeddings + cross-encoder reranking are enabled by default, so a plain
-`cargo build --release` produces a semantic binary. It needs the ONNX models,
-which are not downloaded automatically. Fetch them once with `pull-models` or
-the script.
-
-`cargo build --release` does not put `memkeeper` on your `PATH`; the binary lands
-at `./target/release/memkeeper`. Either call it by that path (as below) or install
-it to your `PATH` with `cargo install --path crates/memkeeper-cli`, after which a
-bare `memkeeper` works.
+The release binary ships semantic-capable (the ONNX runtime is statically
+bundled), so there's no rebuild — it just needs the embed + rerank models, which
+aren't downloaded automatically. Fetch them once:
 
 ```sh
-# Fetch the embed + rerank models (needs curl; ~2.1GB, or --quantized for ~0.6GB).
-# Either the built-in subcommand:
-./target/release/memkeeper pull-models
-# ...or, equivalently, the bundled script if you have the repo checked out:
-scripts/fetch-models.sh
-
-# Both print the two env vars to export (MEMKEEPER_EMBED_MODEL_DIR /
-# MEMKEEPER_RERANK_MODEL_DIR); set them so `memkeeper serve` runs with semantics on.
+# Needs curl; ~2.1GB, or --quantized for ~0.6GB (slightly lower recall).
+memkeeper pull-models
 ```
 
-If a semantic build runs with the models missing, memkeeper does not degrade
-*silently*: it logs a loud WARNING and marks results as semantic-unavailable
-(e.g. `"semantic":{"attempted":false,"reason":"missing_embedding"}`). By default
-it still **falls back to lexical (BM25/FTS)** retrieval so search keeps working.
-Set `MEMKEEPER_REQUIRE_SEMANTIC=1` to **fail closed** instead — refuse the request
-rather than serve degraded results. Use that in any deployment that must never
-silently run lexical-only.
+`pull-models` writes to `~/.memkeeper/models/` (override with `MEMKEEPER_MODELS_DIR`
+or `--dir`) — exactly where memkeeper looks by default. So semantic turns on with
+**no env vars to set**: run a `search` afterward and it's active.
+
+If the models are missing, memkeeper does not degrade *silently*: it logs their
+absence and points you at `pull-models`, marks results semantic-unavailable
+(e.g. `"semantic":{"attempted":false,"reason":"missing_embedding"}`), and **falls
+back to lexical (BM25/FTS)** so search keeps working. Set
+`MEMKEEPER_REQUIRE_SEMANTIC=1` to **fail closed** instead — refuse the request
+rather than serve degraded results — in any deployment that must never silently
+run lexical-only.
 
 Embeddings are computed when a memory is **written**. Memories you stored before
 the models were present (for example, the one from the Quickstart above) are
-lexical-only and won't appear in semantic-only queries until they are embedded.
-After setting the model env vars, backfill existing memories once with:
+lexical-only until embedded. Backfill existing memories once with:
 
 ```sh
-./target/release/memkeeper reindex --embed --store ~/.memkeeper/store.sqlite
+memkeeper reindex --embed
 ```
 
 New memories written with the models in place are embedded automatically.
 
 ### Lexical only
 
-To build a deterministic, model-free **lexical-only** (BM25/FTS) binary, disable
-the default feature:
-
-```sh
-cargo build --release --no-default-features
-```
+Skip `pull-models` and the release binary runs deterministic, model-free
+**lexical-only** (BM25/FTS) retrieval — zero network, zero models. Building from
+source with `--no-default-features` produces a leaner binary that omits the ONNX
+runtime entirely (see [Build from source](#build-from-source)).
 
 ### Off-device semantic (no model download)
 
@@ -307,6 +288,30 @@ models on every query.
 
 Full methodology, per-config results (including the late-interaction upgrade), and
 a reproduction script are in [docs/benchmarks.md](docs/benchmarks.md).
+
+## Build from source
+
+Building is optional — the [Quickstart](#quickstart) binary is self-contained.
+Build from source to track the latest `main`, produce a leaner lexical-only binary,
+or develop.
+
+**Prerequisites:** a **Rust toolchain** (stable, via [rustup](https://rustup.rs);
+edition 2021, Rust 1.56+) and a **C toolchain** for the native deps (bundled SQLite
+plus the ONNX runtime for semantic search). macOS: Xcode Command Line Tools
+(`xcode-select --install`); Debian/Ubuntu: `build-essential`. Building fetches
+crates from crates.io the first time; after that a clean build is offline.
+
+```sh
+# Semantic build (default): local embeddings + cross-encoder rerank.
+cargo build --release
+# ...or lexical-only — omits the ONNX runtime and models entirely:
+cargo build --release --no-default-features
+
+# The binary lands at ./target/release/memkeeper (not on PATH). To install it:
+cargo install --path crates/memkeeper-cli   # then a bare `memkeeper` works
+```
+
+Then `memkeeper pull-models` to enable semantic, exactly as in the Quickstart.
 
 ## Workspace layout
 

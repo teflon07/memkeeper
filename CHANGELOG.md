@@ -6,6 +6,25 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html) once it reache
 1.0. Until then, minor releases may include breaking changes to the storage
 schema and wire protocol.
 
+## [0.2.6] - 2026-06-28
+
+### Changed
+- **Release binaries are now self-contained and semantic-capable.** The published
+  macOS/Linux binaries bundle the ONNX runtime (built `--features semantic,api`),
+  so on-device semantic search works with no rebuild — run `memkeeper pull-models`
+  once to fetch the models. Previously the release binary was lexical-only and
+  local semantic required building from source.
+- **Zero-config local models.** memkeeper now looks for the embed/rerank models in
+  the `pull-models` default location (`$MEMKEEPER_MODELS_DIR`, else
+  `~/.memkeeper/models`) when `MEMKEEPER_EMBED_MODEL_DIR` /
+  `MEMKEEPER_RERANK_MODEL_DIR` are unset — so `pull-models` then `search` turns on
+  semantics with no environment variables. A missing model dir now prints an
+  actionable `pull-models` hint instead of silently degrading.
+
+### Added
+- **`install.sh`** — one-line installer: downloads the release binary for your
+  platform, verifies its SHA-256 (fail closed), and installs it to `~/.local/bin`.
+
 ## [0.2.5] - 2026-06-28
 
 ### Added
@@ -145,6 +164,7 @@ Initial public release. A local-first memory engine for AI agents.
 - **Adapters**: an MCP bridge and a thin extension client.
 - Dual-licensed **MIT OR Apache-2.0**.
 
+[0.2.6]: https://github.com/teflon07/memkeeper/releases/tag/v0.2.6
 [0.2.5]: https://github.com/teflon07/memkeeper/releases/tag/v0.2.5
 [0.2.4]: https://github.com/teflon07/memkeeper/releases/tag/v0.2.4
 [0.2.3]: https://github.com/teflon07/memkeeper/releases/tag/v0.2.3

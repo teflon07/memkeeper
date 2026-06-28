@@ -74,12 +74,10 @@ All configuration is environment variables with portable defaults under
 
 ## Claude Code
 
-Add the server with `claude mcp add` (adjust the path to where you cloned the
-repo):
+Recommended: the **native binary** (no Python, nothing to keep in sync):
 
 ```bash
-claude mcp add memkeeper -- \
-  python3 /path/to/memkeeper/adapters/mcp/memkeeper_mcp.py
+claude mcp add memkeeper -- memkeeper mcp
 ```
 
 Or, equivalently, in your MCP config JSON:
@@ -88,8 +86,8 @@ Or, equivalently, in your MCP config JSON:
 {
   "mcpServers": {
     "memkeeper": {
-      "command": "python3",
-      "args": ["/path/to/memkeeper/adapters/mcp/memkeeper_mcp.py"],
+      "command": "memkeeper",
+      "args": ["mcp"],
       "env": {
         "MEMKEEPER_MCP_SOURCE_DESCRIPTION": "Claude Code memkeeper MCP"
       }
@@ -98,33 +96,40 @@ Or, equivalently, in your MCP config JSON:
 }
 ```
 
-With `uv` (no manual `pip install mcp` needed):
-
-```json
-{
-  "mcpServers": {
-    "memkeeper": {
-      "command": "uvx",
-      "args": ["--from", "/path/to/memkeeper/adapters/mcp", "memkeeper-mcp"]
-    }
-  }
-}
-```
-
-## Cursor
-
-Add to `~/.cursor/mcp.json` (or the project-local `.cursor/mcp.json`):
+<details>
+<summary>Python bridge (fallback, if you can't put the binary on PATH)</summary>
 
 ```json
 {
   "mcpServers": {
     "memkeeper": {
       "command": "python3",
-      "args": ["/path/to/memkeeper/adapters/mcp/memkeeper_mcp.py"]
+      "args": ["/path/to/memkeeper/adapters/mcp/memkeeper_mcp.py"],
+      "env": { "MEMKEEPER_MCP_SOURCE_DESCRIPTION": "Claude Code memkeeper MCP" }
     }
   }
 }
 ```
+
+With `uv` (no manual `pip install mcp`): `"command": "uvx", "args": ["--from", "/path/to/memkeeper/adapters/mcp", "memkeeper-mcp"]`.
+</details>
+
+## Cursor
+
+Add to `~/.cursor/mcp.json` (or the project-local `.cursor/mcp.json`) — native binary:
+
+```json
+{
+  "mcpServers": {
+    "memkeeper": {
+      "command": "memkeeper",
+      "args": ["mcp"]
+    }
+  }
+}
+```
+
+(Or the Python bridge as a fallback: `"command": "python3", "args": ["/path/to/memkeeper/adapters/mcp/memkeeper_mcp.py"]`.)
 
 ## Notes
 

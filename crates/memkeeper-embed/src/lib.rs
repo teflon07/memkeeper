@@ -148,10 +148,61 @@ fn api_reranker_from_env(provider: &str) -> Option<Box<dyn Reranker>> {
     Some(Box::new(ApiReranker::new(model, endpoint, api_key)) as Box<dyn Reranker>)
 }
 
+/// Pure model-dir resolution: explicit dir wins; else `<root>/<subdir>` where
+/// root is `$MEMKEEPER_MODELS_DIR`, else `<home>/.memkeeper/models`, else `./...`.
+/// This mirrors `pull-models` exactly, which is why a plain `pull-models`
+/// followed by `search` activates semantics with zero env config — the loaders
+/// look precisely where `pull-models` writes. Pure (env passed in) so it is unit
+/// testable without mutating process environment.
+#[cfg(feature = "local")]
+fn resolve_model_dir(
+    explicit: Option<std::ffi::OsString>,
+    models_dir: Option<std::ffi::OsString>,
+    home: Option<std::ffi::OsString>,
+    subdir: &str,
+) -> std::path::PathBuf {
+    use std::path::PathBuf;
+    if let Some(explicit) = explicit {
+        return PathBuf::from(explicit);
+    }
+    let root = models_dir.map_or_else(
+        || {
+            home.map_or_else(|| PathBuf::from("."), PathBuf::from)
+                .join(".memkeeper")
+                .join("models")
+        },
+        PathBuf::from,
+    );
+    root.join(subdir)
+}
+
+/// Resolve a local model dir from the live environment (explicit `env_var`, else
+/// the `pull-models` default location for `subdir`).
+#[cfg(feature = "local")]
+fn resolve_local_model_dir(env_var: &str, subdir: &str) -> std::path::PathBuf {
+    resolve_model_dir(
+        std::env::var_os(env_var),
+        std::env::var_os("MEMKEEPER_MODELS_DIR"),
+        std::env::var_os("HOME"),
+        subdir,
+    )
+}
+
 #[cfg(feature = "local")]
 fn local_embedder_from_env() -> Option<EmbedModel> {
-    let dir = std::env::var("MEMKEEPER_EMBED_MODEL_DIR").ok()?;
-    match EmbedModel::load(Path::new(&dir)) {
+    let dir = resolve_local_model_dir("MEMKEEPER_EMBED_MODEL_DIR", "mxbai-embed-large");
+    if !dir.exists() {
+        // Loud over silent: a missing model dir is the common first-run state for
+        // the semantic release binary. Point at the fix instead of degrading to
+        // lexical without a word.
+        eprintln!(
+            "[memkeeper] semantic embed model not found at {}; run `memkeeper pull-models` \
+             to enable semantic search (using lexical BM25 for now)",
+            dir.display()
+        );
+        return None;
+    }
+    match EmbedModel::load(&dir) {
         Ok(model) => {
             eprintln!("[memkeeper] embed model loaded (dims={})", model.dims());
             Some(model)
@@ -165,8 +216,16 @@ fn local_embedder_from_env() -> Option<EmbedModel> {
 
 #[cfg(feature = "local")]
 fn local_reranker_from_env() -> Option<RerankerModel> {
-    let dir = std::env::var("MEMKEEPER_RERANK_MODEL_DIR").ok()?;
-    match RerankerModel::load(Path::new(&dir)) {
+    let dir = resolve_local_model_dir("MEMKEEPER_RERANK_MODEL_DIR", "mxbai-rerank-base");
+    if !dir.exists() {
+        eprintln!(
+            "[memkeeper] rerank model not found at {}; run `memkeeper pull-models` \
+             to enable reranking (ranking without the cross-encoder for now)",
+            dir.display()
+        );
+        return None;
+    }
+    match RerankerModel::load(&dir) {
         Ok(model) => {
             eprintln!("[memkeeper] rerank model loaded");
             Some(model)
@@ -561,6 +620,42 @@ impl Reranker for RerankerModel {
 #[cfg(all(test, feature = "local"))]
 mod tests {
     use super::*;
+    use std::ffi::OsString;
+    use std::path::PathBuf;
+
+    #[test]
+    fn resolve_model_dir_prefers_explicit_then_models_dir_then_home() {
+        // Explicit dir wins outright.
+        assert_eq!(
+            resolve_model_dir(
+                Some(OsString::from("/x/embed")),
+                Some(OsString::from("/ignored")),
+                Some(OsString::from("/ignored")),
+                "mxbai-embed-large",
+            ),
+            PathBuf::from("/x/embed"),
+        );
+        // No explicit dir -> $MEMKEEPER_MODELS_DIR/<subdir> (must match pull-models).
+        assert_eq!(
+            resolve_model_dir(
+                None,
+                Some(OsString::from("/models")),
+                Some(OsString::from("/home/u")),
+                "mxbai-embed-large",
+            ),
+            PathBuf::from("/models/mxbai-embed-large"),
+        );
+        // No explicit, no models dir -> <home>/.memkeeper/models/<subdir>.
+        assert_eq!(
+            resolve_model_dir(
+                None,
+                None,
+                Some(OsString::from("/home/u")),
+                "mxbai-rerank-base"
+            ),
+            PathBuf::from("/home/u/.memkeeper/models/mxbai-rerank-base"),
+        );
+    }
 
     fn models_dir() -> std::path::PathBuf {
         std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
