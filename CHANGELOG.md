@@ -6,6 +6,25 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html) once it reache
 1.0. Until then, minor releases may include breaking changes to the storage
 schema and wire protocol.
 
+## [0.2.10] - 2026-06-29
+
+### Changed
+- **Reranker and late-interaction (ColBERT) degradation is now loud, not silent.**
+  When the embedder loads but the reranker model is missing, `serve`/`mcp` now log
+  a NOTE (an ERROR under `MEMKEEPER_REQUIRE_SEMANTIC`) and continue with plain
+  retrieval order, instead of silently skipping rerank. When
+  `MEMKEEPER_LATE_INTERACTION=1` is set but the ColBERT model is absent, startup
+  warns loudly and refuses to serve under `MEMKEEPER_REQUIRE_SEMANTIC` rather than
+  silently disabling late-interaction. Only the embedder was guarded before.
+
+### Internal
+- Split the large `memkeeper-store` `lib.rs` into focused modules (`types`,
+  `common`, `archive_spec`, `recall`, `stats`, `spaces`) — pure code movement, no
+  API or behavior change.
+- Added a drift test that ties the MCP tool `inputSchema` to the real request
+  parsers, so the advertised tool schema cannot silently diverge from what the
+  engine accepts.
+
 ## [0.2.9] - 2026-06-28
 
 ### Changed
@@ -193,6 +212,7 @@ Initial public release. A local-first memory engine for AI agents.
 - **Adapters**: an MCP bridge and a thin extension client.
 - Dual-licensed **MIT OR Apache-2.0**.
 
+[0.2.10]: https://github.com/teflon07/memkeeper/releases/tag/v0.2.10
 [0.2.9]: https://github.com/teflon07/memkeeper/releases/tag/v0.2.9
 [0.2.8]: https://github.com/teflon07/memkeeper/releases/tag/v0.2.8
 [0.2.7]: https://github.com/teflon07/memkeeper/releases/tag/v0.2.7
