@@ -908,6 +908,7 @@ pub(crate) fn execute_serve_request_result(
             let mut pack_request = pack_request_from_json(&request.payload_json)?;
             let mut expansion = pack_expansion_options_from_json(&request.payload_json)?;
             let cosine_gate = pack_cosine_gate_from_json(&request.payload_json)?;
+            crate::apply_associative_recall_gate(&store, &pack_request, &mut expansion)?;
             apply_pack_query_expansion(&mut pack_request, &mut expansion);
             maybe_embed_pack_request(&mut pack_request, semantic_models);
             maybe_colbert_embed_pack_request(&mut pack_request, semantic_models);

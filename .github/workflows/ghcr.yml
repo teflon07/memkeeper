@@ -1,8 +1,10 @@
 name: ghcr
 
-# Build the containerized memkeeper MCP server and push it to GHCR
-# (ghcr.io/teflon07/memkeeper), so it can be referenced as an `oci` package in
-# the official MCP registry's server.json and pulled by MCP clients.
+# Build the containerized memkeeper MCP server, push it to GHCR
+# (ghcr.io/teflon07/memkeeper), THEN publish server.json to the official MCP
+# registry (the registry references the OCI image and verifies its ownership
+# label, so the image must exist first). One dispatch does image + registry, so
+# the registry can't drift behind a release.
 #
 # Manual by design: run it AFTER a release is published (so the release binary
 # the Dockerfile installs already exists), passing that release tag. Avoids any
@@ -50,3 +52,28 @@ jobs:
           tags: |
             ghcr.io/${{ github.repository_owner }}/memkeeper:${{ steps.ver.outputs.v }}
             ghcr.io/${{ github.repository_owner }}/memkeeper:latest
+
+  # Publish server.json to the official MCP registry, AFTER the image exists (the
+  # registry pulls the OCI manifest and verifies its ownership label). Auth is
+  # GitHub OIDC — no secrets/tokens: the workflow runs in teflon07/memkeeper, which
+  # owns the io.github.teflon07/* namespace the registry checks. Versions are
+  # immutable, so re-running a published version is a no-op error, not a clobber.
+  publish-registry:
+    name: publish to MCP registry
+    needs: push
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write   # required for GitHub OIDC
+    steps:
+      # Check out the released tag so server.json matches the version being published.
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: ${{ inputs.version }}
+      - name: Install mcp-publisher
+        run: |
+          curl -fsSL "https://github.com/modelcontextprotocol/registry/releases/latest/download/mcp-publisher_$(uname -s | tr '[:upper:]' '[:lower:]')_$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/').tar.gz" | tar xz mcp-publisher
+      - name: Login (GitHub OIDC)
+        run: ./mcp-publisher login github-oidc
+      - name: Publish
+        run: ./mcp-publisher publish

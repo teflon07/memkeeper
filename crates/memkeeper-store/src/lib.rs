@@ -1873,6 +1873,19 @@ pub struct RerankCandidate {
     pub content: String,
     /// Cross-encoder relevance score for `(query, content)`.
     pub rerank_score: f32,
+    /// Graph-expansion activation when this candidate was pulled through a
+    /// relationship hop (`None` for ordinary ANN/BM25 candidates). Lets
+    /// [`assemble_reranked_pack_with_graph_slots`] reserve a bounded number of
+    /// pack slots for high-activation hop-reached memories the reranker would
+    /// otherwise bury. Never affects ordinary ranking.
+    pub activation: Option<f64>,
+    /// True only for candidates the graph hop ADDED below the ANN/BM25 pool
+    /// threshold (the `new_neighbors` set). These are quarantined from the normal
+    /// rerank fill and can enter the pack ONLY through a reserved slot, so the
+    /// pool-widening cannot reorder the cross-encoder's top-`k` (bounds churn to
+    /// `graph_rerank_slots`). An in-pool memory that is merely also graph-reachable
+    /// stays `false`: it competed in the baseline pool and keeps competing here.
+    pub graph_pulled: bool,
 }
 
 /// Build an empty pack (no injection) that preserves the request's title/format.
@@ -1945,6 +1958,64 @@ pub fn assemble_reranked_pack(
     cos_top: f64,
     candidates: &[RerankCandidate],
 ) -> PackReport {
+    // Graph reserved slots default OFF, so this is byte-identical to the
+    // pre-associative-recall assembler.
+    assemble_reranked_pack_with_graph_slots(request, cosine_gate, cos_top, candidates, 0, 0.0)
+}
+
+/// The up-to-`slots` graph-pulled candidates with the highest activation at or
+/// above `floor`, ordered by activation desc then id (deterministic). Empty when
+/// `slots == 0`, so the reserved-slot path is a no-op by default.
+fn top_activation_graph_candidates<'a>(
+    ordered: &[&'a RerankCandidate],
+    slots: usize,
+    floor: f64,
+) -> Vec<&'a RerankCandidate> {
+    if slots == 0 {
+        return Vec::new();
+    }
+    let mut graph_candidates: Vec<&RerankCandidate> = ordered
+        .iter()
+        .copied()
+        .filter(|candidate| {
+            candidate
+                .activation
+                .is_some_and(|activation| activation >= floor)
+        })
+        .collect();
+    graph_candidates.sort_by(|a, b| {
+        b.activation
+            .partial_cmp(&a.activation)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.memory_id.cmp(&b.memory_id))
+    });
+    graph_candidates.truncate(slots);
+    graph_candidates
+}
+
+/// [`assemble_reranked_pack`] plus a bounded associative-recall exception: reserve
+/// up to `graph_rerank_slots` pack slots for the highest-`activation` graph-pulled
+/// candidates whose activation reaches `graph_activation_floor`, so a hop-reached
+/// memory the cross-encoder scored below the cut can still land. The reserved
+/// candidates are taken from the `max_memories` budget (they do not enlarge the
+/// pack), bounded by the slot count, and floored by activation — so graph noise
+/// cannot flood and precision stays bounded. `graph_rerank_slots == 0` reproduces
+/// [`assemble_reranked_pack`] exactly.
+///
+/// `cos_top` stays ANN-only and the cosine gate is unchanged: reserved slots only
+/// relax the per-item rerank floor for a capped, activation-qualified minority,
+/// never the query-level gate.
+///
+/// Pure retrieval policy: no store or model access, so it is fully unit-testable.
+#[must_use]
+pub fn assemble_reranked_pack_with_graph_slots(
+    request: &PackRequest,
+    cosine_gate: f64,
+    cos_top: f64,
+    candidates: &[RerankCandidate],
+    graph_rerank_slots: usize,
+    graph_activation_floor: f64,
+) -> PackReport {
     let total = candidates.len();
     let rr_top = candidates
         .iter()
@@ -1968,12 +2039,33 @@ pub fn assemble_reranked_pack(
         Some(request.min_score)
     };
 
+    // Reserve slots for the top-activation graph candidates above the floor. They
+    // are excluded from the normal rerank fill and appended after, so they claim a
+    // bounded share of `max_memories` instead of widening the pack.
+    let reserved =
+        top_activation_graph_candidates(&ordered, graph_rerank_slots, graph_activation_floor);
+    let reserved_ids: BTreeSet<&str> = reserved.iter().map(|c| c.memory_id.as_str()).collect();
+    let normal_cap = request.max_memories.saturating_sub(reserved.len());
+
     let mut content = String::new();
     let mut memory_ids = Vec::new();
     let mut scores = Vec::new();
     for candidate in &ordered {
-        if memory_ids.len() >= request.max_memories {
+        if memory_ids.len() >= normal_cap {
             break;
+        }
+        // Below-pool graph additions are quarantined from the normal fill: they
+        // can land ONLY through a reserved slot (handled below). This is the
+        // relative gate — without it, every graph-pulled candidate competes in
+        // the cross-encoder's top-`k` and the pool-widening reorders the pack on
+        // nearly every query (measured 92% churn). With it, `graph_rerank_slots`
+        // bounds the churn and `slots == 0` is byte-identical to graph-off.
+        if candidate.graph_pulled {
+            continue;
+        }
+        // Reserved graph candidates are appended below, not filled here.
+        if reserved_ids.contains(candidate.memory_id.as_str()) {
+            continue;
         }
         // `ordered` is sorted by rerank score descending, so the first sub-floor
         // score means every remaining candidate is also below the floor.
@@ -1983,6 +2075,21 @@ pub fn assemble_reranked_pack(
         let entry = format!("- {}\n", candidate.content);
         if content.len() + entry.len() > request.max_chars {
             break;
+        }
+        content.push_str(&entry);
+        memory_ids.push(candidate.memory_id.clone());
+        scores.push(f64::from(candidate.rerank_score));
+    }
+    // Append the reserved graph candidates (slot-bounded, activation-floored),
+    // best-effort within the char budget. They intentionally bypass the per-item
+    // rerank floor -- that is the whole point of the reserved slot.
+    for candidate in &reserved {
+        if memory_ids.len() >= request.max_memories {
+            break;
+        }
+        let entry = format!("- {}\n", candidate.content);
+        if content.len() + entry.len() > request.max_chars {
+            continue;
         }
         content.push_str(&entry);
         memory_ids.push(candidate.memory_id.clone());
@@ -2365,6 +2472,305 @@ fn thread_neighbor_pool_items(
         .collect())
 }
 
+/// Internal cap on relationship edges examined per graph-expansion seed. We want
+/// the seed's full one-hop neighborhood; the candidate budget is enforced
+/// downstream by `max_graph_neighbors`, not here.
+const GRAPH_EXPANSION_MAX_EDGES: usize = MAX_GRAPH_NEIGHBOR_EDGES;
+
+/// Readiness of the entity/relationship graph for associative recall in a space.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GraphRecallReadiness {
+    /// A `dream --tasks graph` (or `all`) run has succeeded for this space.
+    pub succeeded_graph_synthesis: bool,
+    /// Count of active relationships in the space.
+    pub active_relationships: usize,
+}
+
+impl GraphRecallReadiness {
+    /// Whether the graph can actually contribute to recall: synthesized at least
+    /// once AND carrying at least one active relationship.
+    #[must_use]
+    pub fn usable(&self) -> bool {
+        self.succeeded_graph_synthesis && self.active_relationships > 0
+    }
+}
+
+/// Report whether the graph is usable for associative recall in `space`.
+///
+/// Callers (serve/CLI/MCP) use this to honor the
+/// `MEMKEEPER_ASSOCIATIVE_RECALL_REQUIRE` fail-closed hatch before serving a
+/// degraded pack. An empty graph is legitimate for a tiny new store, so the store
+/// itself only warns; refusal is the caller's policy.
+///
+/// # Errors
+///
+/// Returns an error when the store is missing/incompatible or the query fails.
+pub fn graph_recall_readiness(path: impl AsRef<Path>, space: &str) -> Result<GraphRecallReadiness> {
+    let connection = open_initialized_read_fast(path.as_ref())?;
+    with_read_snapshot(&connection, |connection| {
+        graph_recall_readiness_on_connection(connection, space)
+    })
+}
+
+fn graph_recall_readiness_on_connection(
+    connection: &Connection,
+    space: &str,
+) -> Result<GraphRecallReadiness> {
+    let active_relationships: i64 = connection.query_row(
+        "SELECT COUNT(*) FROM relationships WHERE space_name = ?1 AND status = 'active'",
+        [space],
+        |row| row.get(0),
+    )?;
+    // A succeeded synthesis whose recorded task set covered the graph reconciler.
+    // `dream_budget_json` serializes `"tasks":[...]`, so `graph`/`all` appear as
+    // quoted tokens. `dream_budget_json` always serializes the tasks array FIRST,
+    // immediately followed by `,"space":` — so anchoring the match between
+    // `{"tasks":[` and `],"space":` confines it to a real task token and avoids a
+    // false positive when a space/silo is literally named `graph` or `all`.
+    // A NULL-space run (whole-store dream) also counts.
+    let succeeded_graph_synthesis: bool = connection.query_row(
+        "SELECT EXISTS(
+             SELECT 1 FROM dream_runs
+              WHERE status = 'succeeded'
+                AND (space_name = ?1 OR space_name IS NULL)
+                AND budget_json IS NOT NULL
+                AND (budget_json LIKE '{\"tasks\":[%\"graph\"%],\"space\":%'
+                  OR budget_json LIKE '{\"tasks\":[%\"all\"%],\"space\":%')
+         )",
+        [space],
+        |row| row.get(0),
+    )?;
+    Ok(GraphRecallReadiness {
+        succeeded_graph_synthesis,
+        active_relationships: usize::try_from(active_relationships).unwrap_or(usize::MAX),
+    })
+}
+
+/// Graph-expand a merged rerank candidate pool by traversing the entity/
+/// relationship graph one hop from the top `max_graph_seeds` anchored seeds, and
+/// union the activation-ordered neighbors (filter-preserving, deduplicated) into
+/// the pool. Strategy label: `hybrid_assoc_v0`.
+///
+/// `activation(neighbor) = seed_retrieval_score * graph_decay^hop * edge_weight`,
+/// with `hop` fixed to 1 for the v0.3 core and `edge_weight` the relationship
+/// confidence. A memory reachable by multiple seeds/paths takes the MAX activation
+/// (matching the min-depth convention of the traversal). Activation is a
+/// candidate-budget ALLOCATOR — it bounds/orders which graph-reachable memories
+/// are fetched and reranked — never a relevance score.
+///
+/// Failure visibility: when the flag is on but the graph is unusable (no succeeded
+/// graph synthesis OR zero active relationships), emit a loud WARN and degrade to
+/// the unexpanded pool, byte-identical to flag-off. An empty graph is legitimate
+/// for a tiny new store, so this warns rather than errors; the caller's
+/// `MEMKEEPER_ASSOCIATIVE_RECALL_REQUIRE` hatch turns it into a refusal.
+type GraphExpandedPool = (Vec<PackPoolItem>, BTreeMap<String, f64>);
+
+fn graph_expand_pool(
+    connection: &Connection,
+    request: &PackRequest,
+    pool: &[PackPoolItem],
+    expansion: PackExpansionOptions,
+) -> Result<GraphExpandedPool> {
+    if !expansion.graph_expansion
+        || expansion.max_graph_seeds == 0
+        || expansion.max_graph_neighbors == 0
+        || pool.is_empty()
+    {
+        return Ok((pool.to_vec(), BTreeMap::new()));
+    }
+
+    // Normalize filters once (default space/status), exactly as thread expansion
+    // does, so graph-pulled ids pass space/status/kind/project/silo/scope before
+    // they are unioned into the candidate set.
+    let mut filters = request.filters.clone();
+    if filters.spaces.is_empty() {
+        filters.spaces.push(DEFAULT_SPACE.to_string());
+    }
+    if filters.statuses.is_empty() {
+        filters.statuses.push(status::ACTIVE.to_string());
+    }
+    filters = normalize_search_filters(filters)?;
+    validate_search_filters(&filters)?;
+    let space = filters
+        .spaces
+        .first()
+        .cloned()
+        .unwrap_or_else(|| DEFAULT_SPACE.to_string());
+
+    let readiness = graph_recall_readiness_on_connection(connection, &space)?;
+    if !readiness.usable() {
+        eprintln!(
+            "[memkeeper] WARN: associative recall (hybrid_assoc_v0) requested but the graph is \
+             unusable in space {space} (succeeded_graph_synthesis={}, active_relationships={}) \
+             — degrading to ANN/BM25 recall. Run `dream --tasks graph` to build the graph; set \
+             MEMKEEPER_ASSOCIATIVE_RECALL_REQUIRE=1 to refuse instead of degrading.",
+            readiness.succeeded_graph_synthesis, readiness.active_relationships
+        );
+        return Ok((pool.to_vec(), BTreeMap::new()));
+    }
+
+    let pool_ids: BTreeSet<String> = pool.iter().map(|item| item.memory_id.clone()).collect();
+    // memory_id -> MAX activation across all seeds/paths. Tag EVERY graph-reachable
+    // memory, including ones already in the retrieval pool: a pool memory the
+    // cross-encoder buried below the cut still needs an activation so a reserved
+    // rerank slot can promote it (the v0.3 design only added below-pool memories,
+    // missing the in-pool-but-rerank-buried hop target).
+    let mut activations: BTreeMap<String, f64> = BTreeMap::new();
+    for seed in pool.iter().take(expansion.max_graph_seeds) {
+        for (memory_id, activation) in
+            graph_seed_neighbor_activations(connection, &filters, &space, seed, expansion)?
+        {
+            activations
+                .entry(memory_id)
+                .and_modify(|existing| {
+                    if activation > *existing {
+                        *existing = activation;
+                    }
+                })
+                .or_insert(activation);
+        }
+    }
+
+    // Activation is a candidate-budget allocator: union only the genuinely NEW
+    // (below-pool) graph-reachable memories, highest activation first, bounded by
+    // `max_graph_neighbors`. In-pool graph-reachable memories are not re-unioned
+    // (already candidates) but keep their activation tag for the reserved slot.
+    let mut new_neighbors: Vec<(String, f64)> = activations
+        .iter()
+        .filter(|(memory_id, _)| !pool_ids.contains(memory_id.as_str()))
+        .map(|(memory_id, activation)| (memory_id.clone(), *activation))
+        .collect();
+    new_neighbors.sort_by(|left, right| {
+        right
+            .1
+            .partial_cmp(&left.1)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| left.0.cmp(&right.0))
+    });
+    new_neighbors.truncate(expansion.max_graph_neighbors);
+
+    let mut expanded = pool.to_vec();
+    for (memory_id, activation) in new_neighbors {
+        expanded.push(PackPoolItem {
+            memory_id,
+            score: activation,
+        });
+    }
+    Ok((expanded, activations))
+}
+
+/// Traverse one hop from a single pack-pool seed and return the
+/// `(memory_id, activation)` pairs of its graph-reachable neighbor memories
+/// (filter-preserving). A keyless seed, or a seed whose entity is not yet a graph
+/// node, yields no neighbors. See [`graph_expand_pool`] for the activation model.
+fn graph_seed_neighbor_activations(
+    connection: &Connection,
+    filters: &SearchFilters,
+    space: &str,
+    seed: &PackPoolItem,
+    expansion: PackExpansionOptions,
+) -> Result<Vec<(String, f64)>> {
+    // Anchor on the seed memory's entity_key; a keyless seed has no graph foothold
+    // (it still occupies one of the top-K slots in the caller's bound).
+    let entity_key: Option<String> = connection
+        .query_row(
+            "SELECT entity_key FROM memories WHERE id = ?1",
+            [&seed.memory_id],
+            |row| row.get(0),
+        )
+        .optional()?
+        .flatten();
+    let Some(entity_key) = entity_key else {
+        return Ok(Vec::new());
+    };
+
+    let graph_request = GraphNeighborsRequest {
+        space: Some(space.to_string()),
+        entity_id: None,
+        entity_key: Some(entity_key),
+        depth: 1, // v0.3 core: one hop; depth>1 is deferred debt.
+        relation_types: Vec::new(),
+        statuses: Vec::new(), // defaults to active edges
+        max_edges: GRAPH_EXPANSION_MAX_EDGES,
+        include_tombstoned: false,
+        include_source: false,
+    };
+    let graph = match graph_neighbors_on_connection(connection, &graph_request) {
+        Ok(graph) => graph,
+        // The seed entity_key may not be a graph node yet; skip, don't fail.
+        Err(Error::NotFound { .. }) => return Ok(Vec::new()),
+        Err(error) => return Err(error),
+    };
+    let seed_entity_id = graph.seed.id.as_str();
+    let key_for: BTreeMap<&str, &str> = graph
+        .entities
+        .iter()
+        .map(|record| (record.entity.id.as_str(), record.entity.entity_key.as_str()))
+        .collect();
+
+    let mut activations = Vec::new();
+    for record in &graph.relationships {
+        let relationship = &record.relationship;
+        // Only edges incident to the seed entity (one endpoint at depth 0, the
+        // other at depth 1). This keeps hop semantics clean and skips the
+        // neighbor<->neighbor edges that depth-1 traversal also returns.
+        let neighbor_entity_id =
+            if relationship.subject_entity_id == seed_entity_id && record.object_depth == 1 {
+                relationship.object_entity_id.as_str()
+            } else if relationship.object_entity_id == seed_entity_id && record.subject_depth == 1 {
+                relationship.subject_entity_id.as_str()
+            } else {
+                continue;
+            };
+        let edge_weight = relationship.confidence;
+        // hop fixed to 1 for the v0.3 core; decay^1 == decay.
+        let activation = seed.score * expansion.graph_decay * edge_weight;
+        let Some(neighbor_key) = key_for.get(neighbor_entity_id) else {
+            continue;
+        };
+        for memory_id in entity_memory_ids_with_filters(
+            connection,
+            filters,
+            neighbor_key,
+            expansion.max_graph_neighbors,
+        )? {
+            activations.push((memory_id, activation));
+        }
+    }
+    Ok(activations)
+}
+
+/// Active memory ids attached to `entity_key`, passing the normalized pack filters
+/// (space/status/kind/project/silo/scope), in the deterministic order graph
+/// selection uses. Mirrors `thread_neighbor_pool_items`' filter preservation,
+/// anchored on a neighbor entity instead of the seed's entity/claim anchors.
+fn entity_memory_ids_with_filters(
+    connection: &Connection,
+    filters: &SearchFilters,
+    entity_key: &str,
+    limit: usize,
+) -> Result<Vec<String>> {
+    if limit == 0 {
+        return Ok(Vec::new());
+    }
+    let mut args = SqlArgs::with_reserved(0);
+    let where_clause = filters_where_clause(filters, &mut args);
+    let entity_placeholder = args.push(entity_key);
+    let sql = format!(
+        "SELECT m.id
+           FROM memories m
+          WHERE {where_clause}
+            AND m.entity_key = {entity_placeholder}
+          ORDER BY m.pinned DESC, m.observed_at DESC, m.updated_at DESC, m.id ASC
+          LIMIT {limit}"
+    );
+    let mut statement = connection.prepare(&sql)?;
+    let rows = statement.query_map(params_from_iter(args.values.iter()), |row| {
+        row.get::<_, String>(0)
+    })?;
+    collect_rows(rows)
+}
+
 /// One reranking candidate from the hybrid retrieval pool: memory id plus the
 /// full active-version content the cross-encoder scores against.
 #[derive(Debug, Clone, PartialEq)]
@@ -2378,6 +2784,14 @@ pub struct RerankPoolCandidate {
     /// score; never concatenated (prefix-duplicate summaries corrupt
     /// cross-encoder ordering — 2026-06-12 adversarial diagnosis).
     pub summary: Option<String>,
+    /// Graph-expansion activation when this candidate was pulled through a
+    /// relationship hop (`None` for ordinary ANN/BM25 candidates). Carried to
+    /// [`RerankCandidate::activation`] so the reranked assembler can reserve slots.
+    pub activation: Option<f64>,
+    /// True only for candidates added BELOW the ANN/BM25 pool threshold by the
+    /// graph hop. Carried to [`RerankCandidate::graph_pulled`] so the assembler can
+    /// quarantine them to reserved slots. See that field for the full rationale.
+    pub graph_pulled: bool,
 }
 
 /// Hybrid pre-rerank retrieval pool: ANN-primary with a BM25 safety net,
@@ -2504,6 +2918,22 @@ fn build_hybrid_rerank_pool_with_expansion_on_connection(
     };
     let merged = merge_rerank_pools(&primary_pool, &bm25_pool, pool_width);
 
+    // v0.3 associative recall: graph-expand the MERGED rerank candidate pool here,
+    // strictly AFTER `cos_top` is computed from the raw ANN pool above, so a
+    // relationship-reachable memory below the ANN/BM25 threshold can still enter the
+    // candidate set while never influencing the cosine gate. The cross-encoder still
+    // gates what survives in `assemble_reranked_pack` (recall widens, precision held).
+    // Capture the pre-expansion pool ids so the content loop can tell a below-pool
+    // graph ADDITION (quarantined to a reserved slot) from an in-pool memory that
+    // merely also happens to be graph-reachable (competes normally, no churn).
+    let pre_expansion_ids: BTreeSet<String> =
+        merged.iter().map(|item| item.memory_id.clone()).collect();
+    let (merged, graph_activations) = if expansion.graph_expansion {
+        graph_expand_pool(connection, &pool_request, &merged, expansion)?
+    } else {
+        (merged, BTreeMap::new())
+    };
+
     // Late-interaction mode carries the summary as a separate alternate rerank
     // text (scored independently, max-combined by the caller). The legacy path
     // stays content-only so flag-off behavior is byte-identical.
@@ -2523,10 +2953,17 @@ fn build_hybrid_rerank_pool_with_expansion_on_connection(
         };
         let summary = (late_interaction && !summary.is_empty()).then_some(summary);
         if !content.is_empty() || summary.is_some() {
+            let activation = graph_activations.get(&item.memory_id).copied();
+            // A below-pool addition is any candidate the expansion produced that
+            // was not in the merged pool beforehand. In-pool graph-reachable
+            // memories keep `graph_pulled = false` so they compete normally.
+            let graph_pulled = !pre_expansion_ids.contains(&item.memory_id);
             candidates.push(RerankPoolCandidate {
                 memory_id: item.memory_id,
                 content,
                 summary,
+                activation,
+                graph_pulled,
             });
         }
     }
@@ -5556,12 +5993,21 @@ const DREAM_TASK_EXPIRE: &str = "expire";
 const DREAM_TASK_REINDEX: &str = "reindex";
 const DREAM_TASK_DEDUPE: &str = "dedupe";
 const DREAM_TASK_GRAPH: &str = "graph";
+const DREAM_TASK_LINK: &str = "link";
 const DREAM_TASK_ALL: &str = "all";
+
+/// A tag this common is not discriminative: linking every pair that shares it
+/// would flood the graph, so the `link` task skips tags carried by more than this
+/// many active memories.
+const DREAM_LINK_MAX_TAG_MEMORIES: usize = 25;
 const DREAM_TASK_ORDER: &[&str] = &[
     DREAM_TASK_PROMOTE,
     DREAM_TASK_EXPIRE,
     DREAM_TASK_REINDEX,
     DREAM_TASK_DEDUPE,
+    // `link` writes the cross-entity memory_links that `graph` then projects into
+    // weighted relationships, so it must run before `graph` in a combined run.
+    DREAM_TASK_LINK,
     DREAM_TASK_GRAPH,
 ];
 
@@ -5648,7 +6094,7 @@ fn normalize_dream_tasks(tasks: &[String]) -> Result<Vec<String>> {
         match trimmed {
             DREAM_TASK_ALL => all = true,
             DREAM_TASK_PROMOTE | DREAM_TASK_EXPIRE | DREAM_TASK_REINDEX | DREAM_TASK_DEDUPE
-            | DREAM_TASK_GRAPH => {
+            | DREAM_TASK_LINK | DREAM_TASK_GRAPH => {
                 requested.insert(trimmed.to_string());
             }
             _ => {
@@ -5741,6 +6187,18 @@ fn dream_store_tx(transaction: &Transaction<'_>, request: &DreamRequest) -> Resu
             truncated: false,
         }
     };
+    // `link` runs before `graph` so the cross-entity links it writes are visible
+    // to the graph projection in the same run.
+    let link = if dream_has_task(&prepared, DREAM_TASK_LINK) {
+        dream_tag_link(transaction, &prepared)?
+    } else {
+        DreamLinkReport {
+            attempted: false,
+            candidates: 0,
+            links_written: 0,
+            truncated: false,
+        }
+    };
     let graph = if dream_has_task(&prepared, DREAM_TASK_GRAPH) {
         dream_graph_diagnostics(transaction, &prepared)?
     } else {
@@ -5774,6 +6232,7 @@ fn dream_store_tx(transaction: &Transaction<'_>, request: &DreamRequest) -> Resu
         reindex,
         dedupe,
         graph,
+        link,
     };
 
     if !prepared.dry_run {
@@ -6081,6 +6540,81 @@ fn dream_exact_duplicate_proposals(
     })
 }
 
+/// `link` task: write cross-entity `memory_links` (`related_to`) between active
+/// memories that share a *discriminative* tag (one carried by at most
+/// `DREAM_LINK_MAX_TAG_MEMORIES` memories), so the `graph` task can project them
+/// into weighted relationships and associative recall can bridge curated memories.
+/// Edge multiplicity emerges naturally: more shared-tag memory pairs between two
+/// entities -> more links -> higher relationship confidence. Idempotent
+/// (`INSERT OR IGNORE`), bounded by the tag filter and `max_memories`.
+fn dream_tag_link(
+    transaction: &Transaction<'_>,
+    request: &PreparedDreamRequest,
+) -> Result<DreamLinkReport> {
+    let (space_predicate, space_values) =
+        optional_space_predicate("t1.sp", request.space.as_deref());
+    // Materialize the discriminative-tag set and the eligible (active, entity-keyed)
+    // tag rows ONCE, then self-join the small set. A correlated tag-frequency
+    // subquery here is catastrophically slow on a real store; CTEs keep it ~1s.
+    let select = format!(
+        "WITH disc AS (
+             SELECT tag FROM memory_tags GROUP BY tag HAVING COUNT(*) <= {max_tag}
+         ),
+         tagged AS (
+             SELECT mt.memory_id AS mid, mt.tag AS tag, m.entity_key AS ek, m.space_name AS sp
+               FROM memory_tags mt
+               JOIN disc ON disc.tag = mt.tag
+               JOIN memories m ON m.id = mt.memory_id AND m.status = 'active'
+                AND m.entity_key IS NOT NULL AND TRIM(m.entity_key) <> ''
+         )
+         SELECT t1.mid, t2.mid
+           FROM tagged t1
+           JOIN tagged t2 ON t1.tag = t2.tag AND t1.mid < t2.mid
+          WHERE t1.ek <> t2.ek
+            AND t1.sp = t2.sp
+            AND {space_predicate}
+          GROUP BY t1.mid, t2.mid
+          ORDER BY COUNT(*) DESC, t1.mid ASC, t2.mid ASC
+          LIMIT {limit}",
+        max_tag = DREAM_LINK_MAX_TAG_MEMORIES,
+        limit = request.max_memories.saturating_add(1),
+    );
+    let mut statement = transaction.prepare(&select)?;
+    let rows = statement.query_map(params_from_iter(space_values.iter()), |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    })?;
+    let mut pairs = collect_rows(rows)?;
+    let truncated = pairs.len() > request.max_memories;
+    if truncated {
+        pairs.truncate(request.max_memories);
+    }
+    let candidates = pairs.len();
+    if request.dry_run {
+        return Ok(DreamLinkReport {
+            attempted: true,
+            candidates,
+            links_written: 0,
+            truncated,
+        });
+    }
+    let now = now_timestamp(transaction)?;
+    let mut links_written = 0usize;
+    for (src, dst) in pairs {
+        links_written += transaction.execute(
+            "INSERT OR IGNORE INTO memory_links \
+             (src_memory_id, dst_memory_id, link_type, status, confidence, created_at) \
+             VALUES (?1, ?2, 'related_to', 'active', NULL, ?3)",
+            params![src, dst, now],
+        )?;
+    }
+    Ok(DreamLinkReport {
+        attempted: true,
+        candidates,
+        links_written,
+        truncated,
+    })
+}
+
 fn dream_graph_diagnostics(
     transaction: &Transaction<'_>,
     request: &PreparedDreamRequest,
@@ -6143,11 +6677,24 @@ fn dream_graph_diagnostics(
     })
 }
 
-/// Materialize dream-proposed relationships (deterministic projections of
-/// explicit `memory_links` onto the entity graph) as active edges. Idempotent
-/// via `upsert_relationship_tx`. Confidence is 1.0 because each proposal mirrors
-/// a concrete recorded link, not a probabilistic inference. Runs only on a
-/// non-dry-run dream `graph` task.
+/// Differentiated edge confidence from evidence multiplicity: a saturating map
+/// `count / (count + 1)` in `(0, 1)`. One supporting link → 0.5, two → 0.67,
+/// three → 0.75, … so a densely co-occurring association out-weights an incidental
+/// single-link edge. This is what lets `edge_weight` modulate graph-expansion
+/// activation (resolves the uniform-`1.0` debt); the ordering, not the absolute
+/// value, is what selects neighbors.
+#[must_use]
+pub fn relationship_confidence_from_evidence(evidence_count: usize) -> f64 {
+    let count = u32::try_from(evidence_count.max(1)).map_or(f64::from(u32::MAX), f64::from);
+    count / (count + 1.0)
+}
+
+/// Materialize dream-proposed relationships (deterministic projections of explicit
+/// `memory_links` onto the entity graph) as active edges. Idempotent via
+/// `upsert_relationship_tx`. Confidence is derived from evidence multiplicity (see
+/// [`relationship_confidence_from_evidence`]) so well-supported edges carry more
+/// activation weight than incidental ones. Runs only on a non-dry-run dream
+/// `graph` task.
 fn apply_graph_relationship_proposals(
     transaction: &Transaction<'_>,
     proposals: &[DreamRelationshipProposal],
@@ -6165,7 +6712,7 @@ fn apply_graph_relationship_proposals(
                 memory_id: Some(proposal.src_memory_id.clone()),
                 source_episode_id: None,
                 status: status::ACTIVE.to_string(),
-                confidence: 1.0,
+                confidence: relationship_confidence_from_evidence(proposal.evidence_count),
                 observed_at: None,
                 valid_from: None,
                 valid_to: None,
@@ -6318,8 +6865,13 @@ fn dream_graph_relationship_proposals(
     let (space_predicate, space_values) =
         optional_space_predicate("src.space_name", request.space.as_deref());
     let sql = format!(
-        "SELECT src.space_name, l.src_memory_id, l.dst_memory_id, l.link_type,
-                src.entity_key, l.link_type, dst.entity_key
+        // Aggregate links by (subject entity, link type, object entity) so an edge
+        // backed by many co-occurring memory_links proposes once, carrying the
+        // evidence multiplicity that differentiates its confidence (see
+        // `apply_graph_relationship_proposals`). MIN() picks a deterministic
+        // representative evidence memory for the edge.
+        "SELECT src.space_name, MIN(l.src_memory_id), MIN(l.dst_memory_id), l.link_type,
+                src.entity_key, l.link_type, dst.entity_key, COUNT(*)
          FROM memory_links l
          JOIN memories src ON src.id = l.src_memory_id
          JOIN memories dst ON dst.id = l.dst_memory_id
@@ -6345,8 +6897,8 @@ fn dream_graph_relationship_proposals(
            AND src.entity_key <> dst.entity_key
            AND existing.id IS NULL
            AND {space_predicate}
-         ORDER BY src.space_name ASC, l.link_type ASC, src.entity_key ASC, dst.entity_key ASC,
-                  l.src_memory_id ASC, l.dst_memory_id ASC
+         GROUP BY src.space_name, src.entity_key, l.link_type, dst.entity_key
+         ORDER BY src.space_name ASC, l.link_type ASC, src.entity_key ASC, dst.entity_key ASC
          LIMIT {}",
         request.max_memories.saturating_add(1)
     );
@@ -6360,6 +6912,7 @@ fn dream_graph_relationship_proposals(
             subject_entity_key: row.get(4)?,
             relation_type: row.get(5)?,
             object_entity_key: row.get(6)?,
+            evidence_count: usize::try_from(row.get::<_, i64>(7)?).unwrap_or(1).max(1),
         })
     })?;
     collect_rows(rows)
@@ -6461,7 +7014,7 @@ fn dream_budget_json(request: &PreparedDreamRequest) -> String {
 
 fn dream_summary_json(report: &DreamReport) -> String {
     format!(
-        "{{\"status\":{},\"promoted\":{},\"expired\":{},\"skipped_pinned\":{},\"reindex_memory_rows\":{},\"reindex_source_episode_rows\":{},\"duplicate_proposals\":{},\"graph_orphan_entities\":{},\"graph_dangling_relationships\":{},\"graph_inactive_evidence_relationships\":{},\"graph_relationship_proposals\":{},\"dry_run\":{}}}",
+        "{{\"status\":{},\"promoted\":{},\"expired\":{},\"skipped_pinned\":{},\"reindex_memory_rows\":{},\"reindex_source_episode_rows\":{},\"duplicate_proposals\":{},\"graph_orphan_entities\":{},\"graph_dangling_relationships\":{},\"graph_inactive_evidence_relationships\":{},\"graph_relationship_proposals\":{},\"tag_links_written\":{},\"dry_run\":{}}}",
         json_string_for_store(&report.status),
         report.promote.promoted,
         report.expire.expired,
@@ -6473,6 +7026,7 @@ fn dream_summary_json(report: &DreamReport) -> String {
         report.graph.dangling_relationships,
         report.graph.inactive_evidence_relationships,
         report.graph.relationship_proposals.len(),
+        report.link.links_written,
         report.dry_run
     )
 }

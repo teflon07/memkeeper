@@ -6,6 +6,23 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html) once it reache
 1.0. Until then, minor releases may include breaking changes to the storage
 schema and wire protocol.
 
+## [0.2.12] - 2026-06-30
+
+### Performance
+- **`dream link` tag-link query rewritten as CTEs.** The shared-tag cross-entity
+  link pass used a correlated tag-frequency subquery that ran for minutes on a
+  realistic store; materializing the discriminative-tag set and eligible rows as
+  CTEs brings it down to ~1.4s. Same result set and ordering.
+
+### Experimental (off by default)
+- **Associative-recall graph path.** Behind `MEMKEEPER_ASSOCIATIVE_RECALL`
+  (default off, byte-identical when off), pack retrieval can graph-expand the
+  rerank candidate pool one hop and reserve a bounded slot for a hop-reached
+  memory. A relative gate quarantines below-pool graph additions to that reserved
+  slot, so enabling it adds at most one bounded swap per query rather than
+  reordering results. This is experimental: it has not shown a measurable recall
+  gain on labeled benchmarks and is not recommended for production use yet.
+
 ## [0.2.11] - 2026-06-30
 
 ### Removed

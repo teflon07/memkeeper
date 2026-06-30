@@ -488,6 +488,73 @@ pub(crate) fn late_interaction_enabled() -> bool {
     std::env::var("MEMKEEPER_LATE_INTERACTION").is_ok_and(|value| value == "1")
 }
 
+/// Associative-recall gate (v0.3 `hybrid_assoc_v0`): `MEMKEEPER_ASSOCIATIVE_RECALL=1`
+/// makes serve/CLI/MCP populate `graph_expansion` for every pack. OFF by default,
+/// so flag-off behavior stays byte-identical. Mirrors the `MEMKEEPER_LATE_INTERACTION`
+/// precedent: the store keys behavior solely off the request field; only the caller
+/// reads the env.
+pub(crate) fn associative_recall_enabled() -> bool {
+    std::env::var("MEMKEEPER_ASSOCIATIVE_RECALL").is_ok_and(|value| value == "1")
+}
+
+/// Fail-closed hatch: `MEMKEEPER_ASSOCIATIVE_RECALL_REQUIRE=1` refuses a pack when
+/// associative recall is requested but the graph is unusable, instead of silently
+/// degrading to ANN/BM25 recall.
+pub(crate) fn associative_recall_require() -> bool {
+    std::env::var("MEMKEEPER_ASSOCIATIVE_RECALL_REQUIRE").is_ok_and(|value| value == "1")
+}
+
+/// Apply the associative-recall env gate to a pack's expansion options and honor
+/// the require hatch. `MEMKEEPER_ASSOCIATIVE_RECALL=1` forces `graph_expansion` on
+/// (the request field can also enable it directly for tests/programmatic use); when
+/// recall is on, required, and the graph is unusable, refuse rather than degrade.
+///
+/// Enabling via env also grants one reserved rerank slot by default (when the
+/// request did not set one), so the toggle actually lands hop-reached memories
+/// rather than only widening recall the reranker then discards. An explicit
+/// `graph_rerank_slots` in the request always wins.
+///
+/// Under the relative gate, below-pool graph additions land ONLY through reserved
+/// slots, and the slot picks the highest-activation neighbor — so fetching more
+/// than `graph_rerank_slots` neighbors only widens the cross-encoder pool (latency)
+/// without changing what lands. When the env grants the default slot we therefore
+/// tighten `max_graph_neighbors` to match it (measured: +208ms at mgn=1 vs +575ms
+/// at the mgn=5 default). An explicit request value still wins.
+fn apply_associative_recall_gate(
+    store: &Path,
+    request: &PackRequest,
+    expansion: &mut PackExpansionOptions,
+) -> Result<(), CliError> {
+    if associative_recall_enabled() {
+        expansion.graph_expansion = true;
+        if expansion.graph_rerank_slots == 0 {
+            expansion.graph_rerank_slots = 1;
+            // Latency: only the top-`slots` below-pool neighbors can ever claim a
+            // slot, so cap the neighbor fetch to the slot count rather than the
+            // wider default. Keep at least 1 so the hop still has somewhere to go.
+            expansion.max_graph_neighbors = expansion.graph_rerank_slots.max(1);
+        }
+    }
+    if expansion.graph_expansion && associative_recall_require() {
+        let space = request
+            .filters
+            .spaces
+            .first()
+            .map_or(memkeeper_core::DEFAULT_SPACE, String::as_str);
+        let readiness =
+            memkeeper_store::graph_recall_readiness(store, space).map_err(CliError::from)?;
+        if !readiness.usable() {
+            return Err(CliError::InvalidRequest(format!(
+                "MEMKEEPER_ASSOCIATIVE_RECALL_REQUIRE=1 but the associative-recall graph is \
+                 unusable in space {space} (succeeded_graph_synthesis={}, active_relationships={}) \
+                 — run `dream --tasks graph` to build it",
+                readiness.succeeded_graph_synthesis, readiness.active_relationships
+            )));
+        }
+    }
+    Ok(())
+}
+
 #[cfg(feature = "embed")]
 impl SemanticModels {
     fn load(embed: bool, rerank: bool) -> Self {
@@ -1073,6 +1140,11 @@ fn run_pack_with_models(args: &[String], semantic_models: &SemanticModels) -> i3
     let command = Command::Pack;
     let result = parse_pack_args(args)
         .and_then(|mut options| {
+            apply_associative_recall_gate(
+                &options.store,
+                &options.request,
+                &mut options.expansion,
+            )?;
             apply_pack_query_expansion(&mut options.request, &mut options.expansion);
             maybe_embed_pack_request(&mut options.request, semantic_models);
             maybe_colbert_embed_pack_request(&mut options.request, semantic_models);
@@ -1472,11 +1544,19 @@ fn maybe_rerank_pack_report(
                 memory_id: candidate.memory_id,
                 content: candidate.content,
                 rerank_score,
+                activation: candidate.activation,
+                graph_pulled: candidate.graph_pulled,
             },
         )
         .collect();
-    *report =
-        memkeeper_store::assemble_reranked_pack(request, cosine_gate, pool.cos_top, &candidates);
+    *report = memkeeper_store::assemble_reranked_pack_with_graph_slots(
+        request,
+        cosine_gate,
+        pool.cos_top,
+        &candidates,
+        expansion.graph_rerank_slots,
+        expansion.graph_activation_floor,
+    );
 }
 
 #[cfg(not(feature = "embed"))]
@@ -4081,7 +4161,7 @@ fn print_help() {
            history --store <path> --id <id> --json Show memory versions/events.\n\
            export --store <path> --output <path> --json Write logical JSONL export.\n\
            import --store <path> --input <path> --json  Import logical JSONL into a new store.\n\
-           dream --store <path> [--task promote|expire|reindex|dedupe|graph] [--promote-threshold <N>] [--promote-score-floor <F>] [--promote-rank-cap <N>] [--dry-run|--apply] --json '{{}}' Run bounded maintenance tasks.\n\
+           dream --store <path> [--task promote|expire|reindex|dedupe|link|graph] [--promote-threshold <N>] [--promote-score-floor <F>] [--promote-rank-cap <N>] [--dry-run|--apply] --json '{{}}' Run bounded maintenance tasks.\n\
            (--dry-run previews; --apply/--commit mutates. forget/import/dream accept both; mutating commands always report dry_run + changed ids.)\n\
            backup --store <path> --output <path> --json Create physical SQLite backup.\n\
            reindex --store <path> [--embed] [--tokens] [--force] Backfill semantic vectors for memories written before the models were present (needs a semantic build). `reindex --help` for details.\n\

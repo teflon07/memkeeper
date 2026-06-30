@@ -1372,7 +1372,7 @@ pub(crate) fn import_result_json(report: &ImportReport) -> String {
 
 pub(crate) fn dream_result_json(report: &DreamReport) -> String {
     format!(
-        "{{\"dream\":{{\"id\":{},\"status\":{},\"space\":{},\"silos\":{},\"tasks\":{},\"started_at\":{},\"finished_at\":{},\"dry_run\":{},\"journaled\":{},\"max_memories\":{}}},\"promote\":{},\"expire\":{},\"reindex\":{},\"dedupe\":{},\"graph\":{}}}",
+        "{{\"dream\":{{\"id\":{},\"status\":{},\"space\":{},\"silos\":{},\"tasks\":{},\"started_at\":{},\"finished_at\":{},\"dry_run\":{},\"journaled\":{},\"max_memories\":{}}},\"promote\":{},\"expire\":{},\"reindex\":{},\"dedupe\":{},\"graph\":{},\"link\":{}}}",
         json_string(&report.run_id),
         json_string(&report.status),
         optional_string_json(report.space.as_deref()),
@@ -1387,7 +1387,15 @@ pub(crate) fn dream_result_json(report: &DreamReport) -> String {
         dream_expire_json(&report.expire),
         dream_reindex_json(&report.reindex),
         dream_dedupe_json(&report.dedupe),
-        dream_graph_json(&report.graph)
+        dream_graph_json(&report.graph),
+        dream_link_json(&report.link)
+    )
+}
+
+pub(crate) fn dream_link_json(report: &memkeeper_store::DreamLinkReport) -> String {
+    format!(
+        "{{\"attempted\":{},\"candidates\":{},\"links_written\":{},\"truncated\":{}}}",
+        report.attempted, report.candidates, report.links_written, report.truncated
     )
 }
 

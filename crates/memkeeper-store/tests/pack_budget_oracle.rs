@@ -109,6 +109,8 @@ fn rc(id: &str, content: &str, score: f32) -> RerankCandidate {
         memory_id: id.to_string(),
         content: content.to_string(),
         rerank_score: score,
+        activation: None,
+        graph_pulled: false,
     }
 }
 

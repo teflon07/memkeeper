@@ -1096,18 +1096,45 @@ pub struct PackRequest {
 }
 
 /// Optional retrieval-expansion behavior for pack construction.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// `PartialEq` only (not `Eq`): `graph_decay` is an `f64` knob, so the struct
+/// cannot derive `Eq`.
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PackExpansionOptions {
     /// Expand each user query into deterministic subqueries before retrieval.
     pub query_expansion: bool,
     /// Add same-entity / same-claim neighbors from top pack-pool anchors.
     pub thread_expansion: bool,
+    /// v0.3 associative recall: graph-expand the merged rerank candidate pool by
+    /// traversing the entity/relationship graph one hop from the top anchored
+    /// seeds, so a relationship-reachable memory below the ANN/BM25 threshold can
+    /// still enter the candidate set. Applied AFTER `cos_top` is computed from the
+    /// raw ANN pool, so graph-pulled items never influence the cosine gate. The
+    /// cross-encoder still gates what lands in the pack. Strategy: `hybrid_assoc_v0`.
+    pub graph_expansion: bool,
     /// Maximum total query variants after deterministic expansion.
     pub max_query_variants: usize,
     /// Maximum anchor memories used for same-thread expansion.
     pub max_thread_seeds: usize,
     /// Maximum neighbor memories considered per anchor.
     pub max_thread_neighbors: usize,
+    /// Maximum top-of-pool seeds anchored for graph expansion.
+    pub max_graph_seeds: usize,
+    /// Maximum graph-reachable neighbor memories unioned into the candidate pool
+    /// (an activation-ordered budget, not a relevance cap).
+    pub max_graph_neighbors: usize,
+    /// Per-hop activation decay knob (`activation = seed_score * decay^hop *
+    /// edge_weight`). Bounds/orders which graph-reachable memories get fetched and
+    /// reranked; it is a candidate-budget allocator, never a relevance score.
+    pub graph_decay: f64,
+    /// v0.3.1 associative recall: reserve up to this many pack slots for the
+    /// highest-activation graph-pulled candidates, letting a hop-reached memory the
+    /// cross-encoder scored below the cut still land. `0` (default) keeps graph
+    /// expansion recall-widening-only — byte-identical packs to graph-off ranking.
+    pub graph_rerank_slots: usize,
+    /// Minimum activation a graph candidate must reach to claim a reserved slot.
+    /// Bounds precision so low-activation graph noise cannot take a slot.
+    pub graph_activation_floor: f64,
 }
 
 impl Default for PackExpansionOptions {
@@ -1115,9 +1142,15 @@ impl Default for PackExpansionOptions {
         Self {
             query_expansion: false,
             thread_expansion: false,
+            graph_expansion: false,
             max_query_variants: MAX_BATCH_QUERIES,
             max_thread_seeds: 3,
             max_thread_neighbors: 3,
+            max_graph_seeds: 3,
+            max_graph_neighbors: 5,
+            graph_decay: 0.5,
+            graph_rerank_slots: 0,
+            graph_activation_floor: 0.0,
         }
     }
 }
@@ -1303,6 +1336,8 @@ pub struct DreamReport {
     pub dedupe: DreamDedupeReport,
     /// Graph projection diagnostics report.
     pub graph: DreamGraphReport,
+    /// Shared-tag cross-entity linking report.
+    pub link: DreamLinkReport,
 }
 
 /// Expiry task report for a dream run.
@@ -1361,6 +1396,23 @@ pub struct DreamDedupeReport {
     pub truncated: bool,
 }
 
+/// Result of the `link` dream task: cross-entity `memory_links` written between
+/// memories that share discriminative tags, so the graph projection (`graph` task)
+/// can bridge curated memories for associative recall.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DreamLinkReport {
+    /// Whether the task ran.
+    pub attempted: bool,
+    /// Cross-entity shared-tag memory-pair links eligible to write (after the
+    /// discriminative-tag filter and the per-run cap).
+    pub candidates: usize,
+    /// Links actually written this run (0 on a dry run; already-present links are
+    /// ignored idempotently and not counted).
+    pub links_written: usize,
+    /// True when more eligible pairs existed beyond the per-run cap.
+    pub truncated: bool,
+}
+
 /// Graph projection diagnostics task report for a dream run.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DreamGraphReport {
@@ -1402,6 +1454,10 @@ pub struct DreamRelationshipProposal {
     pub relation_type: String,
     /// Proposed object entity key.
     pub object_entity_key: String,
+    /// Number of active `memory_links` supporting this edge (evidence multiplicity).
+    /// Drives the materialized relationship's confidence so a well-co-occurring
+    /// association out-weights an incidental one in graph-expansion activation.
+    pub evidence_count: usize,
 }
 
 /// One exact duplicate proposal. The dream run does not auto-merge v0.1 duplicates.

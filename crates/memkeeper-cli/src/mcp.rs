@@ -673,9 +673,15 @@ pub(crate) fn build_serve_call(
             for key in [
                 "query_expansion",
                 "thread_expansion",
+                "graph_expansion",
                 "max_query_variants",
                 "max_thread_seeds",
                 "max_thread_neighbors",
+                "max_graph_seeds",
+                "max_graph_neighbors",
+                "graph_decay",
+                "graph_rerank_slots",
+                "graph_activation_floor",
             ] {
                 copy_opt(&mut payload, args, key);
             }
@@ -1038,9 +1044,15 @@ for factual corrections so the signal is captured explicitly rather than inferre
                 "min_score": { "type": "number", "description": "Drop memories scoring below this threshold; the pack abstains (returns empty) when nothing clears it. Default 0 (no floor)." },
                 "query_expansion": { "type": "boolean", "description": "Default false. Deterministically add subqueries before retrieval." },
                 "thread_expansion": { "type": "boolean", "description": "Default false. Add same-entity/same-claim neighbors to the rerank pool." },
+                "graph_expansion": { "type": "boolean", "description": "Default false. Associative recall: graph-expand the rerank pool one hop from the top seeds so a relationship-reachable memory below the ANN/BM25 threshold can still be reranked (hybrid_assoc_v0)." },
                 "max_query_variants": { "type": "integer", "description": "Default engine maximum." },
                 "max_thread_seeds": { "type": "integer", "description": "Default 3." },
                 "max_thread_neighbors": { "type": "integer", "description": "Default 3." },
+                "max_graph_seeds": { "type": "integer", "description": "Default 3. Top-of-pool anchors used for graph expansion." },
+                "max_graph_neighbors": { "type": "integer", "description": "Default 5. Graph-reachable neighbors unioned into the pool (activation budget)." },
+                "graph_decay": { "type": "number", "description": "Default 0.5. Per-hop activation decay for graph expansion." },
+                "graph_rerank_slots": { "type": "integer", "description": "Default 0. Reserve N pack slots for top-activation graph candidates so a hop-reached memory the reranker scored low can still land (0 = recall-widening only)." },
+                "graph_activation_floor": { "type": "number", "description": "Default 0.0. Minimum activation a graph candidate needs to claim a reserved rerank slot." },
                 "space": { "type": "string", "description": "Restrict retrieval to a single memory space (namespace)." },
                 "tags": { "type": "array", "items": { "type": "string" }, "description": "Restrict retrieval to memories carrying these tags." },
             }),

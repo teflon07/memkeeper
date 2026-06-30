@@ -1,0 +1,14 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.teflon07/memkeeper",
+  "description": "Local-first memory for AI agents: on-device hybrid retrieval over a single SQLite file.",
+  "repository": { "url": "https://github.com/teflon07/memkeeper", "source": "github" },
+  "version": "0.2.12",
+  "packages": [
+    {
+      "registryType": "oci",
+      "identifier": "ghcr.io/teflon07/memkeeper:0.2.12",
+      "transport": { "type": "stdio" }
+    }
+  ]
+}

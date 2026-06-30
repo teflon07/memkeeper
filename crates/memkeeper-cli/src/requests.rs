@@ -755,12 +755,23 @@ pub(crate) fn pack_expansion_options_from_json(
     Ok(PackExpansionOptions {
         query_expansion: optional_bool_field(object, "query_expansion")?.unwrap_or(false),
         thread_expansion: optional_bool_field(object, "thread_expansion")?.unwrap_or(false),
+        graph_expansion: optional_bool_field(object, "graph_expansion")?.unwrap_or(false),
         max_query_variants: optional_usize_field(object, "max_query_variants")?
             .unwrap_or(PackExpansionOptions::default().max_query_variants),
         max_thread_seeds: optional_usize_field(object, "max_thread_seeds")?
             .unwrap_or(PackExpansionOptions::default().max_thread_seeds),
         max_thread_neighbors: optional_usize_field(object, "max_thread_neighbors")?
             .unwrap_or(PackExpansionOptions::default().max_thread_neighbors),
+        max_graph_seeds: optional_usize_field(object, "max_graph_seeds")?
+            .unwrap_or(PackExpansionOptions::default().max_graph_seeds),
+        max_graph_neighbors: optional_usize_field(object, "max_graph_neighbors")?
+            .unwrap_or(PackExpansionOptions::default().max_graph_neighbors),
+        graph_decay: optional_number_field(object, "graph_decay")?
+            .unwrap_or(PackExpansionOptions::default().graph_decay),
+        graph_rerank_slots: optional_usize_field(object, "graph_rerank_slots")?
+            .unwrap_or(PackExpansionOptions::default().graph_rerank_slots),
+        graph_activation_floor: optional_number_field(object, "graph_activation_floor")?
+            .unwrap_or(PackExpansionOptions::default().graph_activation_floor),
     })
 }
 
@@ -784,9 +795,15 @@ pub(crate) fn pack_request_from_json(input: &str) -> Result<PackRequest, CliErro
             "query_embeddings",
             "query_expansion",
             "thread_expansion",
+            "graph_expansion",
             "max_query_variants",
             "max_thread_seeds",
             "max_thread_neighbors",
+            "max_graph_seeds",
+            "max_graph_neighbors",
+            "graph_decay",
+            "graph_rerank_slots",
+            "graph_activation_floor",
         ],
     )?;
     let filters = match object.get("filters") {

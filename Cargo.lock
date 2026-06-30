@@ -602,7 +602,7 @@ checksum = "88904434abc2901f197fe8cc55f0445e7ded921dba5911dad2e2b39b48e663c4"
 
 [[package]]
 name = "memkeeper-cli"
-version = "0.2.11"
+version = "0.2.12"
 dependencies = [
  "memkeeper-core",
  "memkeeper-embed",
@@ -616,11 +616,11 @@ dependencies = [
 
 [[package]]
 name = "memkeeper-core"
-version = "0.2.11"
+version = "0.2.12"
 
 [[package]]
 name = "memkeeper-embed"
-version = "0.2.11"
+version = "0.2.12"
 dependencies = [
  "anyhow",
  "ndarray",
@@ -634,11 +634,11 @@ dependencies = [
 
 [[package]]
 name = "memkeeper-protocol"
-version = "0.2.11"
+version = "0.2.12"
 
 [[package]]
 name = "memkeeper-store"
-version = "0.2.11"
+version = "0.2.12"
 dependencies = [
  "memkeeper-core",
  "rusqlite",
@@ -1104,9 +1104,9 @@ dependencies = [
 
 [[package]]
 name = "rustls-pki-types"
-version = "1.14.1"
+version = "1.15.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "30a7197ae7eb376e574fe940d068c30fe0462554a3ddbe4eca7838e049c937a9"
+checksum = "764899a24af3980067ee14bc143654f297b22eaebfe3c7b6b211920a5a59b046"
 dependencies = [
  "zeroize",
 ]

@@ -3,16 +3,18 @@
 //! because this is still `mod tests` inside the crate root.
 
 use super::{
-    approve_candidate, assemble_reranked_pack, backup_store, batch_search_memories, build_pack,
+    approve_candidate, assemble_reranked_pack, assemble_reranked_pack_with_graph_slots,
+    backup_store, batch_search_memories, build_hybrid_rerank_pool_with_expansion, build_pack,
     build_pack_pool_with_expansion, create_space, document_duplicates, dream_store, empty_pack,
     expanded_pack_queries, export_store, forget_memory, fts_score, get_document, get_memory,
-    graph_context, graph_neighbors, import_store, ingest_source, init_store, last_synthesis_run,
-    list_candidates, list_memories, list_silos, list_spaces, load_token_embeddings,
-    load_token_embeddings_cached, mark_source_episodes_extracted, maxsim_score, memory_history,
-    merge_entity, normalize_utc_timestamp, now_julian_day, pack_blocked_by_cosine_gate,
-    promotion_candidates, prune_documents, rebuild_fts, recency_score_for_silo, record_recall,
-    reject_candidate, remember_memory, schema_mentions_required_objects, search_documents,
-    search_entities, search_memories, sha256_hex, sidecar_path, source_tier_score, store_stats,
+    graph_context, graph_neighbors, graph_recall_readiness, import_store, ingest_source,
+    init_store, last_synthesis_run, list_candidates, list_memories, list_silos, list_spaces,
+    load_token_embeddings, load_token_embeddings_cached, mark_source_episodes_extracted,
+    maxsim_score, memory_history, merge_entity, normalize_utc_timestamp, now_julian_day,
+    pack_blocked_by_cosine_gate, promotion_candidates, prune_documents, rebuild_fts,
+    recency_score_for_silo, record_recall, reject_candidate, relationship_confidence_from_evidence,
+    remember_memory, schema_mentions_required_objects, search_documents, search_entities,
+    search_memories, sha256_hex, sidecar_path, source_tier_score, store_stats,
     store_stats_with_health, submit_candidate, upsert_entity, upsert_memory_token_embedding,
     upsert_relationship, verify_memory, BackupRequest, BatchSearchQuery, BatchSearchRequest,
     CandidateApproveRequest, CandidateListRequest, CandidateRejectRequest, CandidateSubmitRequest,
@@ -21,12 +23,12 @@ use super::{
     ExportRequest, ForgetRequest, GetOptions, GraphContextRequest, GraphNeighborsRequest,
     HistoryOptions, ImportRequest, IngestRequest, MarkExtractedRequest, MemoryListRequest,
     PackExpansionOptions, PackRequest, PromotionCandidatesRequest, RecallEvent, RecallLogRequest,
-    RelationshipUpsertRequest, RememberRequest, RerankCandidate, SearchFilters, SearchRequest,
-    SearchResult, SiloListRequest, SpaceCreateRequest, VerifyRequest, DEFAULT_PROMOTE_RANK_CAP,
-    DEFAULT_PROMOTE_SCORE_FLOOR, DEFAULT_PROMOTE_THRESHOLD, DOCUMENTS_SPACE, MAX_CONTENT_CHARS,
-    MAX_HISTORY_LIMIT, MAX_MEMORY_LINKS, MAX_METADATA_VALUE_CHARS, MAX_SEARCH_LIMIT,
-    MAX_TIMESTAMP_CHARS, PROJECT_STORE_RELATIVE_PATH, SCHEMA_SQL, SCHEMA_VERSION,
-    USER_STORE_PATH_HINT, VOLATILE_MAX_RECENCY_SCORE,
+    RelationshipUpsertRequest, RememberRequest, RerankCandidate, RerankPool, SearchFilters,
+    SearchRequest, SearchResult, SiloListRequest, SpaceCreateRequest, VerifyRequest,
+    DEFAULT_PROMOTE_RANK_CAP, DEFAULT_PROMOTE_SCORE_FLOOR, DEFAULT_PROMOTE_THRESHOLD,
+    DOCUMENTS_SPACE, MAX_CONTENT_CHARS, MAX_HISTORY_LIMIT, MAX_MEMORY_LINKS,
+    MAX_METADATA_VALUE_CHARS, MAX_SEARCH_LIMIT, MAX_TIMESTAMP_CHARS, PROJECT_STORE_RELATIVE_PATH,
+    SCHEMA_SQL, SCHEMA_VERSION, USER_STORE_PATH_HINT, VOLATILE_MAX_RECENCY_SCORE,
 };
 use memkeeper_core::DEFAULT_SPACE;
 use rusqlite::{params, Connection};
@@ -3729,6 +3731,7 @@ fn pack_query_expansion_derives_bounded_action_and_decision_variants() {
             max_query_variants: 4,
             max_thread_seeds: 3,
             max_thread_neighbors: 3,
+            ..PackExpansionOptions::default()
         },
     );
 
@@ -3788,6 +3791,7 @@ fn pack_pool_thread_expansion_interleaves_same_entity_neighbors() {
             max_query_variants: 4,
             max_thread_seeds: 3,
             max_thread_neighbors: 3,
+            ..PackExpansionOptions::default()
         },
     )
     .expect("base pool");
@@ -3807,12 +3811,415 @@ fn pack_pool_thread_expansion_interleaves_same_entity_neighbors() {
             max_query_variants: 4,
             max_thread_seeds: 1,
             max_thread_neighbors: 2,
+            ..PackExpansionOptions::default()
         },
     )
     .expect("expanded pool");
     assert!(expanded_pool
         .iter()
         .any(|item| item.memory_id == sibling_report.memory.id));
+
+    cleanup_store(&path);
+}
+
+/// Part 2 (memory-to-memory edges): the `link` dream task writes cross-entity
+/// `memory_links` between curated memories that share a discriminative tag, and
+/// the `graph` task then bridges their entities — so associative recall finally
+/// has curated-memory edges to traverse. A memory sharing no tag stays unlinked.
+#[test]
+fn dream_link_bridges_tag_sharing_memories_into_the_graph() {
+    let path = temp_store_path("dream_link_tag_bridge");
+    cleanup_store(&path);
+    init_store(&path).expect("init succeeds");
+    for (key, name) in [("ent:a", "A"), ("ent:b", "B"), ("ent:c", "C")] {
+        upsert_entity(&path, &entity_upsert_request(key, name)).expect("entity");
+    }
+    let tagged = |content: &str, ekey: &str, tags: &[&str]| RememberRequest {
+        entity_key: Some(ekey.to_string()),
+        tags: tags.iter().map(|t| (*t).to_string()).collect(),
+        ..remember_request(content)
+    };
+    // a and b share the discriminative tag "zephyr-topic" across entities.
+    remember_memory(&path, &tagged("alpha note", "ent:a", &["zephyr-topic"])).expect("a");
+    remember_memory(&path, &tagged("beta note", "ent:b", &["zephyr-topic"])).expect("b");
+    // c shares no tag with a/b.
+    remember_memory(&path, &tagged("gamma note", "ent:c", &["other-topic"])).expect("c");
+
+    let report = dream_store(
+        &path,
+        &DreamRequest {
+            tasks: vec!["link".to_string(), "graph".to_string()],
+            max_memories: 100,
+            dry_run: false,
+            ..dream_request_defaults()
+        },
+    )
+    .expect("link+graph dream");
+    assert!(report.link.attempted, "link task ran");
+    assert_eq!(
+        report.link.links_written, 1,
+        "one cross-entity shared-tag link written"
+    );
+
+    let connection = Connection::open(&path).expect("open store");
+    // The graph projection bridged ent:a <-> ent:b (relationship in either direction).
+    let bridged: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM relationships r \
+             JOIN entities s ON s.id = r.subject_entity_id \
+             JOIN entities o ON o.id = r.object_entity_id \
+             WHERE r.status='active' \
+               AND ((s.entity_key='ent:a' AND o.entity_key='ent:b') \
+                 OR (s.entity_key='ent:b' AND o.entity_key='ent:a'))",
+            [],
+            |row| row.get(0),
+        )
+        .expect("query");
+    assert_eq!(
+        bridged, 1,
+        "tag-sharing memories bridged their entities in the graph"
+    );
+    // ent:c (no shared tag) is not bridged to anything.
+    let c_edges: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM relationships r \
+             JOIN entities s ON s.id = r.subject_entity_id \
+             JOIN entities o ON o.id = r.object_entity_id \
+             WHERE r.status='active' AND (s.entity_key='ent:c' OR o.entity_key='ent:c')",
+            [],
+            |row| row.get(0),
+        )
+        .expect("query c");
+    assert_eq!(c_edges, 0, "a memory sharing no tag stays unlinked");
+    drop(connection);
+
+    // Dry run writes nothing but still reports candidates.
+    let dry = dream_store(
+        &path,
+        &DreamRequest {
+            tasks: vec!["link".to_string()],
+            max_memories: 100,
+            dry_run: true,
+            ..dream_request_defaults()
+        },
+    )
+    .expect("dry link dream");
+    assert_eq!(dry.link.links_written, 0, "dry run writes no links");
+
+    cleanup_store(&path);
+}
+
+/// Record a succeeded `dream --tasks graph` run so the associative-recall
+/// readiness check treats the graph as synthesized (not stale).
+fn insert_graph_synthesis_run(path: &Path) {
+    let conn = Connection::open(path).expect("open store");
+    conn.execute_batch(
+        "INSERT INTO dream_runs (id, space_name, status, started_at, finished_at, budget_json) \
+         VALUES ('dgraph','workspace-memory','succeeded','2026-06-29T03:00:00Z',\
+                 '2026-06-29T03:05:00Z','{\"tasks\":[\"graph\"],\"space\":\"workspace-memory\"}')",
+    )
+    .expect("insert graph dream run");
+}
+
+/// Build the seed + relationship-only neighbor fixture shared by the
+/// associative-recall proof tests. Returns (`seed_id`, `neighbor_id`).
+///
+/// The seed lexically matches `warden sandbox deploys`; the neighbor shares no
+/// query terms and carries no embedding, so ANN/BM25 cannot reach it — its only
+/// path to the pool is the `project:warden -depends_on-> component:ledger` edge.
+fn associative_recall_fixture(path: &Path) -> (String, String) {
+    let mut seed = basic_request("decision: adopt the warden sandbox for memkeeper deploys");
+    seed.entity_key = Some("project:warden".to_string());
+    let seed_report = remember_memory(path, &seed).expect("remember seed");
+
+    let mut neighbor = basic_request("note: capybara reconciles its journals every midnight cycle");
+    neighbor.entity_key = Some("component:ledger".to_string());
+    let neighbor_report = remember_memory(path, &neighbor).expect("remember neighbor");
+
+    upsert_entity(path, &entity_upsert_request("project:warden", "Warden")).expect("entity A");
+    upsert_entity(path, &entity_upsert_request("component:ledger", "Ledger")).expect("entity B");
+    upsert_relationship(
+        path,
+        &RelationshipUpsertRequest {
+            subject_entity_key: Some("project:warden".to_string()),
+            relation_type: "depends_on".to_string(),
+            object_entity_key: Some("component:ledger".to_string()),
+            confidence: 1.0,
+            ..relationship_upsert_request_defaults()
+        },
+    )
+    .expect("relationship A->B");
+    insert_graph_synthesis_run(path);
+
+    (seed_report.memory.id, neighbor_report.memory.id)
+}
+
+fn associative_recall_request() -> PackRequest {
+    PackRequest {
+        title: "assoc".to_string(),
+        queries: vec!["warden sandbox deploys".to_string()],
+        filters: SearchFilters::default(),
+        max_memories: 5,
+        max_chars: 4_000,
+        format: "markdown".to_string(),
+        min_score: 0.0,
+        rerank_candidates: 0,
+        query_embeddings: None,
+        query_token_embeddings: None,
+        token_model_id: None,
+    }
+}
+
+fn associative_recall_on() -> PackExpansionOptions {
+    PackExpansionOptions {
+        graph_expansion: true,
+        max_graph_seeds: 3,
+        max_graph_neighbors: 5,
+        graph_decay: 0.5,
+        ..PackExpansionOptions::default()
+    }
+}
+
+/// Proof (a) — RECALL: a relationship-only neighbor with no lexical/ANN path
+/// appears in the merged candidate pool with associative recall ON, and is
+/// absent with it OFF.
+#[test]
+fn graph_expansion_surfaces_relationship_only_neighbor_in_candidate_pool() {
+    let path = temp_store_path("graph_expansion_candidate_pool");
+    cleanup_store(&path);
+    init_store(&path).expect("init succeeds");
+    let (seed_id, neighbor_id) = associative_recall_fixture(&path);
+    let request = associative_recall_request();
+
+    let off = build_hybrid_rerank_pool_with_expansion(
+        &path,
+        &request,
+        10,
+        PackExpansionOptions::default(),
+    )
+    .expect("pool off");
+    assert!(
+        off.candidates.iter().any(|c| c.memory_id == seed_id),
+        "seed is retrieved lexically"
+    );
+    assert!(
+        !off.candidates.iter().any(|c| c.memory_id == neighbor_id),
+        "relationship-only neighbor has no lexical/ANN path, so it is absent without graph expansion"
+    );
+
+    let on = build_hybrid_rerank_pool_with_expansion(&path, &request, 10, associative_recall_on())
+        .expect("pool on");
+    assert!(
+        on.candidates.iter().any(|c| c.memory_id == neighbor_id),
+        "relationship-only neighbor enters the candidate pool through the graph hop with recall ON"
+    );
+
+    cleanup_store(&path);
+}
+
+/// Proof (b) — RELATIVE GATE / BOUNDED ADMISSION: a relationship-only neighbor is
+/// a below-pool graph addition (`graph_pulled`), so it is QUARANTINED from the
+/// normal rerank fill — even when the cross-encoder scores it higher than the
+/// direct hits, it does NOT land with `slots == 0` (the churn fix: graph expansion
+/// cannot reorder the top-`k`). It lands ONLY when a reserved slot is granted, and
+/// the activation floor still gates that slot. This replaces the old "graph
+/// candidate competes in normal fill" contract, which churned 92% of real packs.
+#[test]
+fn graph_expansion_neighbor_lands_only_through_a_reserved_slot() {
+    let path = temp_store_path("graph_expansion_rerank_pack");
+    cleanup_store(&path);
+    init_store(&path).expect("init succeeds");
+    let (_seed_id, neighbor_id) = associative_recall_fixture(&path);
+    let request = associative_recall_request();
+
+    // Simulated cross-encoder that scores the neighbor ABOVE the direct hits —
+    // the worst case for churn under the old normal-fill contract.
+    let rerank = |pool: &RerankPool, neighbor_score: f32| -> Vec<RerankCandidate> {
+        pool.candidates
+            .iter()
+            .map(|c| RerankCandidate {
+                memory_id: c.memory_id.clone(),
+                content: c.content.clone(),
+                rerank_score: if c.memory_id == neighbor_id {
+                    neighbor_score
+                } else {
+                    0.6
+                },
+                activation: c.activation,
+                graph_pulled: c.graph_pulled,
+            })
+            .collect()
+    };
+
+    // OFF: the neighbor never becomes a candidate, so it cannot land in the pack.
+    let off_pool = build_hybrid_rerank_pool_with_expansion(
+        &path,
+        &request,
+        10,
+        PackExpansionOptions::default(),
+    )
+    .expect("pool off");
+    let off_pack =
+        assemble_reranked_pack(&request, 0.0, off_pool.cos_top, &rerank(&off_pool, 0.95));
+    assert!(
+        !off_pack.memory_ids.contains(&neighbor_id),
+        "neighbor cannot land in the pack without graph expansion"
+    );
+
+    let on_pool =
+        build_hybrid_rerank_pool_with_expansion(&path, &request, 10, associative_recall_on())
+            .expect("pool on");
+    // The neighbor is a quarantined below-pool addition; read its activation so the
+    // floor assertions key off the real value rather than a guessed scale.
+    let neighbor_activation = on_pool
+        .candidates
+        .iter()
+        .find(|c| c.memory_id == neighbor_id)
+        .and_then(|c| c.activation)
+        .expect("graph-pulled neighbor carries an activation");
+
+    // ON, slots=0: even scored 0.95 (above every direct hit), the neighbor is
+    // QUARANTINED — graph confidence alone no longer reorders the pack.
+    let quarantined = assemble_reranked_pack_with_graph_slots(
+        &request,
+        0.0,
+        on_pool.cos_top,
+        &rerank(&on_pool, 0.95),
+        0,
+        0.0,
+    );
+    assert!(
+        !quarantined.memory_ids.contains(&neighbor_id),
+        "below-pool graph addition stays out of the normal fill (no reserved slot)"
+    );
+
+    // ON, slots=1, floor below the activation: the neighbor lands via the slot.
+    let landed = assemble_reranked_pack_with_graph_slots(
+        &request,
+        0.0,
+        on_pool.cos_top,
+        &rerank(&on_pool, 0.95),
+        1,
+        0.0,
+    );
+    assert!(
+        landed.memory_ids.contains(&neighbor_id),
+        "graph-surfaced neighbor lands when a reserved slot is granted"
+    );
+
+    // ON, slots=1, floor above the activation: the activation floor gates the slot.
+    let floored = assemble_reranked_pack_with_graph_slots(
+        &request,
+        0.0,
+        on_pool.cos_top,
+        &rerank(&on_pool, 0.95),
+        1,
+        neighbor_activation + 1.0,
+    );
+    assert!(
+        !floored.memory_ids.contains(&neighbor_id),
+        "the activation floor still gates a graph candidate out of its reserved slot"
+    );
+
+    cleanup_store(&path);
+}
+
+/// Proof (c) — FLAG-OFF / DEGRADE byte-identical: with recall ON but no active
+/// relationships (an unusable graph), the candidate pool is byte-identical to
+/// recall OFF. Graph expansion never perturbs the pool when it cannot contribute;
+/// the broader flag-off guarantee is the existing pack/retrieval suite passing
+/// unchanged with `graph_expansion` defaulting to false.
+#[test]
+fn graph_expansion_degrades_to_byte_identical_pool_without_relationships() {
+    let path = temp_store_path("graph_expansion_degrade_identical");
+    cleanup_store(&path);
+    init_store(&path).expect("init succeeds");
+
+    // Seed only — no entities, no relationships, no graph synthesis run.
+    let mut seed = basic_request("decision: adopt the warden sandbox for memkeeper deploys");
+    seed.entity_key = Some("project:warden".to_string());
+    remember_memory(&path, &seed).expect("remember seed");
+    let request = associative_recall_request();
+
+    let off = build_hybrid_rerank_pool_with_expansion(
+        &path,
+        &request,
+        10,
+        PackExpansionOptions::default(),
+    )
+    .expect("pool off");
+    let on = build_hybrid_rerank_pool_with_expansion(&path, &request, 10, associative_recall_on())
+        .expect("pool on");
+    // The candidate set is the byte-identical invariant: graph expansion
+    // contributes nothing when the graph is unusable. `cos_top` is excluded from
+    // the comparison only because the underlying search blends a time-based
+    // recency factor that jitters at ~1e-11 between any two calls (recall OFF or
+    // ON) — graph items are unioned AFTER cos_top, so they never touch it.
+    assert_eq!(
+        off.candidates, on.candidates,
+        "with an unusable graph, recall ON yields a byte-identical candidate pool to recall OFF"
+    );
+
+    cleanup_store(&path);
+}
+
+/// Readiness detection must key off the `tasks` array, not any `"graph"`/`"all"`
+/// token anywhere in `budget_json`. A succeeded promote-only run whose space is
+/// literally named `graph` must NOT be mistaken for a graph synthesis — otherwise
+/// the loud empty/stale WARN would be silently suppressed.
+#[test]
+fn graph_recall_readiness_ignores_graph_named_space_in_budget_json() {
+    let path = temp_store_path("graph_recall_readiness_false_positive");
+    cleanup_store(&path);
+    init_store(&path).expect("init succeeds");
+
+    // Active relationship so graph-synthesis detection is the only variable.
+    upsert_entity(&path, &entity_upsert_request("project:warden", "Warden")).expect("entity A");
+    upsert_entity(&path, &entity_upsert_request("component:ledger", "Ledger")).expect("entity B");
+    upsert_relationship(
+        &path,
+        &RelationshipUpsertRequest {
+            subject_entity_key: Some("project:warden".to_string()),
+            relation_type: "depends_on".to_string(),
+            object_entity_key: Some("component:ledger".to_string()),
+            confidence: 1.0,
+            ..relationship_upsert_request_defaults()
+        },
+    )
+    .expect("relationship");
+
+    // A succeeded promote-only run whose budget_json carries "space":"graph": the
+    // naive `%"graph"%` match would false-positive on that token.
+    {
+        let conn = Connection::open(&path).expect("open store");
+        conn.execute_batch(
+            "INSERT INTO dream_runs (id, space_name, status, started_at, finished_at, budget_json) \
+             VALUES ('dpromote','workspace-memory','succeeded','2026-06-29T03:00:00Z',\
+                     '2026-06-29T03:05:00Z','{\"tasks\":[\"promote\"],\"space\":\"graph\"}')",
+        )
+        .expect("insert promote run");
+    }
+    let before = graph_recall_readiness(&path, "workspace-memory").expect("readiness");
+    assert!(
+        !before.succeeded_graph_synthesis,
+        "a promote-only run must not count as graph synthesis even with a space named 'graph'"
+    );
+    assert!(
+        !before.usable(),
+        "graph is not usable without a real graph synthesis run"
+    );
+
+    // A real `dream --tasks graph` run flips it.
+    insert_graph_synthesis_run(&path);
+    let after = graph_recall_readiness(&path, "workspace-memory").expect("readiness");
+    assert!(
+        after.succeeded_graph_synthesis,
+        "a genuine graph synthesis run is detected"
+    );
+    assert!(
+        after.usable(),
+        "usable once synthesized with active relationships present"
+    );
 
     cleanup_store(&path);
 }
@@ -3838,6 +4245,21 @@ fn rc(id: &str, content: &str, score: f32) -> RerankCandidate {
         memory_id: id.to_string(),
         content: content.to_string(),
         rerank_score: score,
+        activation: None,
+        graph_pulled: false,
+    }
+}
+
+/// A graph-pulled rerank candidate carrying an activation (the reserved-slot path).
+/// `graph_pulled` is true: it models a below-pool addition, so it is quarantined
+/// from the normal fill and can land only via a reserved slot.
+fn rc_graph(id: &str, content: &str, score: f32, activation: f64) -> RerankCandidate {
+    RerankCandidate {
+        memory_id: id.to_string(),
+        content: content.to_string(),
+        rerank_score: score,
+        activation: Some(activation),
+        graph_pulled: true,
     }
 }
 
@@ -3942,20 +4364,145 @@ fn assemble_reranked_pack_sets_top_score_to_max_rerank() {
             memory_id: "a".into(),
             content: "alpha".into(),
             rerank_score: 0.20,
+            activation: None,
+            graph_pulled: false,
         },
         RerankCandidate {
             memory_id: "b".into(),
             content: "beta".into(),
             rerank_score: 0.70,
+            activation: None,
+            graph_pulled: false,
         },
         RerankCandidate {
             memory_id: "c".into(),
             content: "gamma".into(),
             rerank_score: 0.40,
+            activation: None,
+            graph_pulled: false,
         },
     ];
     let report = assemble_reranked_pack(&request, 0.0, 0.0, &candidates);
     assert_eq!(report.top_score, Some(f64::from(0.70_f32)));
+}
+
+/// v0.3.1: a graph-pulled candidate the cross-encoder scored BELOW the cut still
+/// lands when a reserved slot is granted and its activation clears the floor —
+/// while flag-off (slots=0) buries it, the activation floor gates it out, and the
+/// slot count bounds how many graph candidates can claim a slot (precision).
+#[test]
+fn graph_reserved_slots_land_hop_candidate_only_when_granted_and_floored() {
+    let request = rerank_pack_request(3, 4000, 0.0);
+    // Three strong direct hits; one hop-reached candidate the reranker scored low.
+    let candidates = vec![
+        rc("a", "alpha", 0.90),
+        rc("b", "beta", 0.80),
+        rc("c", "gamma", 0.70),
+        rc_graph("g", "graph-hop answer", 0.10, 0.40),
+    ];
+
+    // slots=0: identical to the plain assembler — the reranker buries the hop item.
+    let off = assemble_reranked_pack_with_graph_slots(&request, 0.0, 0.0, &candidates, 0, 0.0);
+    assert_eq!(off.memory_ids, vec!["a", "b", "c"]);
+    assert!(!off.memory_ids.contains(&"g".to_string()));
+
+    // slots=1, floor below the activation: the hop item claims a reserved slot,
+    // displacing the weakest direct hit ("c"); precision-bounded to one slot.
+    let on = assemble_reranked_pack_with_graph_slots(&request, 0.0, 0.0, &candidates, 1, 0.0);
+    assert!(
+        on.memory_ids.contains(&"g".to_string()),
+        "hop candidate lands via reserved slot"
+    );
+    assert_eq!(
+        on.memory_ids.len(),
+        3,
+        "reserved slot comes out of the budget, not on top of it"
+    );
+    assert!(on.memory_ids.contains(&"a".to_string()) && on.memory_ids.contains(&"b".to_string()));
+    assert!(
+        !on.memory_ids.contains(&"c".to_string()),
+        "weakest direct hit displaced"
+    );
+
+    // floor above the activation: the hop item is NOT admitted (precision floor).
+    let floored = assemble_reranked_pack_with_graph_slots(&request, 0.0, 0.0, &candidates, 1, 0.5);
+    assert_eq!(floored.memory_ids, vec!["a", "b", "c"]);
+}
+
+/// Only the highest-activation graph candidate claims the single reserved slot;
+/// a second, lower-activation graph neighbor stays out (slot bound + ordering).
+#[test]
+fn graph_reserved_slots_admit_highest_activation_only() {
+    let request = rerank_pack_request(3, 4000, 0.0);
+    let candidates = vec![
+        rc("a", "alpha", 0.90),
+        rc("b", "beta", 0.80),
+        rc("c", "gamma", 0.70),
+        rc_graph("g_lo", "weaker hop", 0.10, 0.30),
+        rc_graph("g_hi", "stronger hop", 0.10, 0.45),
+    ];
+    let on = assemble_reranked_pack_with_graph_slots(&request, 0.0, 0.0, &candidates, 1, 0.0);
+    assert!(
+        on.memory_ids.contains(&"g_hi".to_string()),
+        "higher activation wins the slot"
+    );
+    assert!(
+        !on.memory_ids.contains(&"g_lo".to_string()),
+        "lower activation stays out"
+    );
+    assert_eq!(on.memory_ids.len(), 3);
+}
+
+/// The relative gate: a below-pool graph addition is quarantined from the normal
+/// rerank fill even when its cross-encoder score would otherwise place it in the
+/// top-`k`. Without this, graph expansion reorders the pack on nearly every query
+/// (measured 92% churn on real data); with it, `slots == 0` is byte-identical to
+/// graph-off and churn is bounded to `graph_rerank_slots`.
+#[test]
+fn graph_pulled_candidate_is_quarantined_from_normal_fill_until_a_slot_is_granted() {
+    let request = rerank_pack_request(3, 4000, 0.0);
+    // The hop-reached candidate now OUTSCORES a direct hit on the cross-encoder
+    // (rerank 0.75 > "c" at 0.70). Pre-gate it would have displaced "c" in normal
+    // fill, churning the pack with no slot granted.
+    let candidates = vec![
+        rc("a", "alpha", 0.90),
+        rc("b", "beta", 0.80),
+        rc("c", "gamma", 0.70),
+        rc_graph("g", "high-rerank hop answer", 0.75, 0.40),
+    ];
+
+    // slots=0: the graph addition is quarantined; the pack is exactly the three
+    // direct hits, identical to graph-off despite "g" out-reranking "c".
+    let off = assemble_reranked_pack_with_graph_slots(&request, 0.0, 0.0, &candidates, 0, 0.0);
+    assert_eq!(
+        off.memory_ids,
+        vec!["a", "b", "c"],
+        "graph addition must not enter normal fill on rerank merit alone"
+    );
+
+    // A non-graph candidate with the SAME high rerank score WOULD displace "c" —
+    // proving the quarantine keys off `graph_pulled`, not the score.
+    let normal_equiv = vec![
+        rc("a", "alpha", 0.90),
+        rc("b", "beta", 0.80),
+        rc("c", "gamma", 0.70),
+        rc("g", "high-rerank ordinary answer", 0.75),
+    ];
+    let normal = assemble_reranked_pack_with_graph_slots(&request, 0.0, 0.0, &normal_equiv, 0, 0.0);
+    assert_eq!(
+        normal.memory_ids,
+        vec!["a", "b", "g"],
+        "an ordinary candidate at the same score competes and displaces 'c'"
+    );
+
+    // slots=1: the quarantined graph addition is admitted via the reserved slot.
+    let on = assemble_reranked_pack_with_graph_slots(&request, 0.0, 0.0, &candidates, 1, 0.0);
+    assert!(on.memory_ids.contains(&"g".to_string()));
+    assert_eq!(
+        on.memory_ids.len(),
+        3,
+        "bounded: one slot, out of the budget"
+    );
 }
 
 #[test]
@@ -4492,6 +5039,197 @@ fn dream_graph_proposes_relationships_from_memory_links() {
     )
     .expect("graph dream succeeds");
     assert!(after_existing.graph.relationship_proposals.is_empty());
+
+    cleanup_store(&path);
+}
+
+#[test]
+fn relationship_confidence_rises_with_evidence_multiplicity() {
+    // Saturating, monotonic, in (0,1): one link is moderate, more links stronger.
+    assert!((relationship_confidence_from_evidence(1) - 0.5).abs() < 1e-9);
+    assert!((relationship_confidence_from_evidence(3) - 0.75).abs() < 1e-9);
+    assert!(
+        relationship_confidence_from_evidence(5) > relationship_confidence_from_evidence(1),
+        "more supporting links => higher confidence"
+    );
+    assert!(
+        relationship_confidence_from_evidence(100) < 1.0,
+        "stays below 1.0"
+    );
+}
+
+/// v0.3.1 / mem_...3cc end-to-end: a graph edge backed by MORE co-occurring
+/// `memory_links` earns higher confidence (via `dream --tasks graph`), and that
+/// confidence flows through `edge_weight` so the densely-associated neighbor gets
+/// strictly HIGHER graph-expansion activation than an incidental single-link
+/// neighbor — the signal the reserved rerank slot needs to pick the relevant hop.
+#[test]
+fn graph_edge_multiplicity_differentiates_neighbor_activation() {
+    let path = temp_store_path("graph_edge_multiplicity_activation");
+    cleanup_store(&path);
+    init_store(&path).expect("init succeeds");
+    for (key, name) in [
+        ("ent:seed", "Seed"),
+        ("ent:dense", "Dense"),
+        ("ent:sparse", "Sparse"),
+    ] {
+        upsert_entity(&path, &entity_upsert_request(key, name)).expect("entity upsert");
+    }
+
+    // Seed memory matches the query; neighbors share no query vocabulary (graph-only).
+    let mut seed = basic_request("decision: orchard pipeline retrieval anchor point");
+    seed.entity_key = Some("ent:seed".to_string());
+    let seed_id = remember_memory(&path, &seed).expect("seed").memory.id;
+
+    // Dense neighbor: three distinct memories, each linked from the seed (3 links).
+    let mut dense_ids = Vec::new();
+    for i in 0..3 {
+        let mut m = basic_request(&format!("ztech detail номер {i} for the dense neighbor"));
+        m.entity_key = Some("ent:dense".to_string());
+        dense_ids.push(remember_memory(&path, &m).expect("dense").memory.id);
+    }
+    // Sparse neighbor: one memory, one link.
+    let mut sparse = basic_request("yfact unrelated trivia for the sparse neighbor");
+    sparse.entity_key = Some("ent:sparse".to_string());
+    let sparse_id = remember_memory(&path, &sparse).expect("sparse").memory.id;
+
+    let now = "2026-05-28T00:00:00.000Z";
+    let connection = Connection::open(&path).expect("open store");
+    for dst in dense_ids.iter().chain(std::iter::once(&sparse_id)) {
+        connection
+            .execute(
+                "INSERT INTO memory_links (src_memory_id, dst_memory_id, link_type, status, confidence, created_at) \
+                 VALUES (?1, ?2, 'related_to', 'active', 1.0, ?3)",
+                params![seed_id, dst, now],
+            )
+            .expect("insert link");
+    }
+    drop(connection);
+
+    // Materialize the graph (also records a succeeded graph dream run => readiness ok).
+    dream_store(
+        &path,
+        &DreamRequest {
+            tasks: vec!["graph".to_string()],
+            max_memories: 50,
+            dry_run: false,
+            ..dream_request_defaults()
+        },
+    )
+    .expect("graph apply");
+
+    let request = PackRequest {
+        title: "t".to_string(),
+        queries: vec!["orchard pipeline retrieval anchor point".to_string()],
+        filters: SearchFilters::default(),
+        max_memories: 50,
+        max_chars: 10_000,
+        format: "markdown".to_string(),
+        min_score: 0.0,
+        rerank_candidates: 0,
+        query_embeddings: None,
+        query_token_embeddings: None,
+        token_model_id: None,
+    };
+    let pool = build_hybrid_rerank_pool_with_expansion(
+        &path,
+        &request,
+        50,
+        PackExpansionOptions {
+            graph_expansion: true,
+            max_graph_seeds: 3,
+            max_graph_neighbors: 10,
+            graph_decay: 0.5,
+            ..PackExpansionOptions::default()
+        },
+    )
+    .expect("pool");
+
+    let activation = |id: &str| {
+        pool.candidates
+            .iter()
+            .find(|c| c.memory_id == id)
+            .and_then(|c| c.activation)
+    };
+    let dense_act = activation(&dense_ids[0]).expect("dense neighbor pulled by graph");
+    let sparse_act = activation(&sparse_id).expect("sparse neighbor pulled by graph");
+    assert!(
+        dense_act > sparse_act,
+        "denser edge (3 links -> conf 0.75) out-activates the single-link edge \
+         (conf 0.5): dense={dense_act} sparse={sparse_act}"
+    );
+
+    cleanup_store(&path);
+}
+
+/// A graph-reachable memory that ALSO landed in the base retrieval pool (so it is
+/// already a candidate, just possibly rerank-buried) must still receive a graph
+/// activation, so a reserved rerank slot can promote it. Regression guard for the
+/// in-pool-tagging fix: the original code skipped pool members, leaving a buried
+/// hop target with no activation and no way to be promoted.
+#[test]
+fn graph_activation_tags_in_pool_reachable_neighbor() {
+    let path = temp_store_path("graph_activation_in_pool_neighbor");
+    cleanup_store(&path);
+    init_store(&path).expect("init succeeds");
+    upsert_entity(&path, &entity_upsert_request("ent:a", "A")).expect("entity A");
+    upsert_entity(&path, &entity_upsert_request("ent:b", "B")).expect("entity B");
+    upsert_relationship(
+        &path,
+        &RelationshipUpsertRequest {
+            subject_entity_key: Some("ent:a".to_string()),
+            relation_type: "related_to".to_string(),
+            object_entity_key: Some("ent:b".to_string()),
+            confidence: 1.0,
+            ..relationship_upsert_request_defaults()
+        },
+    )
+    .expect("relationship");
+
+    // Both seed and target match the query, so BOTH are in the base BM25 pool.
+    let mut seed = basic_request("orchard pipeline retrieval anchor seed memory");
+    seed.entity_key = Some("ent:a".to_string());
+    remember_memory(&path, &seed).expect("seed");
+    let mut target = basic_request("orchard pipeline retrieval downstream target memory");
+    target.entity_key = Some("ent:b".to_string());
+    let t_id = remember_memory(&path, &target).expect("target").memory.id;
+    insert_graph_synthesis_run(&path);
+
+    let request = PackRequest {
+        title: "t".to_string(),
+        queries: vec!["orchard pipeline retrieval".to_string()],
+        filters: SearchFilters::default(),
+        max_memories: 50,
+        max_chars: 10_000,
+        format: "markdown".to_string(),
+        min_score: 0.0,
+        rerank_candidates: 0,
+        query_embeddings: None,
+        query_token_embeddings: None,
+        token_model_id: None,
+    };
+    let pool = build_hybrid_rerank_pool_with_expansion(
+        &path,
+        &request,
+        50,
+        PackExpansionOptions {
+            graph_expansion: true,
+            max_graph_seeds: 3,
+            max_graph_neighbors: 5,
+            graph_decay: 0.5,
+            ..PackExpansionOptions::default()
+        },
+    )
+    .expect("pool");
+    let target_cand = pool
+        .candidates
+        .iter()
+        .find(|c| c.memory_id == t_id)
+        .expect("target is in the base retrieval pool");
+    assert!(
+        target_cand.activation.is_some(),
+        "an in-pool graph-reachable neighbor is tagged with activation for reserved-slot promotion"
+    );
 
     cleanup_store(&path);
 }
