@@ -6,6 +6,13 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html) once it reache
 1.0. Until then, minor releases may include breaking changes to the storage
 schema and wire protocol.
 
+## [0.2.13] - 2026-06-30
+
+### Fixed
+- **CI clippy `too_many_lines`.** The v0.2.12 rerank-report function exceeded the
+  100-line pedantic cap under `-D warnings`; the candidate-building block is now a
+  small helper. Internal only — no functional or behavioral change from 0.2.12.
+
 ## [0.2.12] - 2026-06-30
 
 ### Performance

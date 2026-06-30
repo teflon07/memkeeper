@@ -1427,6 +1427,29 @@ fn maybe_embed_pack_request(request: &mut PackRequest, semantic_models: &Semanti
 #[cfg(not(feature = "embed"))]
 fn maybe_embed_pack_request(_request: &mut PackRequest, _semantic_models: &SemanticModels) {}
 
+/// Zip the rerank pool candidates with their cross-encoder scores into
+/// `RerankCandidate`s for the store's pack-assembly policy. Extracted from
+/// `maybe_rerank_pack_report` to keep it under the clippy `too_many_lines` cap.
+#[cfg(feature = "embed")]
+fn rerank_candidates_from_pool(
+    pool_candidates: Vec<memkeeper_store::RerankPoolCandidate>,
+    scores: Vec<f32>,
+) -> Vec<memkeeper_store::RerankCandidate> {
+    pool_candidates
+        .into_iter()
+        .zip(scores)
+        .map(
+            |(candidate, rerank_score)| memkeeper_store::RerankCandidate {
+                memory_id: candidate.memory_id,
+                content: candidate.content,
+                rerank_score,
+                activation: candidate.activation,
+                graph_pulled: candidate.graph_pulled,
+            },
+        )
+        .collect()
+}
+
 #[cfg(feature = "embed")]
 fn maybe_rerank_pack_report(
     store: &Path,
@@ -1535,20 +1558,7 @@ fn maybe_rerank_pack_report(
     // Hand the scored candidates to the store's pure pack-assembly policy: gate
     // on cos_top / cross-encoder confidence, order by rerank score, then apply
     // the precision floor and char/count budget.
-    let candidates: Vec<memkeeper_store::RerankCandidate> = pool
-        .candidates
-        .into_iter()
-        .zip(scores)
-        .map(
-            |(candidate, rerank_score)| memkeeper_store::RerankCandidate {
-                memory_id: candidate.memory_id,
-                content: candidate.content,
-                rerank_score,
-                activation: candidate.activation,
-                graph_pulled: candidate.graph_pulled,
-            },
-        )
-        .collect();
+    let candidates = rerank_candidates_from_pool(pool.candidates, scores);
     *report = memkeeper_store::assemble_reranked_pack_with_graph_slots(
         request,
         cosine_gate,
