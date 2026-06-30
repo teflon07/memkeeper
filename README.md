@@ -61,7 +61,7 @@ pitfalls (handy in Windows PowerShell).
 
 ## Use it from your agent (MCP)
 
-memkeeper speaks [MCP](adapters/mcp) (JSON-RPC 2.0 over stdio), so any MCP client —
+memkeeper speaks MCP (JSON-RPC 2.0 over stdio), so any MCP client —
 Claude Code, Cursor, and others — can read and write memory during a session. Point
 your client's MCP config at the **native binary** (no Python, no extra deps):
 
@@ -77,8 +77,6 @@ across separate sessions, with the same retrieval as the CLI.
 </p>
 
 <p align="center"><sub>Real <code>memkeeper mcp</code> JSON-RPC round-trips, formatted for readability via <a href="scripts/mcpfmt"><code>scripts/mcpfmt</code></a>.</sub></p>
-
-For native MCP details and the optional Python bridge, see [adapters/mcp](adapters/mcp).
 
 ## What to store
 
@@ -108,9 +106,9 @@ transcript logger. Memories get in two ways:
 
 - **Directly** — `memkeeper remember --json '{"content":"…"}'`, from the CLI or a
   script.
-- **From an agent** — the [MCP bridge](adapters/mcp) lets an MCP client (Claude and
-  other agents) call `remember` during a session, so durable facts are captured as
-  they come up.
+- **From an agent** — the native [MCP server](#use-it-from-your-agent-mcp) lets an MCP
+  client (Claude and other agents) call `remember` during a session, so durable facts
+  are captured as they come up.
 
 On the *retrieval* side, `memkeeper hook retrieve` is a Claude Code
 UserPromptSubmit hook client that injects relevant memories into the prompt — so an

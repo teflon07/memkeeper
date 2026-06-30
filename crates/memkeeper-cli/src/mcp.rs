@@ -11,9 +11,9 @@
 //! Transport is deliberately a thin hand-rolled JSON-RPC loop rather than an
 //! async SDK crate: MCP stdio framing is just newline-delimited JSON-RPC, which
 //! mirrors the existing sync serve loop, so we add zero dependencies (`serde_json`
-//! is already pulled in) and keep the binary lean. The mapped tool surface
-//! mirrors `adapters/mcp/memkeeper_mcp.py` exactly (candidate approve/reject are
-//! intentionally omitted — those stay human-review-only via CLI/dashboard).
+//! is already pulled in) and keep the binary lean. This is the canonical MCP
+//! tool surface (candidate approve/reject are intentionally omitted — those stay
+//! human-review-only via CLI/dashboard).
 
 #[allow(clippy::wildcard_imports)]
 use super::*;
@@ -26,7 +26,7 @@ use serde_json::{json, Map, Value};
 const DEFAULT_MCP_PROTOCOL_VERSION: &str = "2025-06-18";
 
 /// `source.adapter` recorded on MCP writes. Overridable so multiple MCP clients
-/// can distinguish their provenance; mirrors the Python adapter's default.
+/// can distinguish their provenance.
 fn mcp_adapter() -> String {
     non_empty_env("MEMKEEPER_MCP_ADAPTER").unwrap_or_else(|| "generic-mcp".to_string())
 }
@@ -290,8 +290,8 @@ fn handle_tools_call(id: &Value, params: &Value, store: &Path, backend: &McpBack
     };
     let response = dispatch_serve(backend, &envelope);
 
-    // Best-effort recall telemetry, matching the Python adapter: surfaced on
-    // search, retrieved on get. Failures are swallowed (never break recall).
+    // Best-effort recall telemetry: surfaced on search, retrieved on get.
+    // Failures are swallowed (never break recall).
     record_mcp_recall(name, &response, &arguments, store, backend);
 
     // Surface the serve envelope as the tool's text content. An engine-level
@@ -335,9 +335,9 @@ fn tool_error_result(id: &Value, message: &str) -> Value {
 }
 
 // --------------------------------------------------------------------------
-// Argument → serve payload mapping. Mirrors adapters/mcp/memkeeper_mcp.py: the
-// payload dicts here are byte-for-byte the serve payloads that adapter sends, so
-// they pass the engine's strict `*_request_from_json` validators unchanged.
+// Argument → serve payload mapping. The payloads built here are the canonical
+// serve payloads, so they pass the engine's strict `*_request_from_json`
+// validators unchanged.
 // --------------------------------------------------------------------------
 
 fn arg_bool(args: &Map<String, Value>, key: &str, default: bool) -> bool {
@@ -731,9 +731,9 @@ pub(crate) fn build_serve_call(
 }
 
 // --------------------------------------------------------------------------
-// Recall telemetry (best-effort, mirrors the Python adapter). Logged through
-// the engine's `recall-log` command so the recall_events table + accessed_at
-// touch stay engine-owned. Any failure here must never break recall.
+// Recall telemetry (best-effort). Logged through the engine's `recall-log`
+// command so the recall_events table + accessed_at touch stay engine-owned.
+// Any failure here must never break recall.
 // --------------------------------------------------------------------------
 fn record_mcp_recall(
     tool: &str,
@@ -817,9 +817,9 @@ fn retrieved_events(response: &str) -> Vec<Value> {
 }
 
 // --------------------------------------------------------------------------
-// Tool definitions for tools/list. Names and ergonomics mirror the Python
-// adapter (adapters/mcp/memkeeper_mcp.py). candidate-approve/reject are
-// intentionally absent (human-review actions stay CLI/dashboard-only).
+// Tool definitions for tools/list. This is the canonical tool surface;
+// candidate-approve/reject are intentionally absent (human-review actions stay
+// CLI/dashboard-only).
 // --------------------------------------------------------------------------
 #[allow(clippy::needless_pass_by_value)] // builder embeds `properties` into the schema
 fn tool(name: &str, description: &str, properties: Value, required: &[&str]) -> Value {
@@ -1099,7 +1099,7 @@ mod tests {
     }
 
     #[test]
-    fn tool_surface_matches_python_adapter() {
+    fn tool_surface_is_canonical() {
         let definitions = tool_definitions();
         let names: Vec<&str> = definitions
             .iter()

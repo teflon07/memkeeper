@@ -6,6 +6,15 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html) once it reache
 1.0. Until then, minor releases may include breaking changes to the storage
 schema and wire protocol.
 
+## [0.2.11] - 2026-06-30
+
+### Removed
+- **The legacy Python MCP bridge (`adapters/mcp`) is gone.** The `memkeeper`
+  binary speaks MCP over stdio natively (`memkeeper mcp`) with the same tool
+  surface, so the Python `fastmcp` adapter was redundant. Point your MCP client
+  at the native binary: `{ "command": "memkeeper", "args": ["mcp"] }`. The
+  `pi-extension` adapter is unaffected.
+
 ## [0.2.10] - 2026-06-29
 
 ### Changed
@@ -212,6 +221,7 @@ Initial public release. A local-first memory engine for AI agents.
 - **Adapters**: an MCP bridge and a thin extension client.
 - Dual-licensed **MIT OR Apache-2.0**.
 
+[0.2.11]: https://github.com/teflon07/memkeeper/releases/tag/v0.2.11
 [0.2.10]: https://github.com/teflon07/memkeeper/releases/tag/v0.2.10
 [0.2.9]: https://github.com/teflon07/memkeeper/releases/tag/v0.2.9
 [0.2.8]: https://github.com/teflon07/memkeeper/releases/tag/v0.2.8
