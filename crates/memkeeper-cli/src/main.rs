@@ -484,7 +484,7 @@ struct SemanticModels {
 /// Late-interaction retrieval gate: `MEMKEEPER_LATE_INTERACTION=1` plus
 /// `MEMKEEPER_COLBERT_MODEL_DIR` (checked at model load).
 #[cfg(feature = "embed")]
-fn late_interaction_enabled() -> bool {
+pub(crate) fn late_interaction_enabled() -> bool {
     std::env::var("MEMKEEPER_LATE_INTERACTION").is_ok_and(|value| value == "1")
 }
 
@@ -531,6 +531,21 @@ impl SemanticModels {
     /// runtime guard keys on this to fail loud instead.
     fn embed_active(&self) -> bool {
         self.embed.is_some()
+    }
+
+    /// Whether the reranker actually loaded. When a rerank-requesting load
+    /// (`for_pack`/`for_serve`) leaves this false, the cross-encoder is off and
+    /// results serve in plain retrieval order — the serve guard keys on this to
+    /// warn loud instead of degrading silently.
+    fn rerank_active(&self) -> bool {
+        self.rerank.is_some()
+    }
+
+    /// Whether the `ColBERT` (late-interaction) model actually loaded. Only
+    /// meaningful when `MEMKEEPER_LATE_INTERACTION=1`; false there means the
+    /// explicitly-requested late-interaction path is silently off.
+    fn colbert_active(&self) -> bool {
+        self.colbert.is_some()
     }
 }
 

@@ -393,7 +393,7 @@ fn to_payload(map: Map<String, Value>) -> String {
 
 /// Map an MCP tool name + arguments to `(serve_command, payload_json)`.
 #[allow(clippy::too_many_lines)]
-fn build_serve_call(
+pub(crate) fn build_serve_call(
     name: &str,
     args: &Map<String, Value>,
 ) -> Result<(&'static str, String), String> {
@@ -835,7 +835,7 @@ fn tool(name: &str, description: &str, properties: Value, required: &[&str]) -> 
 }
 
 #[allow(clippy::too_many_lines)]
-fn tool_definitions() -> Vec<Value> {
+pub(crate) fn tool_definitions() -> Vec<Value> {
     vec![
         tool(
             "stats",

@@ -1014,6 +1014,35 @@ fn semantic_guard_decides_serve_posture() {
     assert_eq!(semantic_guard(false, true), SemanticGuard::Refuse);
 }
 
+#[cfg(feature = "embed")]
+#[test]
+fn rerank_guard_is_loud_but_never_refuses() {
+    // The reranker only reorders results, so a missing reranker is loud but
+    // never fatal: NOTE by default, ERROR under require, always keep serving.
+    use super::serve::{rerank_guard, RerankGuard};
+    assert_eq!(rerank_guard(true, false), RerankGuard::Ok);
+    assert_eq!(rerank_guard(true, true), RerankGuard::Ok);
+    assert_eq!(rerank_guard(false, false), RerankGuard::Degraded);
+    assert_eq!(rerank_guard(false, true), RerankGuard::Required);
+}
+
+#[cfg(feature = "embed")]
+#[test]
+fn colbert_guard_refuses_only_when_explicitly_required() {
+    // ColBERT is loaded only on the explicit MEMKEEPER_LATE_INTERACTION opt-in, so
+    // a requested-but-absent model is always loud and refuses under require.
+    use super::serve::{colbert_guard, ColbertGuard};
+    // Not requested: never flagged, regardless of require.
+    assert_eq!(colbert_guard(false, false, false), ColbertGuard::Ok);
+    assert_eq!(colbert_guard(false, false, true), ColbertGuard::Ok);
+    // Requested and loaded: fine.
+    assert_eq!(colbert_guard(true, true, false), ColbertGuard::Ok);
+    assert_eq!(colbert_guard(true, true, true), ColbertGuard::Ok);
+    // Requested but absent: loud NOTE by default, refuse under require.
+    assert_eq!(colbert_guard(true, false, false), ColbertGuard::Degraded);
+    assert_eq!(colbert_guard(true, false, true), ColbertGuard::Refuse);
+}
+
 #[test]
 fn one_shot_search_fails_closed_only_when_required_and_unembeddable() {
     use super::must_refuse_search_without_semantic;
@@ -1089,6 +1118,81 @@ fn dummy_value(field: &crate::schema::FieldDoc) -> &'static str {
             _ => "[{}]",
         },
         other => panic!("unknown schema field type '{other}'"),
+    }
+}
+
+/// A type-appropriate dummy JSON value for an MCP tool `inputSchema` property,
+/// read from the live JSON-Schema spec (`{"type": ...}`, with `items` for
+/// arrays). Some fields are enum-validated by the engine parser, so they are
+/// special-cased by name to a value the parser accepts.
+fn dummy_for_mcp_property(name: &str, key: &str, spec: &serde_json::Value) -> serde_json::Value {
+    use serde_json::json;
+    // Engine parsers validate a handful of fields beyond their JSON type.
+    match (name, key) {
+        ("remember", "mode") => return json!("supersede"),
+        ("remember", "source_type") => return json!("explicit-user"),
+        _ => {}
+    }
+    match spec.get("type").and_then(serde_json::Value::as_str) {
+        Some("string") => json!("x"),
+        Some("integer") => json!(1),
+        Some("number") => json!(1.0),
+        Some("boolean") => json!(true),
+        Some("object") => json!({}),
+        Some("array") => {
+            match spec
+                .get("items")
+                .and_then(|i| i.get("type"))
+                .and_then(serde_json::Value::as_str)
+            {
+                Some("string") => json!(["x"]),
+                Some("integer") => json!([1]),
+                Some("number") => json!([0.1]),
+                Some("object") => json!([{}]),
+                other => panic!("MCP property '{name}.{key}': unhandled array item type {other:?}"),
+            }
+        }
+        other => panic!("MCP property '{name}.{key}': unhandled schema type {other:?}"),
+    }
+}
+
+#[test]
+fn mcp_tool_schemas_match_engine_parsers() {
+    // Drift guard for the MCP surface. The tool `inputSchema` advertised to
+    // clients in `mcp::tool_definitions()` is hand-written, separate from the
+    // engine's real request parsers in `requests.rs`. This builds a payload
+    // containing EVERY advertised property for each tool, maps it exactly as
+    // the live MCP server does (`build_serve_call`), and parses the result
+    // through the same parser the daemon uses. A property advertised but
+    // renamed/removed in the parser, or a tool whose full property set the
+    // mapping can't handle, fails here. Mirrors `schema_documents_only_accepted_fields`
+    // (the schema-doc drift test) for the MCP tool surface.
+    use serde_json::Map;
+    for tool in crate::mcp::tool_definitions() {
+        let name = tool["name"].as_str().expect("tool has a name");
+        let props = tool["inputSchema"]["properties"]
+            .as_object()
+            .unwrap_or_else(|| panic!("tool '{name}' has no inputSchema.properties object"));
+        let mut filled = Map::new();
+        for (key, spec) in props {
+            filled.insert(key.clone(), dummy_for_mcp_property(name, key, spec));
+        }
+        let (command, payload_json) = crate::mcp::build_serve_call(name, &filled)
+            .unwrap_or_else(|err| panic!("tool '{name}': all-properties mapping failed: {err}"));
+        // `stats` has no typed request struct; it is validated by its own
+        // option parser (which also rejects unknown fields). Everything else
+        // routes through the typed `*_request_from_json` parsers.
+        let parsed = if command == "stats" {
+            crate::serve::stats_payload_options(&payload_json).map(|_| ())
+        } else {
+            parse_payload_for(command, &payload_json)
+        };
+        parsed.unwrap_or_else(|err| {
+            panic!(
+                "tool '{name}': payload mapped from inputSchema was rejected by the \
+                 engine parser for command '{command}': {err}\n  payload: {payload_json}"
+            )
+        });
     }
 }
 

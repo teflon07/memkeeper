@@ -63,6 +63,69 @@ pub(crate) fn runtime_semantic_guard(embed_active: bool, require_semantic: bool)
     }
 }
 
+/// Serve posture for the reranker once models are loaded. The reranker only
+/// reorders an already-retrieved candidate set — it never drops results — so a
+/// missing reranker is a quality degradation, not a correctness one. It is
+/// therefore made loud but never refuses: `Degraded` warns (NOTE), `Required`
+/// shouts (ERROR) under `MEMKEEPER_REQUIRE_SEMANTIC`, and serving continues either
+/// way. The point is that it is never *silent*.
+#[cfg(feature = "embed")]
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum RerankGuard {
+    /// Reranker loaded — rerank applies.
+    Ok,
+    /// Reranker absent, no hard requirement — serve plain order but warn (NOTE).
+    Degraded,
+    /// Reranker absent and `MEMKEEPER_REQUIRE_SEMANTIC` set — loud ERROR, keep
+    /// serving (rerank only reorders, it never drops results).
+    Required,
+}
+
+/// Pure decision for the reranker posture. Never refuses (see `RerankGuard`).
+#[cfg(feature = "embed")]
+pub(crate) fn rerank_guard(rerank_active: bool, require_semantic: bool) -> RerankGuard {
+    if rerank_active {
+        RerankGuard::Ok
+    } else if require_semantic {
+        RerankGuard::Required
+    } else {
+        RerankGuard::Degraded
+    }
+}
+
+/// Serve posture for the `ColBERT` late-interaction model. Unlike rerank, `ColBERT`
+/// is only loaded when the operator *explicitly* opts in with
+/// `MEMKEEPER_LATE_INTERACTION=1`, so a requested-but-absent model is a real
+/// misconfiguration: it is always loud, and refuses under
+/// `MEMKEEPER_REQUIRE_SEMANTIC` rather than silently skipping late-interaction.
+#[cfg(feature = "embed")]
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum ColbertGuard {
+    /// Not requested (late-interaction off) or the model loaded — nothing to flag.
+    Ok,
+    /// Requested via `MEMKEEPER_LATE_INTERACTION` but absent — warn loudly (NOTE).
+    Degraded,
+    /// Requested + absent + `MEMKEEPER_REQUIRE_SEMANTIC` — refuse to serve.
+    Refuse,
+}
+
+/// Pure decision for the `ColBERT` posture, keyed on whether late-interaction was
+/// requested, whether the model loaded, and whether semantic is required.
+#[cfg(feature = "embed")]
+pub(crate) fn colbert_guard(
+    late_interaction: bool,
+    colbert_active: bool,
+    require_semantic: bool,
+) -> ColbertGuard {
+    if !late_interaction || colbert_active {
+        ColbertGuard::Ok
+    } else if require_semantic {
+        ColbertGuard::Refuse
+    } else {
+        ColbertGuard::Degraded
+    }
+}
+
 /// Surface the retrieval mode when a non-semantic (lexical-only) binary serves.
 /// Semantic is the default and preferred build; a lexical-only daemon is a
 /// supported but lesser mode, so state it visibly without crying wolf — a calm
@@ -184,6 +247,84 @@ fn warn_models_absent(refusing: bool) {
     }
 }
 
+/// Surface that the reranker did not load. Always visible (never silent): a calm
+/// NOTE by default, a loud ERROR when `MEMKEEPER_REQUIRE_SEMANTIC` demanded
+/// semantic. Serving continues regardless — rerank only reorders results.
+#[cfg(feature = "embed")]
+fn warn_rerank_absent(required: bool) {
+    if required {
+        eprintln!(
+            "[memkeeper] ERROR: MEMKEEPER_REQUIRE_SEMANTIC is set, but the reranker model did not \
+             load (MEMKEEPER_RERANK_MODEL_DIR unset or files missing) — results serve in plain \
+             retrieval order, not cross-encoder reranked. Run `memkeeper pull-models`. Continuing: \
+             rerank only reorders, it never drops results."
+        );
+    } else {
+        eprintln!(
+            "[memkeeper] NOTE: reranker model not loaded — serving plain retrieval order (no \
+             cross-encoder rerank). Run `memkeeper pull-models` to enable it. Set \
+             MEMKEEPER_REQUIRE_SEMANTIC=1 to escalate this to an error."
+        );
+    }
+}
+
+/// Surface that `MEMKEEPER_LATE_INTERACTION=1` was set but the `ColBERT` model did
+/// not load. Always loud (the operator explicitly opted in): a NOTE by default,
+/// and an ERROR + desktop alarm when refusing under `MEMKEEPER_REQUIRE_SEMANTIC`.
+#[cfg(feature = "embed")]
+fn warn_colbert_absent(refusing: bool) {
+    if refusing {
+        eprintln!(
+            "[memkeeper] ERROR: MEMKEEPER_LATE_INTERACTION=1 but the ColBERT model did not load \
+             (MEMKEEPER_COLBERT_MODEL_DIR unset or files missing), and MEMKEEPER_REQUIRE_SEMANTIC is \
+             set — refusing to serve rather than silently skipping late-interaction."
+        );
+        #[cfg(target_os = "macos")]
+        {
+            let _ = std::process::Command::new("osascript")
+                .args([
+                    "-e",
+                    "display notification \"late-interaction requested, but ColBERT model missing\" \
+                     with title \"memkeeper: refusing to serve\"",
+                ])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn();
+        }
+    } else {
+        eprintln!(
+            "[memkeeper] NOTE: MEMKEEPER_LATE_INTERACTION=1 but the ColBERT model is not loaded — \
+             late-interaction is OFF. Set MEMKEEPER_COLBERT_MODEL_DIR to the model, or unset \
+             MEMKEEPER_LATE_INTERACTION. Set MEMKEEPER_REQUIRE_SEMANTIC=1 to refuse instead of skipping."
+        );
+    }
+}
+
+/// Apply the rerank and `ColBERT` posture guards after the embedder guard has
+/// passed. Both are made loud (never silent); `ColBERT` refuses under
+/// `MEMKEEPER_REQUIRE_SEMANTIC`. Returns `Err(2)` only when `ColBERT` refuses.
+#[cfg(feature = "embed")]
+fn apply_rerank_colbert_guards(models: &SemanticModels, require_semantic: bool) -> Result<(), i32> {
+    match rerank_guard(models.rerank_active(), require_semantic) {
+        RerankGuard::Ok => {}
+        RerankGuard::Degraded => warn_rerank_absent(false),
+        RerankGuard::Required => warn_rerank_absent(true),
+    }
+    match colbert_guard(
+        crate::late_interaction_enabled(),
+        models.colbert_active(),
+        require_semantic,
+    ) {
+        ColbertGuard::Ok => {}
+        ColbertGuard::Degraded => warn_colbert_absent(false),
+        ColbertGuard::Refuse => {
+            warn_colbert_absent(true);
+            return Err(2);
+        }
+    }
+    Ok(())
+}
+
 /// Whether the named env var is set truthy (`1`/`true`). Single source of truth
 /// for boolean opt-in/opt-out flags across the CLI.
 pub(crate) fn env_flag_enabled(name: &str) -> bool {
@@ -226,6 +367,11 @@ pub(crate) fn serve_semantic_models_or_refuse() -> Result<SemanticModels, i32> {
         }
     }
 
+    // Third guard: the embedder loaded, but rerank/ColBERT can still be silently
+    // off. Make those loud; ColBERT refuses under MEMKEEPER_REQUIRE_SEMANTIC.
+    #[cfg(feature = "embed")]
+    apply_rerank_colbert_guards(&semantic_models, require_semantic)?;
+
     Ok(semantic_models)
 }
 
@@ -263,6 +409,13 @@ pub(crate) fn run_serve(args: &[String]) -> i32 {
             warn_models_absent(true);
             return 2;
         }
+    }
+
+    // Third guard: the embedder loaded, but rerank/ColBERT can still be silently
+    // off. Make those loud; ColBERT refuses under MEMKEEPER_REQUIRE_SEMANTIC.
+    #[cfg(feature = "embed")]
+    if let Err(code) = apply_rerank_colbert_guards(&semantic_models, require_semantic) {
+        return code;
     }
 
     match mode {
