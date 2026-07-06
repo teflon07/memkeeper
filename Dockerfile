@@ -3,7 +3,7 @@
 # of the box; retrieval is lexical (BM25/FTS) until you run `memkeeper
 # pull-models` for on-device semantic. Build for linux/amd64 (the published
 # release target).
-FROM debian:bookworm-slim
+FROM --platform=linux/amd64 ubuntu:24.04
 
 RUN apt-get update \
  && apt-get install -y --no-install-recommends curl ca-certificates tar \
