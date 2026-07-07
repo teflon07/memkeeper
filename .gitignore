@@ -1,5 +1,6 @@
 # Build output
 /target/
+/dist/
 
 # Local stores — never commit a user's memory database
 *.sqlite
