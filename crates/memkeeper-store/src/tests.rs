@@ -7790,8 +7790,8 @@ fn recency_half_life_decays_decisively_at_realistic_timescales() {
     let future = recency_score_for_silo(Some(now_jd + 10.0), "short-term", now_jd);
     assert!((future - VOLATILE_MAX_RECENCY_SCORE).abs() < 1e-12);
     // Missing or non-finite timestamps score zero.
-    assert!(recency_score_for_silo(None, "short-term", now_jd) == 0.0);
-    assert!(recency_score_for_silo(Some(f64::NAN), "durable", now_jd) == 0.0);
+    assert!(recency_score_for_silo(None, "short-term", now_jd).abs() < f64::EPSILON);
+    assert!(recency_score_for_silo(Some(f64::NAN), "durable", now_jd).abs() < f64::EPSILON);
 }
 
 #[test]
@@ -8095,6 +8095,9 @@ fn record_recall_logs_events_and_touches_accessed_at() {
         &RecallLogRequest {
             source: Some("unit-test".to_string()),
             session_id: None,
+            batch_id: None,
+            latency_ms: None,
+            latency_source: None,
             events: vec![
                 RecallEvent {
                     memory_id: memory_id.clone(),
@@ -8142,6 +8145,9 @@ fn record_recall_logs_events_and_touches_accessed_at() {
         &RecallLogRequest {
             source: None,
             session_id: None,
+            batch_id: None,
+            latency_ms: None,
+            latency_source: None,
             events: vec![RecallEvent {
                 memory_id,
                 kind: "viewed".to_string(),
@@ -8158,6 +8164,9 @@ fn record_recall_logs_events_and_touches_accessed_at() {
         &RecallLogRequest {
             source: None,
             session_id: None,
+            batch_id: None,
+            latency_ms: None,
+            latency_source: None,
             events: Vec::new(),
             touch_accessed: false,
         },
@@ -8306,6 +8315,9 @@ fn log_used(path: &std::path::Path, memory_id: &str, session: &str, rank: usize,
         &RecallLogRequest {
             source: Some("test".to_string()),
             session_id: Some(session.to_string()),
+            batch_id: None,
+            latency_ms: None,
+            latency_source: None,
             events: vec![used_event(memory_id, rank, score)],
             touch_accessed: true,
         },
@@ -8381,6 +8393,9 @@ fn promote_excludes_below_floor_above_cap_and_null_session() {
             &RecallLogRequest {
                 source: Some("test".to_string()),
                 session_id: None, // legacy/unattributed
+                batch_id: None,
+                latency_ms: None,
+                latency_source: None,
                 events: vec![used_event(&no_session, 1, 0.95)],
                 touch_accessed: true,
             },
@@ -8443,6 +8458,9 @@ fn record_recall_stores_session_id_per_event() {
         &RecallLogRequest {
             source: Some("test".to_string()),
             session_id: Some("sess-123".to_string()),
+            batch_id: None,
+            latency_ms: None,
+            latency_source: None,
             events: vec![retrieved_event(&m.memory.id)],
             touch_accessed: true,
         },
@@ -8458,6 +8476,56 @@ fn record_recall_stores_session_id_per_event() {
         )
         .expect("query session_id");
     assert_eq!(session.as_deref(), Some("sess-123"));
+}
+
+#[test]
+fn record_recall_stores_batch_latency_metadata() {
+    let path = temp_store_path("record_recall_stores_batch_latency_metadata");
+    cleanup_store(&path);
+    init_store(&path).expect("init succeeds");
+
+    let m =
+        remember_memory(&path, &basic_request("fact: latency-tagged recall")).expect("remember");
+    record_recall(
+        &path,
+        &RecallLogRequest {
+            source: Some("test".to_string()),
+            session_id: Some("sess-latency".to_string()),
+            batch_id: Some("batch-123".to_string()),
+            latency_ms: Some(12.5),
+            latency_source: Some("unit-test".to_string()),
+            events: vec![retrieved_event(&m.memory.id)],
+            touch_accessed: true,
+        },
+    )
+    .expect("record recall");
+
+    let conn = Connection::open(&path).expect("open");
+    let (batch_id, latency_ms, latency_source): (Option<String>, Option<f64>, Option<String>) =
+        conn.query_row(
+            "SELECT batch_id, latency_ms, latency_source FROM recall_events WHERE memory_id = ?1",
+            params![&m.memory.id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .expect("query latency metadata");
+    assert_eq!(batch_id.as_deref(), Some("batch-123"));
+    assert_eq!(latency_ms, Some(12.5));
+    assert_eq!(latency_source.as_deref(), Some("unit-test"));
+
+    let invalid = record_recall(
+        &path,
+        &RecallLogRequest {
+            source: Some("test".to_string()),
+            session_id: None,
+            batch_id: None,
+            latency_ms: Some(-1.0),
+            latency_source: Some("unit-test".to_string()),
+            events: vec![retrieved_event(&m.memory.id)],
+            touch_accessed: false,
+        },
+    );
+    assert!(matches!(invalid, Err(Error::InvalidRequest { .. })));
+    cleanup_store(&path);
 }
 
 #[test]
@@ -8693,6 +8761,9 @@ fn dream_promote_ignores_surfaced_recall_events() {
     let surfaced = |session: &str| RecallLogRequest {
         source: Some("test".to_string()),
         session_id: Some(session.to_string()),
+        batch_id: None,
+        latency_ms: None,
+        latency_source: None,
         events: vec![RecallEvent {
             memory_id: mem_id.clone(),
             kind: "surfaced".to_string(),
@@ -9781,4 +9852,234 @@ fn alias_tag_boost_outranks_topical_neighbor() {
             b_res.score
         );
     }
+}
+
+// ---- cross-space retrieval (spec: cross-space-retrieval-spec-v0.1) ----
+
+#[test]
+fn resolve_space_filter_maps_default_named_and_all_scopes() {
+    // Empty stays back-compatible: the default space.
+    assert_eq!(
+        super::resolve_space_filter(&[]),
+        vec![DEFAULT_SPACE.to_string()]
+    );
+    // The "*" sentinel => all spaces: an empty vector, which the predicate
+    // builder renders as no `space_name` filter at all.
+    assert!(super::resolve_space_filter(&["*".to_string()]).is_empty());
+    // A stray whitespace-padded sentinel still resolves to all spaces.
+    assert!(super::resolve_space_filter(&[" * ".to_string()]).is_empty());
+    // The sentinel dominates a mixed list (union beats a named subset).
+    assert!(super::resolve_space_filter(&["*".to_string(), "trading".to_string()]).is_empty());
+    // Named spaces pass through unchanged.
+    assert_eq!(
+        super::resolve_space_filter(&["trading".to_string()]),
+        vec!["trading".to_string()]
+    );
+}
+
+/// Seed a store with one memory in the default space and one in `trading`,
+/// both matching the query `retrieval marker`. Returns the store path plus the
+/// default-space and trading-space memory ids.
+fn seed_two_space_store(test_name: &str) -> (PathBuf, String, String) {
+    let path = temp_store_path(test_name);
+    cleanup_store(&path);
+    init_store(&path).expect("init succeeds");
+
+    let mut default_mem = basic_request("decision: retrieval marker alpha in the default space");
+    default_mem.kind = None;
+    let default_id = remember_memory(&path, &default_mem)
+        .expect("remember default")
+        .memory
+        .id;
+
+    create_space(
+        &path,
+        &SpaceCreateRequest {
+            name: "trading".to_string(),
+            display_name: None,
+            description: None,
+            default_silo: None,
+            ontology: None,
+            config_json: None,
+            if_not_exists: true,
+        },
+    )
+    .expect("create trading space");
+
+    let mut trading_mem = basic_request("decision: retrieval marker bravo in the trading space");
+    trading_mem.kind = None;
+    trading_mem.space = Some("trading".to_string());
+    let trading_id = remember_memory(&path, &trading_mem)
+        .expect("remember trading")
+        .memory
+        .id;
+
+    (path, default_id, trading_id)
+}
+
+fn search_ids_for_spaces(path: &Path, spaces: Vec<String>) -> Vec<String> {
+    let report = search_memories(
+        path,
+        &SearchRequest {
+            query: "retrieval marker".to_string(),
+            filters: SearchFilters {
+                spaces,
+                ..SearchFilters::default()
+            },
+            limit: 10,
+            offset: 0,
+            snippet_chars: 80,
+            include_content: false,
+            include_source: false,
+            semantic_fallback: "disabled".to_string(),
+            lexical_fallback: "disabled".to_string(),
+            embedding: None,
+            query_token_embedding: None,
+            token_model_id: None,
+        },
+    )
+    .expect("search succeeds");
+    let mut ids: Vec<String> = report.results.into_iter().map(|r| r.memory_id).collect();
+    ids.sort();
+    ids
+}
+
+#[test]
+fn cross_space_search_scopes_default_named_and_all() {
+    let (path, default_id, trading_id) = seed_two_space_store("cross_space_search");
+
+    // Default (empty) => only the default-space memory.
+    assert_eq!(
+        search_ids_for_spaces(&path, vec![]),
+        vec![default_id.clone()]
+    );
+
+    // Named => only the trading-space memory.
+    assert_eq!(
+        search_ids_for_spaces(&path, vec!["trading".to_string()]),
+        vec![trading_id.clone()]
+    );
+
+    // "*" => the union of both spaces.
+    let mut expected = vec![default_id, trading_id];
+    expected.sort();
+    assert_eq!(
+        search_ids_for_spaces(&path, vec!["*".to_string()]),
+        expected
+    );
+
+    cleanup_store(&path);
+}
+
+#[test]
+fn cross_space_memory_list_scopes_default_named_and_all() {
+    let (path, _default_id, _trading_id) = seed_two_space_store("cross_space_list");
+
+    let count_for = |spaces: Vec<String>| -> usize {
+        list_memories(
+            &path,
+            &MemoryListRequest {
+                filters: SearchFilters {
+                    spaces,
+                    ..SearchFilters::default()
+                },
+                limit: 50,
+                offset: 0,
+                snippet_chars: 0,
+                include_content: false,
+                include_source: false,
+                order: "updated_desc".to_string(),
+            },
+        )
+        .expect("list succeeds")
+        .results
+        .len()
+    };
+
+    assert_eq!(count_for(vec![]), 1, "default space holds one memory");
+    assert_eq!(
+        count_for(vec!["trading".to_string()]),
+        1,
+        "trading space holds one memory"
+    );
+    assert_eq!(
+        count_for(vec!["*".to_string()]),
+        2,
+        "all spaces unions both"
+    );
+
+    cleanup_store(&path);
+}
+
+#[test]
+fn cross_space_pack_pool_unions_all_spaces() {
+    let (path, default_id, trading_id) = seed_two_space_store("cross_space_pack");
+
+    let pool_ids = |spaces: Vec<String>| -> Vec<String> {
+        let mut ids: Vec<String> = super::build_pack_pool(
+            &path,
+            &PackRequest {
+                title: "cross-space".to_string(),
+                queries: vec!["retrieval marker".to_string()],
+                filters: SearchFilters {
+                    spaces,
+                    ..SearchFilters::default()
+                },
+                max_memories: 10,
+                max_chars: 4000,
+                format: "markdown".to_string(),
+                min_score: 0.0,
+                rerank_candidates: 0,
+                query_embeddings: None,
+                query_token_embeddings: None,
+                token_model_id: None,
+            },
+        )
+        .expect("pack pool")
+        .into_iter()
+        .map(|item| item.memory_id)
+        .collect();
+        ids.sort();
+        ids
+    };
+
+    // Default pack sees only the default space; "*" unions both.
+    assert_eq!(pool_ids(vec![]), vec![default_id.clone()]);
+    let mut expected = vec![default_id, trading_id];
+    expected.sort();
+    assert_eq!(pool_ids(vec!["*".to_string()]), expected);
+
+    cleanup_store(&path);
+}
+
+#[test]
+fn write_paths_reject_all_spaces_sentinel() {
+    let path = temp_store_path("write_paths_reject_all_spaces_sentinel");
+    cleanup_store(&path);
+    init_store(&path).expect("init succeeds");
+
+    // remember into the sentinel space is rejected (would otherwise auto-create
+    // a space named "*" that collides with the union scope).
+    let mut mem = basic_request("decision: must not be writable to the sentinel space");
+    mem.space = Some("*".to_string());
+    let err = remember_memory(&path, &mem).expect_err("remember into * must fail");
+    assert!(matches!(err, Error::InvalidRequest { .. }), "got {err:?}");
+
+    // Creating a space literally named "*" is rejected.
+    let err = create_space(
+        &path,
+        &SpaceCreateRequest {
+            name: "*".to_string(),
+            display_name: None,
+            description: None,
+            default_silo: None,
+            ontology: None,
+            config_json: None,
+            if_not_exists: false,
+        },
+    )
+    .expect_err("create_space(*) must fail");
+    assert!(matches!(err, Error::InvalidRequest { .. }), "got {err:?}");
+
+    cleanup_store(&path);
 }

@@ -18,7 +18,7 @@ fn init_then_stats_returns_json_success() {
     let path = temp_store_path("init_then_stats_returns_json_success");
     cleanup_store(&path);
 
-    let init = Command::new(env!("CARGO_BIN_EXE_memkeeper"))
+    let init = memkeeper_command()
         .args(["init", "--store"])
         .arg(&path)
         .arg("--json")
@@ -31,7 +31,7 @@ fn init_then_stats_returns_json_success() {
     assert!(init_stdout.contains("\"created\":true"));
     assert!(init_stdout.contains("\"spaces\":[\"workspace-memory\"]"));
 
-    let stats = Command::new(env!("CARGO_BIN_EXE_memkeeper"))
+    let stats = memkeeper_command()
         .args(["stats", "--store"])
         .arg(&path)
         .arg("--json")
@@ -47,7 +47,7 @@ fn init_then_stats_returns_json_success() {
     assert!(stats_stdout.contains("\"memory_count\":0"));
     assert!(stats_stdout.contains("\"indexes\":{"));
 
-    let stats_without_indexes = Command::new(env!("CARGO_BIN_EXE_memkeeper"))
+    let stats_without_indexes = memkeeper_command()
         .args(["stats", "--store"])
         .arg(&path)
         .args(["--json", "--no-indexes"])
@@ -66,7 +66,7 @@ fn doctor_reports_missing_and_initialized_store() {
     let path = temp_store_path("doctor_reports_missing_and_initialized_store");
     cleanup_store(&path);
 
-    let missing = Command::new(env!("CARGO_BIN_EXE_memkeeper"))
+    let missing = memkeeper_command()
         .args(["doctor", "--store"])
         .arg(&path)
         .arg("--json")
@@ -81,7 +81,7 @@ fn doctor_reports_missing_and_initialized_store() {
     assert!(missing_stdout.contains("\"code\":\"store_not_initialized\""));
     assert!(missing_stdout.contains("\"mutating\":false"));
 
-    let init = Command::new(env!("CARGO_BIN_EXE_memkeeper"))
+    let init = memkeeper_command()
         .args(["init", "--store"])
         .arg(&path)
         .arg("--json")
@@ -89,7 +89,7 @@ fn doctor_reports_missing_and_initialized_store() {
         .expect("run init");
     assert!(init.status.success(), "init failed: {init:?}");
 
-    let ready = Command::new(env!("CARGO_BIN_EXE_memkeeper"))
+    let ready = memkeeper_command()
         .args(["doctor", "--store"])
         .arg(&path)
         .args(["--json", "--include-indexes"])
@@ -111,7 +111,7 @@ fn doctor_does_not_create_sqlite_sidecars() {
     let path = temp_store_path("doctor_does_not_create_sqlite_sidecars");
     cleanup_store(&path);
 
-    let init = Command::new(env!("CARGO_BIN_EXE_memkeeper"))
+    let init = memkeeper_command()
         .args(["init", "--store"])
         .arg(&path)
         .arg("--json")
@@ -124,7 +124,7 @@ fn doctor_does_not_create_sqlite_sidecars() {
     assert!(!wal.exists(), "init fixture unexpectedly left WAL sidecar");
     assert!(!shm.exists(), "init fixture unexpectedly left SHM sidecar");
 
-    let doctor = Command::new(env!("CARGO_BIN_EXE_memkeeper"))
+    let doctor = memkeeper_command()
         .args(["doctor", "--store"])
         .arg(&path)
         .arg("--json")
@@ -142,7 +142,7 @@ fn serve_stdio_handles_multiple_json_requests() {
     let path = temp_store_path("serve_stdio_handles_multiple_json_requests");
     cleanup_store(&path);
 
-    let mut child = Command::new(env!("CARGO_BIN_EXE_memkeeper"))
+    let mut child = memkeeper_command()
         .args(["serve", "--stdio"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -240,7 +240,7 @@ fn space_and_silo_commands_manage_custom_space() {
     let path = temp_store_path("space_and_silo_commands_manage_custom_space");
     cleanup_store(&path);
 
-    let init = Command::new(env!("CARGO_BIN_EXE_memkeeper"))
+    let init = memkeeper_command()
         .args(["init", "--store"])
         .arg(&path)
         .arg("--json")
@@ -248,7 +248,7 @@ fn space_and_silo_commands_manage_custom_space() {
         .expect("run init");
     assert!(init.status.success());
 
-    let create = Command::new(env!("CARGO_BIN_EXE_memkeeper"))
+    let create = memkeeper_command()
         .args(["space-create", "--store"])
         .arg(&path)
         .args([
@@ -264,7 +264,7 @@ fn space_and_silo_commands_manage_custom_space() {
     assert!(create_stdout.contains("\"default_silo\":\"long-term\""));
     assert!(create_stdout.contains("\"created\":true"));
 
-    let idempotent = Command::new(env!("CARGO_BIN_EXE_memkeeper"))
+    let idempotent = memkeeper_command()
         .args(["space-create", "--store"])
         .arg(&path)
         .args(["--json", r#"{"name":"project-notes","if_not_exists":true}"#])
@@ -274,7 +274,7 @@ fn space_and_silo_commands_manage_custom_space() {
     let idempotent_stdout = String::from_utf8(idempotent.stdout).expect("valid utf8");
     assert!(idempotent_stdout.contains("\"created\":false"));
 
-    let space_list = Command::new(env!("CARGO_BIN_EXE_memkeeper"))
+    let space_list = memkeeper_command()
         .args(["space-list", "--store"])
         .arg(&path)
         .arg("--json")
@@ -289,7 +289,7 @@ fn space_and_silo_commands_manage_custom_space() {
     assert!(space_stdout.contains("\"name\":\"project-notes\""));
     assert!(space_stdout.contains("\"silo_count\":3"));
 
-    let silo_list = Command::new(env!("CARGO_BIN_EXE_memkeeper"))
+    let silo_list = memkeeper_command()
         .args(["silo-list", "--store"])
         .arg(&path)
         .args(["--space", "project-notes", "--json"])
@@ -306,7 +306,7 @@ fn space_and_silo_commands_manage_custom_space() {
     assert!(silo_stdout.contains("\"name\":\"long-term\""));
     assert!(silo_stdout.contains("\"is_default\":true"));
 
-    let remember = Command::new(env!("CARGO_BIN_EXE_memkeeper"))
+    let remember = memkeeper_command()
         .args(["remember", "--store"])
         .arg(&path)
         .args([
@@ -333,7 +333,7 @@ fn init_refuses_unrelated_existing_database() {
         .expect("create unrelated table");
     drop(connection);
 
-    let output = Command::new(env!("CARGO_BIN_EXE_memkeeper"))
+    let output = memkeeper_command()
         .args(["init", "--store"])
         .arg(&path)
         .arg("--json")
@@ -355,7 +355,7 @@ fn init_rejects_sqlite_uri_path() {
     cleanup_store(&path);
     let uri = format!("file:{}", path.display());
 
-    let output = Command::new(env!("CARGO_BIN_EXE_memkeeper"))
+    let output = memkeeper_command()
         .args(["init", "--store", &uri, "--json"])
         .output()
         .expect("run init");
@@ -375,7 +375,7 @@ fn remember_then_get_returns_memory_and_updates_stats() {
     let path = temp_store_path("remember_then_get_returns_memory_and_updates_stats");
     cleanup_store(&path);
 
-    let init = Command::new(env!("CARGO_BIN_EXE_memkeeper"))
+    let init = memkeeper_command()
         .args(["init", "--store"])
         .arg(&path)
         .arg("--json")
@@ -384,7 +384,7 @@ fn remember_then_get_returns_memory_and_updates_stats() {
     assert!(init.status.success());
 
     let request = r#"{"content":"decision: remember get works","summary":"remember get works","tags":["memory","cli"],"source":{"type":"manual","adapter":"host"}}"#;
-    let remember = Command::new(env!("CARGO_BIN_EXE_memkeeper"))
+    let remember = memkeeper_command()
         .args(["remember", "--store"])
         .arg(&path)
         .args(["--json", request])
@@ -401,7 +401,7 @@ fn remember_then_get_returns_memory_and_updates_stats() {
 
     assert_duplicate_remember_candidate(&path);
 
-    let get = Command::new(env!("CARGO_BIN_EXE_memkeeper"))
+    let get = memkeeper_command()
         .args(["get", "--store"])
         .arg(&path)
         .args(["--id", &memory_id, "--json", "--include-history"])
@@ -416,7 +416,7 @@ fn remember_then_get_returns_memory_and_updates_stats() {
     assert!(get_stdout.contains("\"events\":["));
     assert!(!get_stdout.contains("\"adapter\":\"host\""));
 
-    let get_no_source = Command::new(env!("CARGO_BIN_EXE_memkeeper"))
+    let get_no_source = memkeeper_command()
         .args(["get", "--store"])
         .arg(&path)
         .args([
@@ -432,7 +432,7 @@ fn remember_then_get_returns_memory_and_updates_stats() {
     let get_no_source_stdout = String::from_utf8(get_no_source.stdout).expect("valid utf8");
     assert!(!get_no_source_stdout.contains("\"adapter\":\"host\""));
 
-    let search = Command::new(env!("CARGO_BIN_EXE_memkeeper"))
+    let search = memkeeper_command()
         .args(["search", "--store"])
         .arg(&path)
         .args([
@@ -448,7 +448,7 @@ fn remember_then_get_returns_memory_and_updates_stats() {
     assert!(search_stdout.contains("decision: remember get works"));
     assert!(!search_stdout.contains("\"adapter\":\"host\""));
 
-    let memory_list = Command::new(env!("CARGO_BIN_EXE_memkeeper"))
+    let memory_list = memkeeper_command()
         .args(["memory-list", "--store"])
         .arg(&path)
         .args([
@@ -469,7 +469,7 @@ fn remember_then_get_returns_memory_and_updates_stats() {
     assert!(!memory_list_stdout.contains("decision: remember get works"));
     assert!(!memory_list_stdout.contains("\"adapter\":\"host\""));
 
-    let stats = Command::new(env!("CARGO_BIN_EXE_memkeeper"))
+    let stats = memkeeper_command()
         .args(["stats", "--store"])
         .arg(&path)
         .arg("--json")
@@ -485,7 +485,7 @@ fn remember_then_get_returns_memory_and_updates_stats() {
 }
 
 fn assert_duplicate_remember_candidate(path: &Path) {
-    let duplicate = Command::new(env!("CARGO_BIN_EXE_memkeeper"))
+    let duplicate = memkeeper_command()
         .args(["remember", "--store"])
         .arg(path)
         .args([
@@ -511,7 +511,7 @@ fn assert_duplicate_remember_candidate(path: &Path) {
 fn dream_expires_reindexes_and_reports_duplicates() {
     let path = temp_store_path("dream_expires_reindexes_and_reports_duplicates");
     cleanup_store(&path);
-    let init = Command::new(env!("CARGO_BIN_EXE_memkeeper"))
+    let init = memkeeper_command()
         .args(["init", "--store"])
         .arg(&path)
         .arg("--json")
@@ -519,7 +519,7 @@ fn dream_expires_reindexes_and_reports_duplicates() {
         .expect("run init");
     assert!(init.status.success());
 
-    let expired = Command::new(env!("CARGO_BIN_EXE_memkeeper"))
+    let expired = memkeeper_command()
         .args(["remember", "--store"])
         .arg(&path)
         .args([
@@ -537,7 +537,7 @@ fn dream_expires_reindexes_and_reports_duplicates() {
 
     for content in ["duplicate cli dream", "duplicate cli dream"] {
         let request = format!(r#"{{"content":{}}}"#, json_string(content));
-        let remember = Command::new(env!("CARGO_BIN_EXE_memkeeper"))
+        let remember = memkeeper_command()
             .args(["remember", "--store"])
             .arg(&path)
             .args(["--json", &request])
@@ -549,7 +549,7 @@ fn dream_expires_reindexes_and_reports_duplicates() {
         );
     }
 
-    let dry_run = Command::new(env!("CARGO_BIN_EXE_memkeeper"))
+    let dry_run = memkeeper_command()
         .args(["dream", "--store"])
         .arg(&path)
         .args([
@@ -570,7 +570,7 @@ fn dream_expires_reindexes_and_reports_duplicates() {
     assert!(dry_run_stdout.contains("\"memory_rows\":3"));
     assert!(dry_run_stdout.contains("\"proposals\":[{"));
 
-    let get_before_commit = Command::new(env!("CARGO_BIN_EXE_memkeeper"))
+    let get_before_commit = memkeeper_command()
         .args(["get", "--store"])
         .arg(&path)
         .args(["--id", &expired_id, "--json"])
@@ -580,7 +580,7 @@ fn dream_expires_reindexes_and_reports_duplicates() {
     let before_stdout = String::from_utf8(get_before_commit.stdout).expect("valid utf8");
     assert!(before_stdout.contains("\"status\":\"active\""));
 
-    let committed = Command::new(env!("CARGO_BIN_EXE_memkeeper"))
+    let committed = memkeeper_command()
         .args(["dream", "--store"])
         .arg(&path)
         .args([
@@ -603,7 +603,7 @@ fn dream_expires_reindexes_and_reports_duplicates() {
     assert!(committed_stdout.contains("\"memory_rows\":3"));
     assert!(committed_stdout.contains("\"total_count\":2"));
 
-    let get_after_commit = Command::new(env!("CARGO_BIN_EXE_memkeeper"))
+    let get_after_commit = memkeeper_command()
         .args(["get", "--store"])
         .arg(&path)
         .args(["--id", &expired_id, "--json", "--include-history"])
@@ -625,7 +625,7 @@ fn json_string(value: &str) -> String {
 fn batch_search_and_pack_return_compact_context() {
     let path = temp_store_path("batch_search_and_pack_return_compact_context");
     cleanup_store(&path);
-    let init = Command::new(env!("CARGO_BIN_EXE_memkeeper"))
+    let init = memkeeper_command()
         .args(["init", "--store"])
         .arg(&path)
         .arg("--json")
@@ -633,7 +633,7 @@ fn batch_search_and_pack_return_compact_context() {
         .expect("run init");
     assert!(init.status.success());
 
-    let remember = Command::new(env!("CARGO_BIN_EXE_memkeeper"))
+    let remember = memkeeper_command()
         .args(["remember", "--store"])
         .arg(&path)
         .args([
@@ -648,7 +648,7 @@ fn batch_search_and_pack_return_compact_context() {
         "\"id\":\"",
     );
 
-    let batch = Command::new(env!("CARGO_BIN_EXE_memkeeper"))
+    let batch = memkeeper_command()
         .args(["batch-search", "--store"])
         .arg(&path)
         .args([
@@ -664,7 +664,7 @@ fn batch_search_and_pack_return_compact_context() {
     assert!(batch_stdout.contains(&memory_id));
     assert!(!batch_stdout.contains("\"adapter\":\"host\""));
 
-    let pack = Command::new(env!("CARGO_BIN_EXE_memkeeper"))
+    let pack = memkeeper_command()
         .args(["pack", "--store"])
         .arg(&path)
         .args([
@@ -688,7 +688,7 @@ fn forget_then_history_tombstones_memory() {
     let path = temp_store_path("forget_then_history_tombstones_memory");
     cleanup_store(&path);
 
-    let init = Command::new(env!("CARGO_BIN_EXE_memkeeper"))
+    let init = memkeeper_command()
         .args(["init", "--store"])
         .arg(&path)
         .arg("--json")
@@ -696,7 +696,7 @@ fn forget_then_history_tombstones_memory() {
         .expect("run init");
     assert!(init.status.success());
 
-    let remember = Command::new(env!("CARGO_BIN_EXE_memkeeper"))
+    let remember = memkeeper_command()
         .args(["remember", "--store"])
         .arg(&path)
         .args([
@@ -709,7 +709,7 @@ fn forget_then_history_tombstones_memory() {
     let remember_stdout = String::from_utf8(remember.stdout).expect("valid utf8");
     let memory_id = extract_json_string_after(&remember_stdout, "\"id\":\"");
 
-    let forget = Command::new(env!("CARGO_BIN_EXE_memkeeper"))
+    let forget = memkeeper_command()
         .args(["forget", "--store"])
         .arg(&path)
         .args(["--id", &memory_id, "--reason", "stale", "--json"])
@@ -721,7 +721,7 @@ fn forget_then_history_tombstones_memory() {
     assert!(forget_stdout.contains("\"old_status\":\"active\""));
     assert!(forget_stdout.contains("\"new_status\":\"tombstoned\""));
 
-    let search = Command::new(env!("CARGO_BIN_EXE_memkeeper"))
+    let search = memkeeper_command()
         .args(["search", "--store"])
         .arg(&path)
         .args(["--json", r#"{"query":"forget works","limit":5}"#])
@@ -731,7 +731,7 @@ fn forget_then_history_tombstones_memory() {
     let search_stdout = String::from_utf8(search.stdout).expect("valid utf8");
     assert!(search_stdout.contains("\"results\":[]"));
 
-    let history = Command::new(env!("CARGO_BIN_EXE_memkeeper"))
+    let history = memkeeper_command()
         .args(["history", "--store"])
         .arg(&path)
         .args(["--id", &memory_id, "--json", "--no-source"])
@@ -744,7 +744,7 @@ fn forget_then_history_tombstones_memory() {
     assert!(history_stdout.contains("\"type\":\"forget\""));
     assert!(!history_stdout.contains("\"adapter\":\"host\""));
 
-    let stats = Command::new(env!("CARGO_BIN_EXE_memkeeper"))
+    let stats = memkeeper_command()
         .args(["stats", "--store"])
         .arg(&path)
         .arg("--json")
@@ -770,7 +770,7 @@ fn export_and_backup_write_files() {
     cleanup_store(&backup_path);
     cleanup_store(&import_path);
 
-    let init = Command::new(env!("CARGO_BIN_EXE_memkeeper"))
+    let init = memkeeper_command()
         .args(["init", "--store"])
         .arg(&path)
         .arg("--json")
@@ -778,7 +778,7 @@ fn export_and_backup_write_files() {
         .expect("run init");
     assert!(init.status.success());
 
-    let remember = Command::new(env!("CARGO_BIN_EXE_memkeeper"))
+    let remember = memkeeper_command()
         .args(["remember", "--store"])
         .arg(&path)
         .args([
@@ -789,7 +789,7 @@ fn export_and_backup_write_files() {
         .expect("run remember");
     assert!(remember.status.success(), "remember failed: {remember:?}");
 
-    let export = Command::new(env!("CARGO_BIN_EXE_memkeeper"))
+    let export = memkeeper_command()
         .args(["export", "--store"])
         .arg(&path)
         .args(["--output"])
@@ -807,7 +807,7 @@ fn export_and_backup_write_files() {
     assert!(export_text.contains("\"table\":\"memories\""));
     assert!(export_text.contains("adapter"));
 
-    let backup = Command::new(env!("CARGO_BIN_EXE_memkeeper"))
+    let backup = memkeeper_command()
         .args(["backup", "--store"])
         .arg(&path)
         .args(["--output"])
@@ -825,7 +825,7 @@ fn export_and_backup_write_files() {
     assert!(!PathBuf::from(format!("{}-shm", backup_path.display())).exists());
     assert!(!PathBuf::from(format!("{}-journal", backup_path.display())).exists());
 
-    let backup_stats = Command::new(env!("CARGO_BIN_EXE_memkeeper"))
+    let backup_stats = memkeeper_command()
         .args(["stats", "--store"])
         .arg(&backup_path)
         .arg("--json")
@@ -847,7 +847,7 @@ fn export_and_backup_write_files() {
 }
 
 fn assert_cli_imports_export(export_path: &Path, import_path: &Path) {
-    let import = Command::new(env!("CARGO_BIN_EXE_memkeeper"))
+    let import = memkeeper_command()
         .args(["import", "--store"])
         .arg(import_path)
         .args(["--input"])
@@ -862,7 +862,7 @@ fn assert_cli_imports_export(export_path: &Path, import_path: &Path) {
     assert!(import_stdout.contains("\"dry_run\":false"));
     assert!(import_stdout.contains("\"fts_memory_rows\":1"));
 
-    let import_stats = Command::new(env!("CARGO_BIN_EXE_memkeeper"))
+    let import_stats = memkeeper_command()
         .args(["stats", "--store"])
         .arg(import_path)
         .arg("--json")
@@ -882,7 +882,7 @@ fn stats_missing_store_returns_protocol_error() {
     let path = temp_store_path("stats_missing_store_returns_protocol_error");
     cleanup_store(&path);
 
-    let output = Command::new(env!("CARGO_BIN_EXE_memkeeper"))
+    let output = memkeeper_command()
         .args(["stats", "--store"])
         .arg(&path)
         .arg("--json")
@@ -901,7 +901,7 @@ fn verify_stamps_metadata_via_cli() {
     let path = temp_store_path("verify_stamps_metadata_via_cli");
     cleanup_store(&path);
 
-    let init = Command::new(env!("CARGO_BIN_EXE_memkeeper"))
+    let init = memkeeper_command()
         .args(["init", "--store"])
         .arg(&path)
         .arg("--json")
@@ -911,7 +911,7 @@ fn verify_stamps_metadata_via_cli() {
 
     // Remember a memory with metadata_json as a JSON string containing a verified_against pointer.
     let remember_req = r#"{"content":"fact: the gate is 0.62","metadata_json":"{\"verified_against\":\"~/.zshrc:GATE\"}"}"#;
-    let remember = Command::new(env!("CARGO_BIN_EXE_memkeeper"))
+    let remember = memkeeper_command()
         .args(["remember", "--store"])
         .arg(&path)
         .args(["--json", remember_req])
@@ -923,7 +923,7 @@ fn verify_stamps_metadata_via_cli() {
 
     // Verify the memory with an explicit now timestamp.
     let verify_req = format!(r#"{{"memory_id":"{memory_id}","now":"2026-06-08T20:00:00Z"}}"#);
-    let verify = Command::new(env!("CARGO_BIN_EXE_memkeeper"))
+    let verify = memkeeper_command()
         .args(["verify", "--store"])
         .arg(&path)
         .args(["--json", &verify_req])
@@ -952,7 +952,7 @@ fn search_result_includes_verified_against_from_metadata_json() {
     let path = temp_store_path("search_result_includes_verified_against_from_metadata_json");
     cleanup_store(&path);
 
-    let init = Command::new(env!("CARGO_BIN_EXE_memkeeper"))
+    let init = memkeeper_command()
         .args(["init", "--store"])
         .arg(&path)
         .arg("--json")
@@ -962,7 +962,7 @@ fn search_result_includes_verified_against_from_metadata_json() {
 
     // Remember a memory with metadata_json containing verified_against.
     let remember_req = r#"{"content":"fact: the gate value is 0.62","metadata_json":"{\"verified_against\":\"~/.zshrc:GATE\"}"}"#;
-    let remember = Command::new(env!("CARGO_BIN_EXE_memkeeper"))
+    let remember = memkeeper_command()
         .args(["remember", "--store"])
         .arg(&path)
         .args(["--json", remember_req])
@@ -973,7 +973,7 @@ fn search_result_includes_verified_against_from_metadata_json() {
     let memory_id = extract_json_string_after(&remember_stdout, "\"id\":\"");
 
     // Search for the memory and assert verified_against appears in output.
-    let search = Command::new(env!("CARGO_BIN_EXE_memkeeper"))
+    let search = memkeeper_command()
         .args(["search", "--store"])
         .arg(&path)
         .args([
@@ -1011,7 +1011,7 @@ fn search_result_includes_freshness_label_for_volatile_with_verified_against() {
     cleanup_store(&path);
 
     // Init the store.
-    let init = Command::new(env!("CARGO_BIN_EXE_memkeeper"))
+    let init = memkeeper_command()
         .args(["init", "--store"])
         .arg(&path)
         .arg("--json")
@@ -1031,7 +1031,7 @@ fn search_result_includes_freshness_label_for_volatile_with_verified_against() {
 
     // Remember a volatile (short-term) memory with verified_against but NO verified_at → stale.
     let remember_req = r#"{"content":"fact: the gate is 0.62","silo":"short-term","metadata_json":"{\"verified_against\":\"~/.zshrc:GATE\"}"}"#;
-    let remember = Command::new(env!("CARGO_BIN_EXE_memkeeper"))
+    let remember = memkeeper_command()
         .args(["remember", "--store"])
         .arg(&path)
         .args(["--json", remember_req])
@@ -1040,7 +1040,7 @@ fn search_result_includes_freshness_label_for_volatile_with_verified_against() {
     assert!(remember.status.success(), "remember failed: {remember:?}");
 
     // Search and assert freshness:"verify" is present.
-    let search = Command::new(env!("CARGO_BIN_EXE_memkeeper"))
+    let search = memkeeper_command()
         .args(["search", "--store"])
         .arg(&path)
         .args([
@@ -1064,7 +1064,7 @@ fn search_result_no_freshness_for_durable_even_with_verified_against() {
     let path = temp_store_path("search_freshness_durable");
     cleanup_store(&path);
 
-    let init = Command::new(env!("CARGO_BIN_EXE_memkeeper"))
+    let init = memkeeper_command()
         .args(["init", "--store"])
         .arg(&path)
         .arg("--json")
@@ -1084,7 +1084,7 @@ fn search_result_no_freshness_for_durable_even_with_verified_against() {
 
     // Remember a durable memory with verified_against — freshness must NOT appear.
     let remember_req = r#"{"content":"fact: the gate is 0.62","silo":"durable","metadata_json":"{\"verified_against\":\"~/.zshrc:GATE\"}"}"#;
-    let remember = Command::new(env!("CARGO_BIN_EXE_memkeeper"))
+    let remember = memkeeper_command()
         .args(["remember", "--store"])
         .arg(&path)
         .args(["--json", remember_req])
@@ -1092,7 +1092,7 @@ fn search_result_no_freshness_for_durable_even_with_verified_against() {
         .expect("run remember");
     assert!(remember.status.success(), "remember failed: {remember:?}");
 
-    let search = Command::new(env!("CARGO_BIN_EXE_memkeeper"))
+    let search = memkeeper_command()
         .args(["search", "--store"])
         .arg(&path)
         .args([
@@ -1127,7 +1127,7 @@ fn pack_without_reranker_returns_content_but_empty_scores() {
     let path = temp_store_path("pack_without_reranker_returns_content_but_empty_scores");
     cleanup_store(&path);
 
-    let init = Command::new(env!("CARGO_BIN_EXE_memkeeper"))
+    let init = memkeeper_command()
         .args(["init", "--store"])
         .arg(&path)
         .arg("--json")
@@ -1135,7 +1135,7 @@ fn pack_without_reranker_returns_content_but_empty_scores() {
         .expect("run init");
     assert!(init.status.success(), "init failed: {init:?}");
 
-    let remember = Command::new(env!("CARGO_BIN_EXE_memkeeper"))
+    let remember = memkeeper_command()
         .args(["remember", "--store"])
         .arg(&path)
         .args([
@@ -1146,7 +1146,7 @@ fn pack_without_reranker_returns_content_but_empty_scores() {
         .expect("run remember");
     assert!(remember.status.success(), "remember failed: {remember:?}");
 
-    let pack = Command::new(env!("CARGO_BIN_EXE_memkeeper"))
+    let pack = memkeeper_command()
         .args(["pack", "--store"])
         .arg(&path)
         .args([
@@ -1169,6 +1169,18 @@ fn pack_without_reranker_returns_content_but_empty_scores() {
     );
 
     cleanup_store(&path);
+}
+
+/// Spawn the memkeeper binary with model discovery pinned to cargo's empty
+/// integration-test tmpdir. These tests assert the no-models posture (lexical
+/// search, `reranked:false`, empty pack scores); without the pin, model-dir
+/// discovery finds a populated `models/` checkout near the workspace and
+/// silently activates semantic + rerank, so the suite passes in CI but fails
+/// on any machine that has pulled models.
+fn memkeeper_command() -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_memkeeper"));
+    command.env("MEMKEEPER_MODELS_DIR", env!("CARGO_TARGET_TMPDIR"));
+    command
 }
 
 fn temp_store_path(test_name: &str) -> PathBuf {
@@ -1206,7 +1218,7 @@ fn recall_log_and_rerank_flag_via_cli() {
     let path = temp_store_path("recall_log_and_rerank_flag_via_cli");
     cleanup_store(&path);
 
-    let init = Command::new(env!("CARGO_BIN_EXE_memkeeper"))
+    let init = memkeeper_command()
         .args(["init", "--store"])
         .arg(&path)
         .arg("--json")
@@ -1214,7 +1226,7 @@ fn recall_log_and_rerank_flag_via_cli() {
         .expect("run init");
     assert!(init.status.success(), "init failed: {init:?}");
 
-    let remember = Command::new(env!("CARGO_BIN_EXE_memkeeper"))
+    let remember = memkeeper_command()
         .args(["remember", "--store"])
         .arg(&path)
         .args(["--json", r#"{"content":"fact: recall telemetry probe"}"#])
@@ -1228,7 +1240,7 @@ fn recall_log_and_rerank_flag_via_cli() {
     let recall_req = format!(
         r#"{{"source":"cli-test","events":[{{"memory_id":"{memory_id}","kind":"surfaced","query":"telemetry probe","rank":1,"score":0.5}},{{"memory_id":"{memory_id}","kind":"retrieved"}}]}}"#
     );
-    let recall = Command::new(env!("CARGO_BIN_EXE_memkeeper"))
+    let recall = memkeeper_command()
         .args(["recall-log", "--store"])
         .arg(&path)
         .args(["--json", &recall_req])
@@ -1245,7 +1257,7 @@ fn recall_log_and_rerank_flag_via_cli() {
     assert!(recall_stdout.contains("\"touched\":1"), "{recall_stdout}");
 
     // Unknown kinds are rejected with invalid_request.
-    let bad = Command::new(env!("CARGO_BIN_EXE_memkeeper"))
+    let bad = memkeeper_command()
         .args(["recall-log", "--store"])
         .arg(&path)
         .args([
@@ -1261,7 +1273,7 @@ fn recall_log_and_rerank_flag_via_cli() {
     );
 
     // search accepts the rerank flag and reports reranked:false without models.
-    let search = Command::new(env!("CARGO_BIN_EXE_memkeeper"))
+    let search = memkeeper_command()
         .args(["search", "--store"])
         .arg(&path)
         .args([
@@ -1290,7 +1302,7 @@ fn serve_socket_round_trips_requests() {
 
     let path = temp_store_path("serve_socket_round_trips_requests");
     cleanup_store(&path);
-    let init = Command::new(env!("CARGO_BIN_EXE_memkeeper"))
+    let init = memkeeper_command()
         .args(["init", "--store"])
         .arg(&path)
         .arg("--json")
@@ -1300,7 +1312,7 @@ fn serve_socket_round_trips_requests() {
 
     let sock_dir = tempfile::tempdir().expect("socket dir");
     let sock_path = sock_dir.path().join("serve-test.sock");
-    let mut server = Command::new(env!("CARGO_BIN_EXE_memkeeper"))
+    let mut server = memkeeper_command()
         .args(["serve", "--socket"])
         .arg(&sock_path)
         .spawn()

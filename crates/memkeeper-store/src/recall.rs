@@ -24,16 +24,22 @@ CREATE TABLE IF NOT EXISTS recall_events (
   query TEXT,
   rank INTEGER,
   score REAL,
-  session_id TEXT
+  session_id TEXT,
+  batch_id TEXT,
+  latency_ms REAL,
+  latency_source TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_recall_events_memory ON recall_events(memory_id);
 CREATE INDEX IF NOT EXISTS idx_recall_events_ts ON recall_events(ts);
 ";
 
-/// Add `session_id` to a pre-existing `recall_events` table. Idempotent: a
-/// duplicate-column error means the migration already ran.
-pub(crate) fn ensure_recall_events_session_column(transaction: &Transaction<'_>) -> Result<()> {
-    match transaction.execute("ALTER TABLE recall_events ADD COLUMN session_id TEXT", []) {
+fn ensure_recall_events_column(
+    transaction: &Transaction<'_>,
+    name: &str,
+    sql_type: &str,
+) -> Result<()> {
+    let sql = format!("ALTER TABLE recall_events ADD COLUMN {name} {sql_type}");
+    match transaction.execute(&sql, []) {
         Ok(_) => Ok(()),
         Err(rusqlite::Error::SqliteFailure(_, Some(msg)))
             if msg.contains("duplicate column name") =>
@@ -42,6 +48,15 @@ pub(crate) fn ensure_recall_events_session_column(transaction: &Transaction<'_>)
         }
         Err(error) => Err(Error::Database(error)),
     }
+}
+
+/// Add optional telemetry columns to pre-existing `recall_events` tables.
+/// Idempotent: duplicate-column errors mean a migration already ran.
+pub(crate) fn ensure_recall_events_optional_columns(transaction: &Transaction<'_>) -> Result<()> {
+    ensure_recall_events_column(transaction, "session_id", "TEXT")?;
+    ensure_recall_events_column(transaction, "batch_id", "TEXT")?;
+    ensure_recall_events_column(transaction, "latency_ms", "REAL")?;
+    ensure_recall_events_column(transaction, "latency_source", "TEXT")
 }
 
 /// Record recall telemetry events and optionally touch `accessed_at` for
@@ -60,14 +75,16 @@ pub fn record_recall(
     let mut connection = open_initialized_write(path.as_ref())?;
     let transaction = connection.transaction()?;
     transaction.execute_batch(RECALL_EVENTS_DDL)?;
-    ensure_recall_events_session_column(&transaction)?;
+    ensure_recall_events_optional_columns(&transaction)?;
     let now = now_timestamp(&transaction)?;
     let mut recorded = 0_usize;
     let mut touched = 0_usize;
     {
         let mut insert = transaction.prepare_cached(
-            "INSERT INTO recall_events (memory_id, ts, kind, source, query, rank, score, session_id)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            "INSERT INTO recall_events
+               (memory_id, ts, kind, source, query, rank, score, session_id,
+                batch_id, latency_ms, latency_source)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
         )?;
         let mut touch =
             transaction.prepare_cached("UPDATE memories SET accessed_at = ?1 WHERE id = ?2")?;
@@ -82,6 +99,9 @@ pub fn record_recall(
                 rank,
                 event.score,
                 request.session_id.as_deref(),
+                request.batch_id.as_deref(),
+                request.latency_ms,
+                request.latency_source.as_deref(),
             ])?;
             recorded += 1;
             if request.touch_accessed && event.kind == "retrieved" {
@@ -120,6 +140,31 @@ pub(crate) fn validate_recall_log_request(request: &RecallLogRequest) -> Result<
     {
         return Err(Error::InvalidRequest {
             message: "recall-log session_id exceeds maximum length".to_string(),
+        });
+    }
+    if request
+        .batch_id
+        .as_deref()
+        .is_some_and(|s| s.chars().count() > MAX_METADATA_VALUE_CHARS)
+    {
+        return Err(Error::InvalidRequest {
+            message: "recall-log batch_id exceeds maximum length".to_string(),
+        });
+    }
+    if let Some(latency_ms) = request.latency_ms {
+        if !latency_ms.is_finite() || latency_ms < 0.0 {
+            return Err(Error::InvalidRequest {
+                message: "recall-log latency_ms must be finite and non-negative".to_string(),
+            });
+        }
+    }
+    if request
+        .latency_source
+        .as_deref()
+        .is_some_and(|s| s.chars().count() > MAX_METADATA_VALUE_CHARS)
+    {
+        return Err(Error::InvalidRequest {
+            message: "recall-log latency_source exceeds maximum length".to_string(),
         });
     }
     for event in &request.events {

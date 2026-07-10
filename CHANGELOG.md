@@ -6,6 +6,17 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html) once it reache
 1.0. Until then, minor releases may include breaking changes to the storage
 schema and wire protocol.
 
+## [0.2.14] - 2026-07-10
+
+### Added
+- **Smithery MCPB packaging.** `scripts/package-smithery-mcpb.sh` builds and
+  validates a portable MCP bundle from the release assets, with usage and
+  publishing instructions in `smithery/README.md`.
+
+### Fixed
+- **Docker catalog compatibility.** The published container now uses a catalog-
+  compatible base image.
+
 ## [0.2.13] - 2026-06-30
 
 ### Fixed

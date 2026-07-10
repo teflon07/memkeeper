@@ -328,9 +328,12 @@ pub(crate) static COMMAND_SCHEMAS: &[CommandSchema] = &[
             req("events", "object[]", "Array of {memory_id (req), kind (req), query?, rank?, score?}."),
             opt("source", "string", None, "Event source label."),
             opt("session_id", "string", None, "Session identifier."),
+            opt("batch_id", "string", None, "Recall-log batch identifier shared by events."),
+            opt("latency_ms", "float", None, "Caller-observed retrieval latency for this batch."),
+            opt("latency_source", "string", None, "Label describing what latency_ms measured."),
             opt("touch_accessed", "bool", Some("true"), "Update last-accessed timestamps."),
         ],
-        example: r#"{"source":"hook","events":[{"memory_id":"mem_...","kind":"retrieve","rank":1}]}"#,
+        example: r#"{"source":"hook","events":[{"memory_id":"mem_...","kind":"retrieved","rank":1}]}"#,
     },
     CommandSchema {
         command: "history",

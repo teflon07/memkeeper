@@ -107,7 +107,7 @@ fn parse_serve_supports_stdio_and_strict_envelopes() {
     let failure = serve_line_response(
         r#"{"request_id":"bad1","command":"search","payload":[]}"#,
         std::time::Instant::now(),
-        &SemanticModels::for_serve(),
+        &SemanticModels::for_test(),
     );
     assert!(failure.contains("\"ok\":false"));
     assert!(failure.contains("\"request_id\":\"bad1\""));

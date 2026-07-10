@@ -3,12 +3,14 @@ name: ghcr
 # Build the containerized memkeeper MCP server, push it to GHCR
 # (ghcr.io/teflon07/memkeeper), THEN publish server.json to the official MCP
 # registry (the registry references the OCI image and verifies its ownership
-# label, so the image must exist first). One dispatch does image + registry, so
-# the registry can't drift behind a release.
+# label, so the image must exist first). One run does image + registry, so the
+# registry can't drift behind a release.
 #
-# Manual by design: run it AFTER a release is published (so the release binary
-# the Dockerfile installs already exists), passing that release tag. Avoids any
-# race with the release workflow. First run also backfills an existing tag.
+# Runs automatically after a successful `release` workflow (a v* tag push), via
+# workflow_run — this removes the last manual step, so the registry never drifts
+# behind a release. workflow_run only fires post-completion, so it can't race the
+# release's asset upload (the image's install.sh downloads the release tarball).
+# workflow_dispatch is kept for manual re-runs / backfilling an existing tag.
 #
 # After the first push, make the GHCR package PUBLIC once:
 #   GitHub → your packages → memkeeper → Package settings → Change visibility.
@@ -19,17 +21,59 @@ on:
       version:
         description: "Release tag to package, e.g. v0.2.9"
         required: true
+  workflow_run:
+    workflows: ["release"]
+    types: [completed]
 
 permissions:
   contents: read
   packages: write
 
 jobs:
+  # Resolve the release tag from whichever trigger fired, and gate the auto path:
+  # on workflow_run, only proceed for a SUCCESSFUL release. release.yml only runs
+  # on a v* tag push, so a success here is always a tagged release. When this job
+  # is skipped (failed release), the dependent jobs skip too.
+  setup:
+    name: resolve version
+    runs-on: ubuntu-latest
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      github.event.workflow_run.conclusion == 'success'
+    outputs:
+      version: ${{ steps.ver.outputs.version }}
+    steps:
+      # For the auto path, check out the exact released commit and read the tag
+      # from the stamped server.json (release-prep.sh stamps it). This is robust:
+      # workflow_run.head_branch is unreliable for tag-triggered runs, so we derive
+      # vX.Y.Z from server.json.version rather than trust the event's branch field.
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.version || github.event.workflow_run.head_sha }}
+      - id: ver
+        env:
+          DISPATCH_VERSION: ${{ inputs.version }}
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "version=${DISPATCH_VERSION}" >> "$GITHUB_OUTPUT"
+          else
+            v="$(jq -r .version server.json)"
+            if [ -z "$v" ] || [ "$v" = "null" ]; then
+              echo "::error::could not read version from server.json" >&2
+              exit 1
+            fi
+            echo "version=v${v}" >> "$GITHUB_OUTPUT"
+          fi
+
   push:
     name: build + push ghcr image
+    needs: setup
     runs-on: ubuntu-latest
     steps:
+      # Check out the released tag so the Dockerfile matches the version built.
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: ${{ needs.setup.outputs.version }}
       - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
           registry: ghcr.io
@@ -39,7 +83,7 @@ jobs:
       # package version; the build-arg keeps the full tag (v0.2.9) for install.sh.
       - id: ver
         env:
-          VERSION: ${{ inputs.version }}
+          VERSION: ${{ needs.setup.outputs.version }}
         run: echo "v=${VERSION#v}" >> "$GITHUB_OUTPUT"
       - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
@@ -48,7 +92,7 @@ jobs:
           platforms: linux/amd64
           push: true
           build-args: |
-            MEMKEEPER_VERSION=${{ inputs.version }}
+            MEMKEEPER_VERSION=${{ needs.setup.outputs.version }}
           tags: |
             ghcr.io/${{ github.repository_owner }}/memkeeper:${{ steps.ver.outputs.v }}
             ghcr.io/${{ github.repository_owner }}/memkeeper:latest
@@ -60,7 +104,7 @@ jobs:
   # immutable, so re-running a published version is a no-op error, not a clobber.
   publish-registry:
     name: publish to MCP registry
-    needs: push
+    needs: [setup, push]
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -69,7 +113,7 @@ jobs:
       # Check out the released tag so server.json matches the version being published.
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
-          ref: ${{ inputs.version }}
+          ref: ${{ needs.setup.outputs.version }}
       - name: Install mcp-publisher
         run: |
           curl -fsSL "https://github.com/modelcontextprotocol/registry/releases/latest/download/mcp-publisher_$(uname -s | tr '[:upper:]' '[:lower:]')_$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/').tar.gz" | tar xz mcp-publisher

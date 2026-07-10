@@ -3,7 +3,7 @@
 
 use std::path::Path;
 
-use memkeeper_core::{scope, DEFAULT_DURABLE_SILO, DEFAULT_SPACE};
+use memkeeper_core::{scope, ALL_SPACES, DEFAULT_DURABLE_SILO, DEFAULT_SPACE};
 use rusqlite::{params, Connection, OptionalExtension, Row, Transaction};
 
 use crate::{
@@ -166,6 +166,14 @@ pub(crate) fn normalize_required_space_component(name: &str, value: &str) -> Res
             message: format!(
                 "{name} must be canonical, non-empty, and at most {MAX_METADATA_VALUE_CHARS} characters"
             ),
+        });
+    }
+    // The `*` sentinel is the read-side "all spaces" marker; it must never be a
+    // real space (or silo) name, or it would collide with the union scope. Reject
+    // it on every write/create path (this is the single chokepoint both traverse).
+    if trimmed == ALL_SPACES {
+        return Err(Error::InvalidRequest {
+            message: format!("{name} must not be the reserved all-spaces sentinel \"*\""),
         });
     }
     Ok(trimmed.to_string())

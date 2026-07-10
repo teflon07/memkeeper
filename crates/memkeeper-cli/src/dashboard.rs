@@ -486,7 +486,7 @@ mod tests {
 
     #[test]
     fn dispatch_rejects_non_read_command_before_touching_store() {
-        let models = SemanticModels::for_serve();
+        let models = SemanticModels::for_test();
         let store = Path::new("/nonexistent/store.sqlite");
         let response = dispatch_api(
             r#"{"command":"remember","payload":{}}"#,
@@ -501,7 +501,7 @@ mod tests {
 
     #[test]
     fn dispatch_denies_ingest_without_token_and_opens_with_token() {
-        let models = SemanticModels::for_serve();
+        let models = SemanticModels::for_test();
         let store = Path::new("/nonexistent/store.sqlite");
         let body = r#"{"command":"ingest","payload":{"chunks":["x"]}}"#;
         // No token => denied at the gate (never reaches the store).
@@ -516,7 +516,7 @@ mod tests {
 
     #[test]
     fn dispatch_reports_parse_error_as_failure_envelope() {
-        let models = SemanticModels::for_serve();
+        let models = SemanticModels::for_test();
         let store = Path::new("/nonexistent/store.sqlite");
         let response = dispatch_api("{not valid json", store, &models, None, None);
         assert!(response.contains("\"ok\":false"));
@@ -524,7 +524,7 @@ mod tests {
 
     #[test]
     fn unknown_route_is_404() {
-        let models = SemanticModels::for_serve();
+        let models = SemanticModels::for_test();
         let store = Path::new("/nonexistent/store.sqlite");
         let (status, _, _) = route("GET", "/wat", "", store, &models, None, None);
         assert_eq!(status, "404 Not Found");

@@ -150,40 +150,77 @@ fn api_reranker_from_env(provider: &str) -> Option<Box<dyn Reranker>> {
 
 /// Pure model-dir resolution: explicit dir wins; else `<root>/<subdir>` where
 /// root is `$MEMKEEPER_MODELS_DIR`, else `<home>/.memkeeper/models`, else `./...`.
-/// This mirrors `pull-models` exactly, which is why a plain `pull-models`
-/// followed by `search` activates semantics with zero env config — the loaders
-/// look precisely where `pull-models` writes. Pure (env passed in) so it is unit
-/// testable without mutating process environment.
+/// This prefers explicit configuration, then checked-in model directories near
+/// the running binary/workspace, then the `pull-models` default. Pure (env
+/// passed in) so it is unit testable without mutating process environment.
 #[cfg(feature = "local")]
 fn resolve_model_dir(
     explicit: Option<std::ffi::OsString>,
     models_dir: Option<std::ffi::OsString>,
     home: Option<std::ffi::OsString>,
+    candidate_roots: &[std::path::PathBuf],
     subdir: &str,
 ) -> std::path::PathBuf {
     use std::path::PathBuf;
     if let Some(explicit) = explicit {
         return PathBuf::from(explicit);
     }
-    let root = models_dir.map_or_else(
-        || {
-            home.map_or_else(|| PathBuf::from("."), PathBuf::from)
-                .join(".memkeeper")
-                .join("models")
-        },
-        PathBuf::from,
-    );
-    root.join(subdir)
+    if let Some(models_dir) = models_dir {
+        return PathBuf::from(models_dir).join(subdir);
+    }
+    if let Some(discovered) = candidate_roots
+        .iter()
+        .map(|root| root.join(subdir))
+        .find(|dir| dir.join("model.onnx").is_file())
+    {
+        return discovered;
+    }
+    home.map_or_else(|| PathBuf::from("."), PathBuf::from)
+        .join(".memkeeper")
+        .join("models")
+        .join(subdir)
+}
+
+#[cfg(feature = "local")]
+fn model_root_candidates() -> Vec<std::path::PathBuf> {
+    let mut roots = Vec::new();
+    if let Ok(exe) = std::env::current_exe() {
+        push_model_root_candidates(&mut roots, &exe);
+    }
+    if let Ok(cwd) = std::env::current_dir() {
+        push_model_root_candidates(&mut roots, &cwd);
+    }
+    roots
+}
+
+#[cfg(feature = "local")]
+fn push_model_root_candidates(roots: &mut Vec<std::path::PathBuf>, anchor: &std::path::Path) {
+    for ancestor in anchor.ancestors() {
+        push_unique_path(roots, ancestor.join("models"));
+        push_unique_path(
+            roots,
+            ancestor.join("memory").join("memkeeper").join("models"),
+        );
+    }
+}
+
+#[cfg(feature = "local")]
+fn push_unique_path(roots: &mut Vec<std::path::PathBuf>, path: std::path::PathBuf) {
+    if !roots.iter().any(|existing| existing == &path) {
+        roots.push(path);
+    }
 }
 
 /// Resolve a local model dir from the live environment (explicit `env_var`, else
-/// the `pull-models` default location for `subdir`).
+/// a checked-in nearby model dir, else the `pull-models` default location for
+/// `subdir`).
 #[cfg(feature = "local")]
 fn resolve_local_model_dir(env_var: &str, subdir: &str) -> std::path::PathBuf {
     resolve_model_dir(
         std::env::var_os(env_var),
         std::env::var_os("MEMKEEPER_MODELS_DIR"),
         std::env::var_os("HOME"),
+        &model_root_candidates(),
         subdir,
     )
 }
@@ -655,13 +692,21 @@ mod tests {
     use std::path::PathBuf;
 
     #[test]
-    fn resolve_model_dir_prefers_explicit_then_models_dir_then_home() {
+    fn resolve_model_dir_prefers_explicit_then_models_dir_then_discovery_then_home() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let discovered_root = temp.path().join("models");
+        let discovered_embed = discovered_root.join("mxbai-embed-large");
+        std::fs::create_dir_all(&discovered_embed).expect("model dir");
+        std::fs::write(discovered_embed.join("model.onnx"), b"test").expect("model marker");
+        let candidate_roots = [discovered_root.clone()];
+
         // Explicit dir wins outright.
         assert_eq!(
             resolve_model_dir(
                 Some(OsString::from("/x/embed")),
                 Some(OsString::from("/ignored")),
                 Some(OsString::from("/ignored")),
+                &candidate_roots,
                 "mxbai-embed-large",
             ),
             PathBuf::from("/x/embed"),
@@ -672,16 +717,29 @@ mod tests {
                 None,
                 Some(OsString::from("/models")),
                 Some(OsString::from("/home/u")),
+                &candidate_roots,
                 "mxbai-embed-large",
             ),
             PathBuf::from("/models/mxbai-embed-large"),
         );
-        // No explicit, no models dir -> <home>/.memkeeper/models/<subdir>.
+        // No explicit, no models dir -> nearby checked-in model dir when present.
         assert_eq!(
             resolve_model_dir(
                 None,
                 None,
                 Some(OsString::from("/home/u")),
+                &candidate_roots,
+                "mxbai-embed-large",
+            ),
+            discovered_embed,
+        );
+        // Discovery requires a model file; otherwise fall back to home.
+        assert_eq!(
+            resolve_model_dir(
+                None,
+                None,
+                Some(OsString::from("/home/u")),
+                &candidate_roots,
                 "mxbai-rerank-base"
             ),
             PathBuf::from("/home/u/.memkeeper/models/mxbai-rerank-base"),

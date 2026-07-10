@@ -593,6 +593,15 @@ impl SemanticModels {
         Self::for_pack()
     }
 
+    #[cfg(test)]
+    const fn for_test() -> Self {
+        Self {
+            embed: None,
+            rerank: None,
+            colbert: None,
+        }
+    }
+
     /// Whether the embedder actually loaded. False means the model files were
     /// missing/unreadable, so search will silently fall back to BM25 — the serve
     /// runtime guard keys on this to fail loud instead.
@@ -635,6 +644,11 @@ impl SemanticModels {
 
     const fn for_serve() -> Self {
         Self::for_pack()
+    }
+
+    #[cfg(test)]
+    const fn for_test() -> Self {
+        Self
     }
 }
 

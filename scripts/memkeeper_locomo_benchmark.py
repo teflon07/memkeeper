@@ -508,21 +508,23 @@ def inspect_semantic(
     limit: int,
     sample_filter: str,
 ) -> tuple[bool, list[str]]:
-    """Inspect semantic fallback metadata using batch-search over the same query bundle."""
+    """Inspect semantic metadata via per-query `search` over the same query bundle.
+
+    `batch-search` is the deterministic index layer and pins its per-query
+    searches to `semantic_fallback: "disabled"`, so inspecting through it
+    always reports `disabled_v0_1` even when pack retrieval is fully
+    semantic. Single `search` requests carry the real semantic posture.
+    """
     category = category_name(qa.category)
-    queries = [
-        {"name": f"q{index}", "query": query, "limit": limit}
-        for index, query in enumerate(query_bundle(qa.question, category, query_mode), start=1)
-    ]
-    payload: dict[str, Any] = {"queries": queries}
     filters = sample_filters(qa.sample_id, sample_filter)
-    if filters:
-        payload["common_filters"] = filters
-    data = run_memkeeper(binary, store, "batch-search", payload)
     attempted = False
     reasons: list[str] = []
-    for item in ((data.get("result") or {}).get("results") or []):
-        semantic = ((item.get("search") or {}).get("semantic") or {})
+    for query in query_bundle(qa.question, category, query_mode):
+        payload: dict[str, Any] = {"query": query, "limit": limit}
+        if filters:
+            payload["filters"] = filters
+        data = run_memkeeper(binary, store, "search", payload)
+        semantic = (((data.get("result") or {}).get("search")) or {}).get("semantic") or {}
         if semantic:
             attempted = attempted or bool(semantic.get("attempted"))
             reason = str(semantic.get("reason") or "")

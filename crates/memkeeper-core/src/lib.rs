@@ -9,6 +9,13 @@
 /// Default graph-equivalent memory space for operational workspace memory.
 pub const DEFAULT_SPACE: &str = "workspace-memory";
 
+/// Reserved sentinel in a read-side space filter meaning "every space". A
+/// retrieval scoped to `["*"]` drops the `space_name` predicate entirely
+/// (cross-space union) instead of collapsing to [`DEFAULT_SPACE`]. It is not a
+/// valid space name: writes and space creation reject it so it can never collide
+/// with a real space.
+pub const ALL_SPACES: &str = "*";
+
 /// Default durable silo for high-value operational decisions.
 pub const DEFAULT_DURABLE_SILO: &str = "durable";
 

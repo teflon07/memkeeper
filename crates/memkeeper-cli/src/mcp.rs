@@ -288,11 +288,13 @@ fn handle_tools_call(id: &Value, params: &Value, store: &Path, backend: &McpBack
         store_path: Some(store.to_path_buf()),
         payload_json,
     };
+    let started = Instant::now();
     let response = dispatch_serve(backend, &envelope);
+    let latency_ms = started.elapsed().as_secs_f64() * 1000.0;
 
     // Best-effort recall telemetry: surfaced on search, retrieved on get.
     // Failures are swallowed (never break recall).
-    record_mcp_recall(name, &response, &arguments, store, backend);
+    record_mcp_recall(name, &response, &arguments, store, backend, latency_ms);
 
     // Surface the serve envelope as the tool's text content. An engine-level
     // failure (ok:false) is reported as an MCP tool error so the client sees it.
@@ -747,6 +749,7 @@ fn record_mcp_recall(
     args: &Map<String, Value>,
     store: &Path,
     backend: &McpBackend,
+    latency_ms: f64,
 ) {
     let events = match tool {
         "search" => surfaced_events(response, arg_str(args, "query").unwrap_or("")),
@@ -759,6 +762,9 @@ fn record_mcp_recall(
     let payload = json!({
         "source": mcp_source_description(),
         "touch_accessed": true,
+        "batch_id": recall_batch_id(&format!("mcp-{tool}")),
+        "latency_ms": latency_ms,
+        "latency_source": format!("memkeeper_mcp_{tool}"),
         "events": events,
     })
     .to_string();
@@ -773,6 +779,15 @@ fn record_mcp_recall(
         payload_json: payload,
     };
     let _ = dispatch_serve(backend, &envelope);
+}
+
+fn recall_batch_id(prefix: &str) -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_nanos());
+    format!("{prefix}-{nanos}")
 }
 
 fn surfaced_events(response: &str, query: &str) -> Vec<Value> {
@@ -858,7 +873,7 @@ pub(crate) fn tool_definitions() -> Vec<Value> {
             json!({
                 "query": { "type": "string", "description": "Natural-language search query. Required." },
                 "limit": { "type": "integer", "description": "Maximum number of memories to return. Default 10." },
-                "space": { "type": "string", "description": "Restrict to a single memory space (namespace). Omit to search the default space." },
+                "space": { "type": "string", "description": "Restrict to a single memory space (namespace), or \"*\" for all spaces. Omit to search the default space." },
                 "tags": { "type": "array", "items": { "type": "string" }, "description": "Restrict to memories carrying these tags." },
                 "entity_key": { "type": "string", "description": "Restrict to memories linked to this entity key." },
                 "include_content": { "type": "boolean", "description": "If true, return each memory's full text instead of a snippet. Default false." },
@@ -884,7 +899,7 @@ pub(crate) fn tool_definitions() -> Vec<Value> {
             json!({
                 "limit": { "type": "integer", "description": "Maximum number of memories to return. Default 20." },
                 "status": { "type": "string", "description": "Filter by lifecycle status (e.g. active, superseded, tombstoned). Omit for active memories." },
-                "space": { "type": "string", "description": "Restrict to a single memory space (namespace)." },
+                "space": { "type": "string", "description": "Restrict to a single memory space (namespace), or \"*\" for all spaces. Omit for the default space." },
                 "entity_key": { "type": "string", "description": "Restrict to memories linked to this entity key." },
                 "include_content": { "type": "boolean", "description": "If true, return each memory's full text instead of a snippet. Default false." },
                 "include_source": { "type": "boolean", "description": "If true, reveal provenance/source metadata. Default false." },
@@ -1053,7 +1068,7 @@ for factual corrections so the signal is captured explicitly rather than inferre
                 "graph_decay": { "type": "number", "description": "Default 0.5. Per-hop activation decay for graph expansion." },
                 "graph_rerank_slots": { "type": "integer", "description": "Default 0. Reserve N pack slots for top-activation graph candidates so a hop-reached memory the reranker scored low can still land (0 = recall-widening only)." },
                 "graph_activation_floor": { "type": "number", "description": "Default 0.0. Minimum activation a graph candidate needs to claim a reserved rerank slot." },
-                "space": { "type": "string", "description": "Restrict retrieval to a single memory space (namespace)." },
+                "space": { "type": "string", "description": "Restrict retrieval to a single memory space (namespace), or \"*\" for all spaces. Omit for the default space." },
                 "tags": { "type": "array", "items": { "type": "string" }, "description": "Restrict retrieval to memories carrying these tags." },
             }),
             &["queries"],
@@ -1319,7 +1334,7 @@ mod tests {
     #[test]
     fn notifications_get_no_response() {
         let store = Path::new("/tmp/does-not-matter.sqlite");
-        let backend = McpBackend::InProcess(Box::new(SemanticModels::for_serve()));
+        let backend = McpBackend::InProcess(Box::new(SemanticModels::for_test()));
         let response = handle_mcp_line(
             r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
             store,
@@ -1331,7 +1346,7 @@ mod tests {
     #[test]
     fn unknown_method_returns_method_not_found() {
         let store = Path::new("/tmp/does-not-matter.sqlite");
-        let backend = McpBackend::InProcess(Box::new(SemanticModels::for_serve()));
+        let backend = McpBackend::InProcess(Box::new(SemanticModels::for_test()));
         let response = handle_mcp_line(
             r#"{"jsonrpc":"2.0","id":7,"method":"bogus/method"}"#,
             store,
@@ -1345,7 +1360,7 @@ mod tests {
     #[test]
     fn tools_list_is_a_well_formed_response() {
         let store = Path::new("/tmp/does-not-matter.sqlite");
-        let backend = McpBackend::InProcess(Box::new(SemanticModels::for_serve()));
+        let backend = McpBackend::InProcess(Box::new(SemanticModels::for_test()));
         let response = handle_mcp_line(
             r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#,
             store,

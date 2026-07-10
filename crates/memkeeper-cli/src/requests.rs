@@ -923,7 +923,15 @@ pub(crate) fn recall_log_request_from_json(input: &str) -> Result<RecallLogReque
     })?;
     reject_unknown_fields(
         object,
-        &["source", "session_id", "events", "touch_accessed"],
+        &[
+            "source",
+            "session_id",
+            "batch_id",
+            "latency_ms",
+            "latency_source",
+            "events",
+            "touch_accessed",
+        ],
     )?;
     let events_value = object.get("events").ok_or_else(|| {
         CliError::InvalidRequest("recall-log request requires an events array".to_string())
@@ -950,6 +958,9 @@ pub(crate) fn recall_log_request_from_json(input: &str) -> Result<RecallLogReque
     Ok(RecallLogRequest {
         source: optional_string_field(object, "source")?,
         session_id: optional_string_field(object, "session_id")?,
+        batch_id: optional_string_field(object, "batch_id")?,
+        latency_ms: optional_number_field(object, "latency_ms")?,
+        latency_source: optional_string_field(object, "latency_source")?,
         events,
         touch_accessed: optional_bool_field(object, "touch_accessed")?.unwrap_or(true),
     })

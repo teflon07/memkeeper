@@ -115,10 +115,12 @@ pub(crate) fn run_hook_retrieve(args: &[String]) -> i32 {
         rerank_candidates,
     );
 
+    let started = std::time::Instant::now();
     let Ok(response_str) = hook_unix_request(&sock_path, &pack_req, Duration::from_millis(2500))
     else {
         return 0;
     };
+    let latency_ms = started.elapsed().as_secs_f64() * 1000.0;
 
     let response: serde_json::Value = match serde_json::from_str(&response_str) {
         Ok(v) => v,
@@ -150,6 +152,7 @@ pub(crate) fn run_hook_retrieve(args: &[String]) -> i32 {
         &query,
         envelope["session_id"].as_str().unwrap_or(""),
         &response["result"]["pack"],
+        latency_ms,
     );
     0
 }
@@ -165,11 +168,23 @@ fn record_injected_recall(
     query: &str,
     session_id: &str,
     pack: &serde_json::Value,
+    latency_ms: f64,
 ) {
     use std::time::Duration;
 
-    if let Some(req) = build_injected_recall_request(store_path, query, session_id, pack) {
-        let _ = hook_unix_request(sock_path, &req, Duration::from_millis(500));
+    if let Some(req) =
+        build_injected_recall_request(store_path, query, session_id, pack, Some(latency_ms))
+    {
+        if let Ok(response) = hook_unix_request(sock_path, &req, Duration::from_millis(500)) {
+            if recall_log_response_ok(&response) {
+                return;
+            }
+        }
+        if let Some(legacy_req) =
+            build_injected_recall_request(store_path, query, session_id, pack, None)
+        {
+            let _ = hook_unix_request(sock_path, &legacy_req, Duration::from_millis(500));
+        }
     }
 }
 
@@ -181,6 +196,7 @@ fn build_injected_recall_request(
     query: &str,
     session_id: &str,
     pack: &serde_json::Value,
+    latency_ms: Option<f64>,
 ) -> Option<String> {
     use std::fmt::Write;
 
@@ -216,13 +232,39 @@ fn build_injected_recall_request(
     if events.is_empty() {
         return None;
     }
+    let latency_fields = latency_ms
+        .filter(|latency| latency.is_finite() && *latency >= 0.0)
+        .map(|latency| {
+            format!(
+                ",\"batch_id\":{},\"latency_ms\":{latency},\"latency_source\":{}",
+                json_string(&hook_recall_batch_id()),
+                json_string("memkeeper_rust_hook")
+            )
+        })
+        .unwrap_or_default();
     Some(format!(
         "{{\"protocol_version\":\"memkeeper.v0.1\",\"request_id\":\"hook-recall-log\",\
          \"command\":\"recall-log\",\"store_path\":{},\"payload\":{{\"source\":\"hook\",\
-         \"session_id\":{},\"touch_accessed\":false,\"events\":[{events}]}}}}\n",
+         \"session_id\":{}{latency_fields},\"touch_accessed\":false,\"events\":[{events}]}}}}\n",
         json_string(store_path),
         json_string(session_id),
     ))
+}
+
+fn recall_log_response_ok(response: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(response)
+        .ok()
+        .and_then(|value| value["ok"].as_bool())
+        .unwrap_or(false)
+}
+
+fn hook_recall_batch_id() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_nanos());
+    format!("hook-{nanos}")
 }
 
 /// First 500 characters of the prompt, truncated on a char boundary so a
@@ -287,9 +329,14 @@ mod tests {
     #[test]
     fn builds_well_formed_recall_log_for_injected_memories() {
         let pack = json!({"memory_ids": ["mem_a", "mem_b"], "scores": [0.91, 0.42]});
-        let req =
-            build_injected_recall_request("/tmp/s.sqlite", "what did we decide", "sess-1", &pack)
-                .expect("request built");
+        let req = build_injected_recall_request(
+            "/tmp/s.sqlite",
+            "what did we decide",
+            "sess-1",
+            &pack,
+            None,
+        )
+        .expect("request built");
         // Must be a single well-formed JSON line: malformed payload = silent data loss.
         assert!(req.ends_with('\n'));
         let v: serde_json::Value = serde_json::from_str(req.trim()).expect("valid json");
@@ -308,18 +355,34 @@ mod tests {
     }
 
     #[test]
+    fn recall_log_can_include_latency_metadata() {
+        let pack = json!({"memory_ids": ["mem_a"], "scores": [0.91]});
+        let req = build_injected_recall_request("/tmp/s.sqlite", "q", "sess-1", &pack, Some(12.5))
+            .expect("request built");
+        let v: serde_json::Value = serde_json::from_str(req.trim()).expect("valid json");
+        assert!(v["payload"]["batch_id"]
+            .as_str()
+            .unwrap()
+            .starts_with("hook-"));
+        assert_eq!(v["payload"]["latency_ms"], 12.5);
+        assert_eq!(v["payload"]["latency_source"], "memkeeper_rust_hook");
+    }
+
+    #[test]
     fn no_request_when_pack_injected_nothing() {
         assert!(
-            build_injected_recall_request("/s", "q", "s", &json!({"memory_ids": []})).is_none()
+            build_injected_recall_request("/s", "q", "s", &json!({"memory_ids": []}), None)
+                .is_none()
         );
-        assert!(build_injected_recall_request("/s", "q", "s", &json!({})).is_none());
+        assert!(build_injected_recall_request("/s", "q", "s", &json!({}), None).is_none());
     }
 
     #[test]
     fn omits_score_when_absent_or_nonfinite() {
         // missing scores array
-        let req = build_injected_recall_request("/s", "q", "sid", &json!({"memory_ids": ["m1"]}))
-            .expect("built");
+        let req =
+            build_injected_recall_request("/s", "q", "sid", &json!({"memory_ids": ["m1"]}), None)
+                .expect("built");
         let v: serde_json::Value = serde_json::from_str(req.trim()).expect("valid json");
         assert!(v["payload"]["events"][0].get("score").is_none());
         assert_eq!(v["payload"]["events"][0]["rank"], 1);
@@ -328,8 +391,8 @@ mod tests {
     #[test]
     fn escapes_quotes_in_query() {
         let pack = json!({"memory_ids": ["m1"], "scores": [0.5]});
-        let req =
-            build_injected_recall_request("/s", "why \"pi\" name?", "sid", &pack).expect("built");
+        let req = build_injected_recall_request("/s", "why \"pi\" name?", "sid", &pack, None)
+            .expect("built");
         let v: serde_json::Value =
             serde_json::from_str(req.trim()).expect("valid json despite quotes");
         assert_eq!(v["payload"]["events"][0]["query"], "why \"pi\" name?");

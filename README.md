@@ -14,6 +14,8 @@ Local-first memory for AI agents. A fast, embeddable memory engine that stores,
 ranks, and retrieves an agent's durable context, entirely on your machine, with
 no required network or LLM calls.
 
+> Memkeeper is the open-source, local-first control plane that AI agents run on: durable memory, project context, coordinated task handoffs, and deny-by-default permissions, all deterministic and on your own machine. *This repo is the memory engine at its core.*
+
 > ℹ️ **Generated release mirror.** This repo is generated from a private
 > development repo and published as releases. The `main` branch may be
 > regenerated, so **pin to tagged releases** (or the release artifacts) rather

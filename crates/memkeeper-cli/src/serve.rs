@@ -1327,7 +1327,7 @@ mod tests {
         let response = serve_line_response(
             r#"{"command":"stats","request_id":"req-9","unknown_field":1}"#,
             std::time::Instant::now(),
-            &SemanticModels::for_serve(),
+            &SemanticModels::for_test(),
         );
         assert!(response.contains("\"ok\":false"));
         assert!(response.contains("\"request_id\":\"req-9\""));

@@ -20,7 +20,7 @@ use std::{
 };
 
 use memkeeper_core::{
-    infer_kind_from_prefix, kind, scope, status, DEFAULT_DURABLE_SILO, DEFAULT_SPACE,
+    infer_kind_from_prefix, kind, scope, status, ALL_SPACES, DEFAULT_DURABLE_SILO, DEFAULT_SPACE,
 };
 use rusqlite::{
     backup, params, params_from_iter,
@@ -50,7 +50,7 @@ pub(crate) use archive_spec::{ExportTableSpec, EXPORT_TABLES};
 
 mod recall;
 pub use recall::record_recall;
-pub(crate) use recall::{ensure_recall_events_session_column, RECALL_EVENTS_DDL};
+pub(crate) use recall::{ensure_recall_events_optional_columns, RECALL_EVENTS_DDL};
 
 mod stats;
 pub(crate) use stats::space_names;
@@ -634,6 +634,12 @@ pub struct RecallLogRequest {
     pub source: Option<String>,
     /// Optional session/conversation id, written to every event in this batch.
     pub session_id: Option<String>,
+    /// Optional batch id shared by every event in this recall-log write.
+    pub batch_id: Option<String>,
+    /// Optional caller-observed retrieval latency for this recall batch.
+    pub latency_ms: Option<f64>,
+    /// Optional label describing what `latency_ms` measured.
+    pub latency_source: Option<String>,
     /// Events to record (1..=`MAX_RECALL_EVENTS`).
     pub events: Vec<RecallEvent>,
     /// Update `memories.accessed_at` for `retrieved` events.
@@ -1103,6 +1109,7 @@ fn validate_candidate_submit_request(request: &CandidateSubmitRequest) -> Result
         });
     }
     validate_optional_metadata_value("space", request.space.as_deref())?;
+    reject_all_spaces_sentinel(request.space.as_deref())?;
     validate_optional_metadata_value("silo", request.silo.as_deref())?;
     validate_optional_metadata_value("scope", request.scope.as_deref())?;
     validate_optional_metadata_value("project", request.project.as_deref())?;
@@ -2423,9 +2430,7 @@ fn thread_neighbor_pool_items(
     }
 
     let mut filters = request.filters.clone();
-    if filters.spaces.is_empty() {
-        filters.spaces.push(DEFAULT_SPACE.to_string());
-    }
+    filters.spaces = resolve_space_filter(&filters.spaces);
     if filters.statuses.is_empty() {
         filters.statuses.push(status::ACTIVE.to_string());
     }
@@ -2583,31 +2588,12 @@ fn graph_expand_pool(
     // does, so graph-pulled ids pass space/status/kind/project/silo/scope before
     // they are unioned into the candidate set.
     let mut filters = request.filters.clone();
-    if filters.spaces.is_empty() {
-        filters.spaces.push(DEFAULT_SPACE.to_string());
-    }
+    filters.spaces = resolve_space_filter(&filters.spaces);
     if filters.statuses.is_empty() {
         filters.statuses.push(status::ACTIVE.to_string());
     }
     filters = normalize_search_filters(filters)?;
     validate_search_filters(&filters)?;
-    let space = filters
-        .spaces
-        .first()
-        .cloned()
-        .unwrap_or_else(|| DEFAULT_SPACE.to_string());
-
-    let readiness = graph_recall_readiness_on_connection(connection, &space)?;
-    if !readiness.usable() {
-        eprintln!(
-            "[memkeeper] WARN: associative recall (hybrid_assoc_v0) requested but the graph is \
-             unusable in space {space} (succeeded_graph_synthesis={}, active_relationships={}) \
-             — degrading to ANN/BM25 recall. Run `dream --tasks graph` to build the graph; set \
-             MEMKEEPER_ASSOCIATIVE_RECALL_REQUIRE=1 to refuse instead of degrading.",
-            readiness.succeeded_graph_synthesis, readiness.active_relationships
-        );
-        return Ok((pool.to_vec(), BTreeMap::new()));
-    }
 
     let pool_ids: BTreeSet<String> = pool.iter().map(|item| item.memory_id.clone()).collect();
     // memory_id -> MAX activation across all seeds/paths. Tag EVERY graph-reachable
@@ -2615,10 +2601,42 @@ fn graph_expand_pool(
     // cross-encoder buried below the cut still needs an activation so a reserved
     // rerank slot can promote it (the v0.3 design only added below-pool memories,
     // missing the in-pool-but-rerank-buried hop target).
+    //
+    // Graph walking is inherently per-space: entity identity is
+    // `(space_name, entity_key)`, so a seed can only be graph-anchored within its
+    // OWN space. Resolve each seed's space individually (not one hoisted space) so
+    // associative recall works under multi-/all-space retrieval instead of silently
+    // collapsing every seed onto the default space. Readiness is checked and warned
+    // once per distinct space; an unusable space degrades that seed to ANN/BM25.
     let mut activations: BTreeMap<String, f64> = BTreeMap::new();
+    let mut readiness_usable: BTreeMap<String, bool> = BTreeMap::new();
     for seed in pool.iter().take(expansion.max_graph_seeds) {
+        let Some(seed_space) = memory_space_on_connection(connection, &seed.memory_id)? else {
+            continue;
+        };
+        let usable = if let Some(usable) = readiness_usable.get(&seed_space) {
+            *usable
+        } else {
+            let readiness = graph_recall_readiness_on_connection(connection, &seed_space)?;
+            let usable = readiness.usable();
+            if !usable {
+                eprintln!(
+                    "[memkeeper] WARN: associative recall (hybrid_assoc_v0) requested but the \
+                         graph is unusable in space {seed_space} (succeeded_graph_synthesis={}, \
+                         active_relationships={}) — degrading to ANN/BM25 recall for that space. \
+                         Run `dream --tasks graph` to build the graph; set \
+                         MEMKEEPER_ASSOCIATIVE_RECALL_REQUIRE=1 to refuse instead of degrading.",
+                    readiness.succeeded_graph_synthesis, readiness.active_relationships
+                );
+            }
+            readiness_usable.insert(seed_space.clone(), usable);
+            usable
+        };
+        if !usable {
+            continue;
+        }
         for (memory_id, activation) in
-            graph_seed_neighbor_activations(connection, &filters, &space, seed, expansion)?
+            graph_seed_neighbor_activations(connection, &filters, &seed_space, seed, expansion)?
         {
             activations
                 .entry(memory_id)
@@ -6040,6 +6058,7 @@ struct DreamDuplicateGroup {
 
 fn validate_dream_request(request: &DreamRequest) -> Result<()> {
     validate_optional_metadata_value("space", request.space.as_deref())?;
+    reject_all_spaces_sentinel(request.space.as_deref())?;
     for silo in &request.silos {
         validate_optional_metadata_value("silo", Some(silo))?;
     }
@@ -6282,7 +6301,7 @@ fn dream_promote_memories(
     // recall_events is created lazily; ensure it exists so the aggregate is valid
     // even on stores that have never logged a recall.
     transaction.execute_batch(RECALL_EVENTS_DDL)?;
-    ensure_recall_events_session_column(transaction)?;
+    ensure_recall_events_optional_columns(transaction)?;
 
     // Conditions and bound values are kept in lock-step: every `?` placeholder
     // appended to `conditions` has its value pushed to `values` in the same order.
@@ -9255,9 +9274,7 @@ fn prepare_memory_list_request(request: &MemoryListRequest) -> Result<PreparedMe
         });
     }
     let mut filters = request.filters.clone();
-    if filters.spaces.is_empty() {
-        filters.spaces.push(DEFAULT_SPACE.to_string());
-    }
+    filters.spaces = resolve_space_filter(&filters.spaces);
     if filters.statuses.is_empty() {
         filters.statuses.push(status::ACTIVE.to_string());
     }
@@ -9355,9 +9372,7 @@ fn prepare_search_request(request: &SearchRequest) -> Result<PreparedSearchReque
     }
 
     let mut filters = request.filters.clone();
-    if filters.spaces.is_empty() {
-        filters.spaces.push(DEFAULT_SPACE.to_string());
-    }
+    filters.spaces = resolve_space_filter(&filters.spaces);
     if filters.statuses.is_empty() {
         filters.statuses.push(status::ACTIVE.to_string());
     }
@@ -9553,6 +9568,56 @@ fn push_unique(values: &mut Vec<String>, value: String) {
     if !values.contains(&value) {
         values.push(value);
     }
+}
+
+/// Resolve a raw read-side space filter into predicate-ready values.
+///
+/// Three scopes, chosen so that empty stays back-compatible (existing scoped
+/// callers rely on empty == default) while `["*"]` gains an explicit "every
+/// space" meaning:
+/// - contains the [`ALL_SPACES`] sentinel -> **all spaces**: an empty vector,
+///   which [`push_in_predicate`] renders as *no* `space_name` predicate.
+/// - empty -> **default space**: `[DEFAULT_SPACE]`.
+/// - named -> **those spaces**, unchanged (SQL `IN (...)`).
+///
+/// The sentinel is matched trimmed so a stray `" * "` from a host still resolves
+/// to all-spaces rather than being treated as a (non-existent) literal space.
+fn resolve_space_filter(spaces: &[String]) -> Vec<String> {
+    if spaces.iter().any(|value| value.trim() == ALL_SPACES) {
+        Vec::new()
+    } else if spaces.is_empty() {
+        vec![DEFAULT_SPACE.to_string()]
+    } else {
+        spaces.to_vec()
+    }
+}
+
+/// Reject the reserved all-spaces sentinel on any write path. A real memory
+/// (or candidate) must never live in space `*`, or it would collide with the
+/// read-side union scope and become impossible to address explicitly. Entity,
+/// relationship, and space-create paths are already guarded at
+/// `normalize_required_space_component`; this covers the write paths that only
+/// run `validate_optional_metadata_value` (remember, `candidate_submit`, ingest).
+fn reject_all_spaces_sentinel(space: Option<&str>) -> Result<()> {
+    if space.is_some_and(|value| value.trim() == ALL_SPACES) {
+        return Err(Error::InvalidRequest {
+            message: "space must not be the reserved all-spaces sentinel \"*\"".to_string(),
+        });
+    }
+    Ok(())
+}
+
+/// The space a memory belongs to, or `None` if the id is absent (e.g. deleted
+/// between pool-build and graph expansion). Graph anchoring is per-space because
+/// entity identity is `(space_name, entity_key)`.
+fn memory_space_on_connection(connection: &Connection, memory_id: &str) -> Result<Option<String>> {
+    Ok(connection
+        .query_row(
+            "SELECT space_name FROM memories WHERE id = ?1",
+            [memory_id],
+            |row| row.get(0),
+        )
+        .optional()?)
 }
 
 fn normalize_search_filters(mut filters: SearchFilters) -> Result<SearchFilters> {
@@ -11498,6 +11563,7 @@ fn validate_remember_request(request: &RememberRequest) -> Result<()> {
         });
     }
     validate_optional_metadata_value("space", request.space.as_deref())?;
+    reject_all_spaces_sentinel(request.space.as_deref())?;
     validate_optional_metadata_value("silo", request.silo.as_deref())?;
     validate_optional_metadata_value("scope", request.scope.as_deref())?;
     validate_optional_metadata_value("project", request.project_key.as_deref())?;
