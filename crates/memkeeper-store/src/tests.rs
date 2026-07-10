@@ -3823,9 +3823,10 @@ fn pack_pool_thread_expansion_interleaves_same_entity_neighbors() {
 }
 
 /// Part 2 (memory-to-memory edges): the `link` dream task writes cross-entity
-/// `memory_links` between curated memories that share a discriminative tag, and
+/// `memory_links` between curated memories that share discriminative tags, and
 /// the `graph` task then bridges their entities — so associative recall finally
-/// has curated-memory edges to traverse. A memory sharing no tag stays unlinked.
+/// has curated-memory edges to traverse. A memory with only one shared tag stays
+/// unlinked.
 #[test]
 fn dream_link_bridges_tag_sharing_memories_into_the_graph() {
     let path = temp_store_path("dream_link_tag_bridge");
@@ -3839,11 +3840,19 @@ fn dream_link_bridges_tag_sharing_memories_into_the_graph() {
         tags: tags.iter().map(|t| (*t).to_string()).collect(),
         ..remember_request(content)
     };
-    // a and b share the discriminative tag "zephyr-topic" across entities.
-    remember_memory(&path, &tagged("alpha note", "ent:a", &["zephyr-topic"])).expect("a");
-    remember_memory(&path, &tagged("beta note", "ent:b", &["zephyr-topic"])).expect("b");
-    // c shares no tag with a/b.
-    remember_memory(&path, &tagged("gamma note", "ent:c", &["other-topic"])).expect("c");
+    // a and b share two discriminative topic tags across entities.
+    remember_memory(
+        &path,
+        &tagged("alpha note", "ent:a", &["zephyr-topic", "cobalt-topic"]),
+    )
+    .expect("a");
+    remember_memory(
+        &path,
+        &tagged("beta note", "ent:b", &["zephyr-topic", "cobalt-topic"]),
+    )
+    .expect("b");
+    // c shares only one tag with a/b, below the unattended-link evidence floor.
+    remember_memory(&path, &tagged("gamma note", "ent:c", &["zephyr-topic"])).expect("c");
 
     let report = dream_store(
         &path,
@@ -3906,6 +3915,249 @@ fn dream_link_bridges_tag_sharing_memories_into_the_graph() {
     .expect("dry link dream");
     assert_eq!(dry.link.links_written, 0, "dry run writes no links");
 
+    cleanup_store(&path);
+}
+
+/// Bounded link runs must advance beyond already-written pairs, while session,
+/// kind/status bookkeeping, and one-topic-only overlap remain below the automatic
+/// association threshold. Written links retain their exact shared-tag evidence.
+fn assert_dream_link_evidence(path: &Path, expected_links: usize) {
+    let connection = Connection::open(path).expect("open store");
+    let written: Vec<(f64, String)> = connection
+        .prepare(
+            "SELECT confidence, metadata_json FROM memory_links \
+             WHERE link_type='related_to' ORDER BY src_memory_id, dst_memory_id",
+        )
+        .expect("prepare links")
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .expect("query links")
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .expect("collect links");
+    assert_eq!(written.len(), expected_links);
+    for (confidence, metadata_json) in written {
+        assert!((confidence - (2.0 / 3.0)).abs() < 1e-12);
+        let metadata: serde_json::Value =
+            serde_json::from_str(&metadata_json).expect("valid link metadata");
+        assert_eq!(metadata["source"], "dream_tag_link");
+        assert_eq!(metadata["shared_tag_count"], 2);
+        assert_eq!(
+            metadata["shared_tags"],
+            serde_json::json!(["cobalt-topic", "zephyr-topic"])
+        );
+    }
+}
+
+#[test]
+fn dream_link_filters_noise_and_resumes_bounded_batches() {
+    let path = temp_store_path("dream_link_resumable_batches");
+    cleanup_store(&path);
+    init_store(&path).expect("init succeeds");
+    for key in ["ent:a", "ent:b", "ent:c", "ent:d", "ent:e"] {
+        upsert_entity(&path, &entity_upsert_request(key, key)).expect("entity");
+    }
+    let tagged = |content: &str, ekey: &str, tags: &[&str]| RememberRequest {
+        entity_key: Some(ekey.to_string()),
+        tags: tags.iter().map(|tag| (*tag).to_string()).collect(),
+        ..remember_request(content)
+    };
+    for (content, entity) in [("alpha", "ent:a"), ("beta", "ent:b"), ("gamma", "ent:c")] {
+        remember_memory(
+            &path,
+            &tagged(content, entity, &["zephyr-topic", "cobalt-topic"]),
+        )
+        .expect("topic memory");
+    }
+    // After structural tags are removed, d/e share only one eligible topic tag.
+    for (content, entity) in [("delta", "ent:d"), ("epsilon", "ent:e")] {
+        remember_memory(
+            &path,
+            &tagged(
+                content,
+                entity,
+                &["single-topic", "session:test-session", "decision", "status"],
+            ),
+        )
+        .expect("noise memory");
+    }
+
+    let first = dream_store(
+        &path,
+        &DreamRequest {
+            tasks: vec!["link".to_string()],
+            max_memories: 2,
+            dry_run: false,
+            ..dream_request_defaults()
+        },
+    )
+    .expect("first bounded link run");
+    assert_eq!(first.link.candidates, 2);
+    assert_eq!(first.link.links_written, 2);
+    assert!(first.link.truncated);
+    assert_dream_link_evidence(&path, 2);
+
+    let second = dream_store(
+        &path,
+        &DreamRequest {
+            tasks: vec!["link".to_string()],
+            max_memories: 2,
+            dry_run: false,
+            ..dream_request_defaults()
+        },
+    )
+    .expect("second bounded link run");
+    assert_eq!(second.link.candidates, 1);
+    assert_eq!(second.link.links_written, 1);
+    assert!(!second.link.truncated);
+
+    let drained = dream_store(
+        &path,
+        &DreamRequest {
+            tasks: vec!["link".to_string()],
+            max_memories: 2,
+            dry_run: true,
+            ..dream_request_defaults()
+        },
+    )
+    .expect("drained link probe");
+    assert_eq!(drained.link.candidates, 0);
+    assert_eq!(drained.link.links_written, 0);
+    assert!(!drained.link.truncated);
+
+    let connection = Connection::open(&path).expect("open store");
+    let total: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM memory_links WHERE link_type='related_to'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("count links");
+    assert_eq!(total, 3, "only the three a/b/c topic pairs are linked");
+    drop(connection);
+    cleanup_store(&path);
+}
+
+#[test]
+fn dream_link_respects_silo_scope_for_both_endpoints() {
+    let path = temp_store_path("dream_link_silo_scope");
+    cleanup_store(&path);
+    init_store(&path).expect("init succeeds");
+    let tagged = |content: &str, entity: &str, silo: &str| RememberRequest {
+        entity_key: Some(entity.to_string()),
+        silo: Some(silo.to_string()),
+        tags: vec!["cobalt-topic".to_string(), "zephyr-topic".to_string()],
+        ..remember_request(content)
+    };
+    for (content, entity) in [
+        ("durable alpha", "ent:durable-a"),
+        ("durable beta", "ent:durable-b"),
+    ] {
+        remember_memory(&path, &tagged(content, entity, "durable")).expect("durable memory");
+    }
+    for (content, entity) in [
+        ("short alpha", "ent:short-a"),
+        ("short beta", "ent:short-b"),
+    ] {
+        remember_memory(&path, &tagged(content, entity, "short-term")).expect("short-term memory");
+    }
+
+    let report = dream_store(
+        &path,
+        &DreamRequest {
+            space: Some(DEFAULT_SPACE.to_string()),
+            silos: vec!["short-term".to_string()],
+            tasks: vec!["link".to_string()],
+            max_memories: 100,
+            dry_run: false,
+            ..dream_request_defaults()
+        },
+    )
+    .expect("silo-scoped link dream");
+    assert_eq!(report.link.candidates, 1);
+    assert_eq!(report.link.links_written, 1);
+
+    let connection = Connection::open(&path).expect("open store");
+    let linked_silos: Vec<(String, String)> = connection
+        .prepare(
+            "SELECT src.silo_name, dst.silo_name
+               FROM memory_links link
+               JOIN memories src ON src.id = link.src_memory_id
+               JOIN memories dst ON dst.id = link.dst_memory_id
+              WHERE link.link_type = 'related_to'",
+        )
+        .expect("prepare linked silos")
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .expect("query linked silos")
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .expect("collect linked silos");
+    assert_eq!(
+        linked_silos,
+        vec![("short-term".to_string(), "short-term".to_string())]
+    );
+    drop(connection);
+    cleanup_store(&path);
+}
+
+#[test]
+fn dream_link_discriminative_tag_frequency_is_space_local() {
+    let path = temp_store_path("dream_link_space_local_frequency");
+    cleanup_store(&path);
+    init_store(&path).expect("init succeeds");
+    create_space(
+        &path,
+        &SpaceCreateRequest {
+            name: "other-space".to_string(),
+            display_name: None,
+            description: None,
+            default_silo: None,
+            ontology: None,
+            config_json: None,
+            if_not_exists: false,
+        },
+    )
+    .expect("create other space");
+    let tagged = |content: String, entity: String, space: Option<&str>| RememberRequest {
+        space: space.map(str::to_string),
+        entity_key: Some(entity),
+        tags: vec!["cobalt-topic".to_string(), "zephyr-topic".to_string()],
+        ..remember_request(&content)
+    };
+    for (content, entity) in [
+        ("target alpha", "ent:target-a"),
+        ("target beta", "ent:target-b"),
+    ] {
+        remember_memory(
+            &path,
+            &tagged(content.to_string(), entity.to_string(), None),
+        )
+        .expect("target memory");
+    }
+    // With the two target memories, these 24 rows push a global tag count over
+    // the discriminative threshold of 25. They must not suppress another space.
+    for index in 0..24 {
+        remember_memory(
+            &path,
+            &tagged(
+                format!("other space memory {index}"),
+                format!("ent:other-{index}"),
+                Some("other-space"),
+            ),
+        )
+        .expect("other-space memory");
+    }
+
+    let report = dream_store(
+        &path,
+        &DreamRequest {
+            space: Some(DEFAULT_SPACE.to_string()),
+            tasks: vec!["link".to_string()],
+            max_memories: 100,
+            dry_run: true,
+            ..dream_request_defaults()
+        },
+    )
+    .expect("space-scoped link dream");
+    assert_eq!(report.link.candidates, 1);
+    assert_eq!(report.link.links_written, 0);
     cleanup_store(&path);
 }
 
@@ -4263,6 +4515,18 @@ fn rc_graph(id: &str, content: &str, score: f32, activation: f64) -> RerankCandi
     }
 }
 
+/// An ordinary pool candidate that is also graph-reachable. Unlike
+/// [`rc_graph`], it competed in the baseline pool and is never quarantined.
+fn rc_reachable(id: &str, content: &str, score: f32, activation: f64) -> RerankCandidate {
+    RerankCandidate {
+        memory_id: id.to_string(),
+        content: content.to_string(),
+        rerank_score: score,
+        activation: Some(activation),
+        graph_pulled: false,
+    }
+}
+
 #[test]
 fn assemble_reranked_pack_budget_fallback_keeps_scores_aligned() {
     // A single candidate larger than the whole char budget: the main loop emits
@@ -4303,6 +4567,23 @@ fn assemble_reranked_pack_orders_by_rerank_and_caps_memories() {
     assert_eq!(report.memory_ids, vec!["b".to_string(), "c".to_string()]);
     assert_eq!(report.content, "- high\n- mid\n");
     assert!(report.truncated, "3 candidates, 2 injected => truncated");
+}
+
+#[test]
+fn assemble_reranked_pack_uses_activation_only_for_exact_rerank_ties() {
+    let request = rerank_pack_request(3, 10_000, 0.0);
+    let candidates = vec![
+        rc_reachable("low_activation", "low", 0.50, 0.20),
+        rc_reachable("high_activation", "high", 0.50, 0.80),
+        rc("higher_rerank", "higher", 0.51),
+    ];
+
+    let report = assemble_reranked_pack(&request, 0.0, 0.0, &candidates);
+    assert_eq!(
+        report.memory_ids,
+        vec!["higher_rerank", "high_activation", "low_activation"],
+        "activation breaks equal rerank scores but cannot outrank a higher score"
+    );
 }
 
 #[test]

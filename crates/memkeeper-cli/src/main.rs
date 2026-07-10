@@ -2317,13 +2317,15 @@ fn run_backup(args: &[String]) -> i32 {
 fn run_reindex(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!(
-            "Usage: memkeeper reindex [--store <path>] [--embed] [--tokens] [--force]\n\n  \
+            "Usage: memkeeper reindex [--store <path>] [--embed] [--tokens] [--force] [--provider <local|openai>] [--embed-model <name>] [--base-url <url>] [--dims <n>]\n\n  \
              Backfill derived data for memories already in the store. Needs a build with\n  \
              the 'semantic' (or 'api') feature; a lexical-only binary reports an error.\n\n  \
              --embed   recompute embedding vectors (run once after `pull-models`, so\n            \
              memories stored before the models were present become semantically searchable)\n  \
              --tokens  backfill token counts only (no model required beyond tokenizer)\n  \
              --force   re-run even for entries that already have up-to-date vectors\n  \
+             --provider/--embed-model/--base-url/--dims  configure the embedder for this\n\
+                        reindex only; API keys stay in MEMKEEPER_EMBED_API_KEY\n  \
              --store   store path (defaults to the usual user/project resolution)"
         );
         return 0;
@@ -2334,6 +2336,7 @@ fn run_reindex(args: &[String]) -> i32 {
         let (schema, count) = if parsed.tokens {
             token_backfill_store(&parsed.store, parsed.force)?
         } else if parsed.embed {
+            apply_reindex_embed_overrides(&parsed);
             reembed_store(&parsed.store)?
         } else {
             reindex_count(&parsed.store)?
@@ -2354,6 +2357,10 @@ struct ReindexArgs {
     embed: bool,
     tokens: bool,
     force: bool,
+    provider: Option<String>,
+    embed_model: Option<String>,
+    base_url: Option<String>,
+    dims: Option<usize>,
 }
 
 fn parse_reindex_args(args: &[String]) -> Result<ReindexArgs, CliError> {
@@ -2362,6 +2369,10 @@ fn parse_reindex_args(args: &[String]) -> Result<ReindexArgs, CliError> {
     let mut embed = false;
     let mut tokens = false;
     let mut force = false;
+    let mut provider = None;
+    let mut embed_model = None;
+    let mut base_url = None;
+    let mut dims = None;
     while let Some(arg) = parser.next() {
         match arg.as_str() {
             "--store" => store = Some(parser.required_value("--store")?),
@@ -2371,6 +2382,36 @@ fn parse_reindex_args(args: &[String]) -> Result<ReindexArgs, CliError> {
             "--embed" => embed = true,
             "--tokens" => tokens = true,
             "--force" => force = true,
+            "--provider" => {
+                provider = Some(
+                    parser
+                        .required_value("--provider")?
+                        .to_string_lossy()
+                        .into_owned(),
+                );
+            }
+            "--embed-model" => {
+                embed_model = Some(
+                    parser
+                        .required_value("--embed-model")?
+                        .to_string_lossy()
+                        .into_owned(),
+                );
+            }
+            "--base-url" => {
+                base_url = Some(
+                    parser
+                        .required_value("--base-url")?
+                        .to_string_lossy()
+                        .into_owned(),
+                );
+            }
+            "--dims" => {
+                let value = parser.required_value("--dims")?;
+                dims = Some(value.to_string_lossy().parse::<usize>().map_err(|_| {
+                    CliError::InvalidRequest("--dims must be a positive integer".to_string())
+                })?);
+            }
             unknown => {
                 return Err(CliError::InvalidRequest(format!(
                     "unsupported reindex flag: {unknown}"
@@ -2378,13 +2419,44 @@ fn parse_reindex_args(args: &[String]) -> Result<ReindexArgs, CliError> {
             }
         }
     }
+    if dims == Some(0) {
+        return Err(CliError::InvalidRequest(
+            "--dims must be a positive integer".to_string(),
+        ));
+    }
+    if !embed
+        && (provider.is_some() || embed_model.is_some() || base_url.is_some() || dims.is_some())
+    {
+        return Err(CliError::InvalidRequest(
+            "embedding override flags require --embed".to_string(),
+        ));
+    }
     let store = store.unwrap_or_else(resolve_store_default);
     Ok(ReindexArgs {
         store,
         embed,
         tokens,
         force,
+        provider,
+        embed_model,
+        base_url,
+        dims,
     })
+}
+
+fn apply_reindex_embed_overrides(args: &ReindexArgs) {
+    if let Some(value) = &args.provider {
+        std::env::set_var("MEMKEEPER_EMBED_PROVIDER", value);
+    }
+    if let Some(value) = &args.embed_model {
+        std::env::set_var("MEMKEEPER_EMBED_MODEL", value);
+    }
+    if let Some(value) = &args.base_url {
+        std::env::set_var("MEMKEEPER_EMBED_BASE_URL", value);
+    }
+    if let Some(value) = args.dims {
+        std::env::set_var("MEMKEEPER_EMBED_DIMS", value.to_string());
+    }
 }
 
 #[cfg(feature = "embed")]

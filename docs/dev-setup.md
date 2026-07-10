@@ -62,7 +62,7 @@ cargo run --quiet -- get --store "$STORE" --id <memory-id> --json
 cargo run --quiet -- history --store "$STORE" --id <memory-id> --json --no-source
 cargo run --quiet -- export --store "$STORE" --output /tmp/memkeeper-smoke/export.jsonl --json
 cargo run --quiet -- import --store /tmp/memkeeper-smoke/imported.sqlite --input /tmp/memkeeper-smoke/export.jsonl --json
-cargo run --quiet -- dream --store "$STORE" --dry-run --tasks expire,reindex,dedupe,graph --max-memories 1000 --json
+cargo run --quiet -- dream --store "$STORE" --dry-run --tasks expire,reindex,dedupe,link,graph --max-memories 1000 --json
 cargo run --quiet -- backup --store "$STORE" --output /tmp/memkeeper-smoke/backup.sqlite --json
 cargo run --quiet -- forget --store "$STORE" --id <memory-id> --reason stale --json
 cargo run --quiet -- stats --store "$STORE" --json

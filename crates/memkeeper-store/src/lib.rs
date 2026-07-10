@@ -2000,6 +2000,47 @@ fn top_activation_graph_candidates<'a>(
     graph_candidates
 }
 
+struct NormalRerankFill<'a> {
+    ordered: &'a [&'a RerankCandidate],
+    normal_cap: usize,
+    reserved_ids: &'a BTreeSet<&'a str>,
+    per_item_floor: Option<f64>,
+    max_chars: usize,
+}
+
+fn append_normal_reranked_candidates(
+    fill: &NormalRerankFill<'_>,
+    content: &mut String,
+    memory_ids: &mut Vec<String>,
+    scores: &mut Vec<f64>,
+) {
+    for candidate in fill.ordered {
+        if memory_ids.len() >= fill.normal_cap {
+            break;
+        }
+        // Below-pool graph additions are quarantined from the normal fill: they
+        // can land ONLY through a reserved slot. This bounds expansion churn.
+        if candidate.graph_pulled || fill.reserved_ids.contains(candidate.memory_id.as_str()) {
+            continue;
+        }
+        // `ordered` is sorted by rerank score descending, so the first sub-floor
+        // score means every remaining candidate is also below the floor.
+        if fill
+            .per_item_floor
+            .is_some_and(|floor| f64::from(candidate.rerank_score) < floor)
+        {
+            break;
+        }
+        let entry = format!("- {}\n", candidate.content);
+        if content.len() + entry.len() > fill.max_chars {
+            break;
+        }
+        content.push_str(&entry);
+        memory_ids.push(candidate.memory_id.clone());
+        scores.push(f64::from(candidate.rerank_score));
+    }
+}
+
 /// [`assemble_reranked_pack`] plus a bounded associative-recall exception: reserve
 /// up to `graph_rerank_slots` pack slots for the highest-`activation` graph-pulled
 /// candidates whose activation reaches `graph_activation_floor`, so a hop-reached
@@ -2034,6 +2075,15 @@ pub fn assemble_reranked_pack_with_graph_slots(
         b.rerank_score
             .partial_cmp(&a.rerank_score)
             .unwrap_or(std::cmp::Ordering::Equal)
+            // Activation never overrides a cross-encoder score. It only makes
+            // exact rerank ties deterministic and prefers the memory with more
+            // graph support when both candidates are otherwise equivalent.
+            .then_with(|| {
+                b.activation
+                    .partial_cmp(&a.activation)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .then_with(|| a.memory_id.cmp(&b.memory_id))
     });
 
     let per_item_floor = if cosine_gate > 0.0 {
@@ -2057,36 +2107,14 @@ pub fn assemble_reranked_pack_with_graph_slots(
     let mut content = String::new();
     let mut memory_ids = Vec::new();
     let mut scores = Vec::new();
-    for candidate in &ordered {
-        if memory_ids.len() >= normal_cap {
-            break;
-        }
-        // Below-pool graph additions are quarantined from the normal fill: they
-        // can land ONLY through a reserved slot (handled below). This is the
-        // relative gate — without it, every graph-pulled candidate competes in
-        // the cross-encoder's top-`k` and the pool-widening reorders the pack on
-        // nearly every query (measured 92% churn). With it, `graph_rerank_slots`
-        // bounds the churn and `slots == 0` is byte-identical to graph-off.
-        if candidate.graph_pulled {
-            continue;
-        }
-        // Reserved graph candidates are appended below, not filled here.
-        if reserved_ids.contains(candidate.memory_id.as_str()) {
-            continue;
-        }
-        // `ordered` is sorted by rerank score descending, so the first sub-floor
-        // score means every remaining candidate is also below the floor.
-        if per_item_floor.is_some_and(|floor| f64::from(candidate.rerank_score) < floor) {
-            break;
-        }
-        let entry = format!("- {}\n", candidate.content);
-        if content.len() + entry.len() > request.max_chars {
-            break;
-        }
-        content.push_str(&entry);
-        memory_ids.push(candidate.memory_id.clone());
-        scores.push(f64::from(candidate.rerank_score));
-    }
+    let normal_fill = NormalRerankFill {
+        ordered: &ordered,
+        normal_cap,
+        per_item_floor,
+        reserved_ids: &reserved_ids,
+        max_chars: request.max_chars,
+    };
+    append_normal_reranked_candidates(&normal_fill, &mut content, &mut memory_ids, &mut scores);
     // Append the reserved graph candidates (slot-bounded, activation-floored),
     // best-effort within the char budget. They intentionally bypass the per-item
     // rerank floor -- that is the whole point of the reserved slot.
@@ -6018,6 +6046,10 @@ const DREAM_TASK_ALL: &str = "all";
 /// would flood the graph, so the `link` task skips tags carried by more than this
 /// many active memories.
 const DREAM_LINK_MAX_TAG_MEMORIES: usize = 25;
+/// Two independently shared topic tags are the minimum evidence for an automatic
+/// associative link. One-tag pairs remain available to explicit/manual linking,
+/// but are too noisy for unattended graph growth.
+const DREAM_LINK_MIN_SHARED_TAGS: usize = 2;
 const DREAM_TASK_ORDER: &[&str] = &[
     DREAM_TASK_PROMOTE,
     DREAM_TASK_EXPIRE,
@@ -6560,53 +6592,127 @@ fn dream_exact_duplicate_proposals(
 }
 
 /// `link` task: write cross-entity `memory_links` (`related_to`) between active
-/// memories that share a *discriminative* tag (one carried by at most
-/// `DREAM_LINK_MAX_TAG_MEMORIES` memories), so the `graph` task can project them
-/// into weighted relationships and associative recall can bridge curated memories.
-/// Edge multiplicity emerges naturally: more shared-tag memory pairs between two
-/// entities -> more links -> higher relationship confidence. Idempotent
-/// (`INSERT OR IGNORE`), bounded by the tag filter and `max_memories`.
-fn dream_tag_link(
+/// memories that share at least `DREAM_LINK_MIN_SHARED_TAGS` discriminative topic
+/// tags (each carried by at most `DREAM_LINK_MAX_TAG_MEMORIES` active memories), so
+/// the `graph` task can project them into weighted relationships and associative
+/// recall can bridge curated memories. Session/proposal provenance and generic
+/// kind/status bookkeeping tags are excluded because they describe how a memory
+/// was captured, not what it means. Existing links are filtered before the
+/// per-run cap, making bounded runs resumable instead of repeatedly selecting an
+/// already-written first page.
+struct DreamTagLinkCandidate {
+    src: String,
+    dst: String,
+    shared_tags: Vec<String>,
+}
+
+fn dream_tag_link_candidates(
     transaction: &Transaction<'_>,
     request: &PreparedDreamRequest,
-) -> Result<DreamLinkReport> {
-    let (space_predicate, space_values) =
-        optional_space_predicate("t1.sp", request.space.as_deref());
-    // Materialize the discriminative-tag set and the eligible (active, entity-keyed)
-    // tag rows ONCE, then self-join the small set. A correlated tag-frequency
-    // subquery here is catastrophically slow on a real store; CTEs keep it ~1s.
+) -> Result<(Vec<DreamTagLinkCandidate>, bool)> {
+    let mut scope_conditions = vec![
+        "m.status = 'active'".to_string(),
+        "m.entity_key IS NOT NULL AND TRIM(m.entity_key) <> ''".to_string(),
+        "mt.tag NOT LIKE 'session:%'".to_string(),
+        "mt.tag NOT LIKE 'proposal-kind-%'".to_string(),
+        "LOWER(mt.tag) NOT IN (\
+            'action', 'decision', 'summary', 'reference', 'fact', 'lesson',\
+            'continuity', 'preference', 'task', 'status', 'done', 'resolved',\
+            'review', 'commit', 'synthesis', 'synthesis-derived', 'built',\
+            'implemented'\
+        )"
+        .to_string(),
+    ];
+    let mut scope_values = Vec::new();
+    append_dream_memory_filters(&mut scope_conditions, &mut scope_values, request, "m");
+    // Materialize the request-scoped eligible tag rows ONCE, derive
+    // discriminative tags per space from that same scope, then self-join the
+    // reduced set. A correlated tag-frequency subquery here is catastrophically
+    // slow on a real store; CTEs keep it ~1s.
     let select = format!(
-        "WITH disc AS (
-             SELECT tag FROM memory_tags GROUP BY tag HAVING COUNT(*) <= {max_tag}
+        "WITH scoped AS (
+             SELECT mt.memory_id AS mid, mt.tag AS tag, m.entity_key AS ek,
+                    m.space_name AS sp
+               FROM memory_tags mt
+               JOIN memories m ON m.id = mt.memory_id
+              WHERE {scope_predicate}
+         ),
+         disc AS (
+             SELECT sp, tag
+               FROM scoped
+              GROUP BY sp, tag
+             HAVING COUNT(*) <= {max_tag}
          ),
          tagged AS (
-             SELECT mt.memory_id AS mid, mt.tag AS tag, m.entity_key AS ek, m.space_name AS sp
-               FROM memory_tags mt
-               JOIN disc ON disc.tag = mt.tag
-               JOIN memories m ON m.id = mt.memory_id AND m.status = 'active'
-                AND m.entity_key IS NOT NULL AND TRIM(m.entity_key) <> ''
+             SELECT scoped.mid, scoped.tag, scoped.ek, scoped.sp
+               FROM scoped
+               JOIN disc ON disc.sp = scoped.sp AND disc.tag = scoped.tag
          )
-         SELECT t1.mid, t2.mid
+         SELECT t1.mid, t2.mid, COUNT(*), json_group_array(t1.tag)
            FROM tagged t1
            JOIN tagged t2 ON t1.tag = t2.tag AND t1.mid < t2.mid
           WHERE t1.ek <> t2.ek
             AND t1.sp = t2.sp
-            AND {space_predicate}
+            AND NOT EXISTS (
+                SELECT 1
+                  FROM memory_links existing
+                 WHERE existing.link_type = 'related_to'
+                   AND ((existing.src_memory_id = t1.mid AND existing.dst_memory_id = t2.mid)
+                     OR (existing.src_memory_id = t2.mid AND existing.dst_memory_id = t1.mid))
+            )
           GROUP BY t1.mid, t2.mid
+         HAVING COUNT(*) >= {min_shared}
           ORDER BY COUNT(*) DESC, t1.mid ASC, t2.mid ASC
           LIMIT {limit}",
         max_tag = DREAM_LINK_MAX_TAG_MEMORIES,
+        min_shared = DREAM_LINK_MIN_SHARED_TAGS,
         limit = request.max_memories.saturating_add(1),
+        scope_predicate = scope_conditions.join(" AND "),
     );
     let mut statement = transaction.prepare(&select)?;
-    let rows = statement.query_map(params_from_iter(space_values.iter()), |row| {
-        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    let rows = statement.query_map(params_from_iter(scope_values.iter()), |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            usize::try_from(row.get::<_, i64>(2)?).unwrap_or(usize::MAX),
+            row.get::<_, String>(3)?,
+        ))
     })?;
-    let mut pairs = collect_rows(rows)?;
+    let raw_pairs = collect_rows(rows)?;
+    let mut pairs =
+        raw_pairs
+            .into_iter()
+            .map(|(src, dst, shared_tag_count, shared_tags_json)| {
+                let mut shared_tags = serde_json::from_str::<Vec<String>>(&shared_tags_json)
+                    .map_err(|error| Error::InvalidRequest {
+                        message: format!("dream link produced invalid shared-tag JSON: {error}"),
+                    })?;
+                shared_tags.sort();
+                shared_tags.dedup();
+                if shared_tags.len() != shared_tag_count {
+                    return Err(Error::InvalidRequest {
+                        message: "dream link shared-tag evidence count mismatch".to_string(),
+                    });
+                }
+                Ok(DreamTagLinkCandidate {
+                    src,
+                    dst,
+                    shared_tags,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
     let truncated = pairs.len() > request.max_memories;
     if truncated {
         pairs.truncate(request.max_memories);
     }
+    Ok((pairs, truncated))
+}
+
+fn dream_tag_link(
+    transaction: &Transaction<'_>,
+    request: &PreparedDreamRequest,
+) -> Result<DreamLinkReport> {
+    let (pairs, truncated) = dream_tag_link_candidates(transaction, request)?;
     let candidates = pairs.len();
     if request.dry_run {
         return Ok(DreamLinkReport {
@@ -6618,12 +6724,24 @@ fn dream_tag_link(
     }
     let now = now_timestamp(transaction)?;
     let mut links_written = 0usize;
-    for (src, dst) in pairs {
+    for candidate in pairs {
+        let DreamTagLinkCandidate {
+            src,
+            dst,
+            shared_tags,
+        } = candidate;
+        let confidence = relationship_confidence_from_evidence(shared_tags.len());
+        let metadata_json = serde_json::json!({
+            "source": "dream_tag_link",
+            "shared_tag_count": shared_tags.len(),
+            "shared_tags": shared_tags,
+        })
+        .to_string();
         links_written += transaction.execute(
             "INSERT OR IGNORE INTO memory_links \
-             (src_memory_id, dst_memory_id, link_type, status, confidence, created_at) \
-             VALUES (?1, ?2, 'related_to', 'active', NULL, ?3)",
-            params![src, dst, now],
+             (src_memory_id, dst_memory_id, link_type, status, confidence, metadata_json, created_at) \
+             VALUES (?1, ?2, 'related_to', 'active', ?3, ?4, ?5)",
+            params![src, dst, confidence, metadata_json, now],
         )?;
     }
     Ok(DreamLinkReport {
