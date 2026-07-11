@@ -1,0 +1,8 @@
+sentence-transformers>=3.0,<4
+transformers>=4.44,<5
+torch>=2.2
+numpy>=1.26
+scikit-learn>=1.4
+onnx>=1.16
+onnxruntime>=1.18
+optimum[onnxruntime]>=1.21
