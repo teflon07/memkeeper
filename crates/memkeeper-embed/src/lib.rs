@@ -16,6 +16,9 @@ use tokenizers::Tokenizer;
 #[cfg(feature = "local")]
 const MAX_SEQ_LEN: usize = 512;
 
+/// Result type used by embedding and reranking provider implementations.
+pub type ProviderResult<T> = anyhow::Result<T>;
+
 /// Text embedding provider. Implementations may be local (ONNX) or remote (API).
 pub trait Embedder: Send {
     /// Stable identifier of the active model, e.g. `mxbai-embed-large`.
@@ -27,13 +30,13 @@ pub trait Embedder: Send {
     /// # Errors
     ///
     /// Returns an error if the underlying model invocation fails.
-    fn embed(&mut self, texts: &[&str]) -> Result<Vec<Vec<f32>>>;
+    fn embed(&mut self, texts: &[&str]) -> ProviderResult<Vec<Vec<f32>>>;
     /// Embed a single text.
     ///
     /// # Errors
     ///
     /// Returns an error if the underlying model invocation fails or yields no vector.
-    fn embed_one(&mut self, text: &str) -> Result<Vec<f32>> {
+    fn embed_one(&mut self, text: &str) -> ProviderResult<Vec<f32>> {
         self.embed(&[text])?.pop().context("empty embedding result")
     }
 }
@@ -47,7 +50,7 @@ pub trait Reranker: Send {
     /// # Errors
     ///
     /// Returns an error if the underlying model invocation fails.
-    fn rerank(&mut self, query: &str, documents: &[&str]) -> Result<Vec<f32>>;
+    fn rerank(&mut self, query: &str, documents: &[&str]) -> ProviderResult<Vec<f32>>;
 }
 
 #[cfg(feature = "api")]
@@ -285,23 +288,76 @@ fn local_embedder_from_env() -> Option<EmbedModel> {
 #[cfg(feature = "local")]
 fn local_reranker_from_env() -> Option<RerankerModel> {
     let dir = resolve_local_model_dir("MEMKEEPER_RERANK_MODEL_DIR", "mxbai-rerank-base");
+    load_local_reranker(&dir, LocalRerankerRole::Production)
+}
+
+#[cfg(feature = "local")]
+#[derive(Clone, Copy)]
+enum LocalRerankerRole {
+    Production,
+    Shadow,
+}
+
+#[cfg(feature = "local")]
+fn load_local_reranker(dir: &Path, role: LocalRerankerRole) -> Option<RerankerModel> {
     if !dir.exists() {
-        eprintln!(
-            "[memkeeper] rerank model not found at {}; run `memkeeper pull-models` \
-             to enable reranking (ranking without the cross-encoder for now)",
-            dir.display()
-        );
+        match role {
+            LocalRerankerRole::Production => eprintln!(
+                "[memkeeper] rerank model not found at {}; run `memkeeper pull-models` \
+                 to enable reranking (ranking without the cross-encoder for now)",
+                dir.display()
+            ),
+            LocalRerankerRole::Shadow => eprintln!(
+                "[memkeeper] shadow rerank model dir set but not found at {}; shadow reranking disabled",
+                dir.display()
+            ),
+        }
         return None;
     }
-    match RerankerModel::load(&dir) {
+    match RerankerModel::load(dir) {
         Ok(model) => {
-            eprintln!("[memkeeper] rerank model loaded");
+            match role {
+                LocalRerankerRole::Production => eprintln!("[memkeeper] rerank model loaded"),
+                LocalRerankerRole::Shadow => eprintln!(
+                    "[memkeeper] shadow rerank model loaded ({}, token_type_ids={})",
+                    model.model_id, model.needs_token_type_ids
+                ),
+            }
             Some(model)
         }
         Err(error) => {
-            eprintln!("[memkeeper] warning: failed to load rerank model: {error}");
+            let label = match role {
+                LocalRerankerRole::Production => "rerank",
+                LocalRerankerRole::Shadow => "shadow rerank",
+            };
+            eprintln!("[memkeeper] warning: failed to load {label} model: {error}");
             None
         }
+    }
+}
+
+/// Load the optional shadow reranker. Strictly opt-in: only activates when the
+/// operator sets `MEMKEEPER_RERANK_SHADOW_MODEL_DIR`. The shadow model scores the
+/// same candidates as production for divergence logging and never affects the
+/// served order, so a missing/broken shadow model warns and disables shadowing
+/// rather than failing (see the require-mode startup guard for fail-closed).
+#[cfg(feature = "local")]
+fn local_shadow_reranker_from_env() -> Option<RerankerModel> {
+    let dir = std::path::PathBuf::from(std::env::var_os("MEMKEEPER_RERANK_SHADOW_MODEL_DIR")?);
+    load_local_reranker(&dir, LocalRerankerRole::Shadow)
+}
+
+/// Construct the optional shadow reranker as a boxed trait object, or `None` when
+/// unconfigured or unavailable in this build.
+#[must_use]
+pub fn shadow_reranker_from_env() -> Option<Box<dyn Reranker>> {
+    #[cfg(feature = "local")]
+    {
+        local_shadow_reranker_from_env().map(|model| Box::new(model) as Box<dyn Reranker>)
+    }
+    #[cfg(not(feature = "local"))]
+    {
+        None
     }
 }
 
@@ -565,6 +621,15 @@ pub struct RerankerModel {
     session: Session,
     tokenizer: Tokenizer,
     model_id: String,
+    /// Whether the loaded ONNX graph declares a `token_type_ids` input. RoBERTa-style
+    /// cross-encoders (mxbai-rerank-base) omit it; DeBERTa-v2 (mxbai xsmall) requires
+    /// it. Detected from the graph so one struct serves both without a caller flag.
+    needs_token_type_ids: bool,
+}
+
+#[cfg(feature = "local")]
+fn declares_token_type_ids<'a>(inputs: impl IntoIterator<Item = &'a str>) -> bool {
+    inputs.into_iter().any(|name| name == "token_type_ids")
 }
 
 #[cfg(feature = "local")]
@@ -582,10 +647,13 @@ impl RerankerModel {
             .context("failed to load reranker model.onnx")?;
         let tokenizer = Tokenizer::from_file(model_dir.join("tokenizer.json"))
             .map_err(|e| anyhow::anyhow!("failed to load reranker tokenizer: {e}"))?;
+        let needs_token_type_ids =
+            declares_token_type_ids(session.inputs().iter().map(ort::value::Outlet::name));
         Ok(Self {
             model_id: model_id_from_dir(model_dir),
             session,
             tokenizer,
+            needs_token_type_ids,
         })
     }
 
@@ -642,10 +710,24 @@ impl RerankerModel {
         let t_attention_mask =
             TensorRef::from_array_view(attention_mask.view()).context("attention_mask tensor")?;
 
-        let outputs = self.session.run(ort::inputs![
-            "input_ids" => t_input_ids,
-            "attention_mask" => t_attention_mask,
-        ])?;
+        // DeBERTa-v2 graphs (mxbai xsmall) require a token_type_ids input; RoBERTa-style
+        // graphs (mxbai-rerank-base) reject an unexpected input. Both pairs are
+        // single-segment here, so a zero tensor is correct when the graph asks for it.
+        let outputs = if self.needs_token_type_ids {
+            let token_type_ids = Array2::<i64>::zeros((batch_size, seq_len));
+            let t_token_type_ids = TensorRef::from_array_view(token_type_ids.view())
+                .context("token_type_ids tensor")?;
+            self.session.run(ort::inputs![
+                "input_ids" => t_input_ids,
+                "attention_mask" => t_attention_mask,
+                "token_type_ids" => t_token_type_ids,
+            ])?
+        } else {
+            self.session.run(ort::inputs![
+                "input_ids" => t_input_ids,
+                "attention_mask" => t_attention_mask,
+            ])?
+        };
 
         let logits_view: ArrayViewD<'_, f32> = outputs[0].try_extract_array::<f32>()?;
         // Shape may be [batch] (single logit) or [batch, num_labels].
@@ -746,6 +828,56 @@ mod tests {
         );
     }
 
+    #[test]
+    fn token_type_ids_detection_handles_declared_and_omitted_inputs() {
+        assert!(declares_token_type_ids([
+            "input_ids",
+            "attention_mask",
+            "token_type_ids"
+        ]));
+        assert!(!declares_token_type_ids(["input_ids", "attention_mask"]));
+    }
+
+    #[test]
+    #[ignore = "requires the xsmall tokenizer artifact; run with -- --ignored"]
+    fn reranker_submits_declared_token_type_ids_to_onnx() {
+        // Minimal ONNX graph with the real reranker input contract. Its output is
+        // ReduceMean(Cast(token_type_ids)), so the all-zero segment tensor must
+        // execute successfully and produce sigmoid(0) = 0.5.
+        const MODEL: &[u8] = &[
+            8, 7, 18, 12, 102, 97, 115, 116, 109, 101, 109, 45, 116, 101, 115, 116, 58, 157, 2, 10,
+            48, 10, 14, 116, 111, 107, 101, 110, 95, 116, 121, 112, 101, 95, 105, 100, 115, 18, 13,
+            116, 111, 107, 101, 110, 95, 116, 121, 112, 101, 115, 95, 102, 34, 4, 67, 97, 115, 116,
+            42, 9, 10, 2, 116, 111, 24, 1, 160, 1, 2, 10, 65, 10, 13, 116, 111, 107, 101, 110, 95,
+            116, 121, 112, 101, 115, 95, 102, 18, 6, 108, 111, 103, 105, 116, 115, 34, 10, 82, 101,
+            100, 117, 99, 101, 77, 101, 97, 110, 42, 11, 10, 4, 97, 120, 101, 115, 64, 1, 160, 1,
+            7, 42, 15, 10, 8, 107, 101, 101, 112, 100, 105, 109, 115, 24, 0, 160, 1, 2, 18, 18,
+            116, 111, 107, 101, 110, 95, 116, 121, 112, 101, 95, 102, 105, 120, 116, 117, 114, 101,
+            90, 35, 10, 9, 105, 110, 112, 117, 116, 95, 105, 100, 115, 18, 22, 10, 20, 8, 7, 18,
+            16, 10, 7, 18, 5, 98, 97, 116, 99, 104, 10, 5, 18, 3, 115, 101, 113, 90, 40, 10, 14,
+            97, 116, 116, 101, 110, 116, 105, 111, 110, 95, 109, 97, 115, 107, 18, 22, 10, 20, 8,
+            7, 18, 16, 10, 7, 18, 5, 98, 97, 116, 99, 104, 10, 5, 18, 3, 115, 101, 113, 90, 40, 10,
+            14, 116, 111, 107, 101, 110, 95, 116, 121, 112, 101, 95, 105, 100, 115, 18, 22, 10, 20,
+            8, 7, 18, 16, 10, 7, 18, 5, 98, 97, 116, 99, 104, 10, 5, 18, 3, 115, 101, 113, 98, 25,
+            10, 6, 108, 111, 103, 105, 116, 115, 18, 15, 10, 13, 8, 1, 18, 9, 10, 7, 18, 5, 98, 97,
+            116, 99, 104, 66, 4, 10, 0, 16, 11,
+        ];
+        let dir = tempfile::tempdir().expect("temp model dir");
+        std::fs::write(dir.path().join("model.onnx"), MODEL).expect("write ONNX fixture");
+        std::fs::copy(
+            models_dir().join("mxbai-xsmall-int8/tokenizer.json"),
+            dir.path().join("tokenizer.json"),
+        )
+        .expect("copy tokenizer fixture");
+
+        let mut model = RerankerModel::load(dir.path()).expect("load declared-input fixture");
+        assert!(model.needs_token_type_ids);
+        let scores = model
+            .rerank("query", &["document one", "document two"])
+            .expect("declared token_type_ids inference succeeds");
+        assert_eq!(scores, vec![0.5, 0.5]);
+    }
+
     fn models_dir() -> std::path::PathBuf {
         std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
@@ -809,5 +941,20 @@ mod tests {
             scores[0] > scores[1],
             "relevant doc should score higher: {scores:?}"
         );
+    }
+
+    #[test]
+    #[ignore = "requires xsmall INT8 ONNX model files; run with -- --ignored"]
+    fn xsmall_int8_reranker_loads_and_scores() {
+        let mut model = RerankerModel::load(&models_dir().join("mxbai-xsmall-int8"))
+            .expect("load xsmall INT8 reranker");
+        let scores = model
+            .rerank(
+                "What stores memkeeper memories?",
+                &["Memkeeper stores memories in SQLite.", "The sky is blue."],
+            )
+            .expect("score with xsmall INT8 reranker");
+        assert_eq!(scores.len(), 2);
+        assert!(scores.iter().all(|score| score.is_finite()));
     }
 }

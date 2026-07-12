@@ -20,6 +20,447 @@ use super::{
 };
 use std::path::PathBuf;
 
+#[cfg(feature = "embed")]
+struct FixedTestReranker;
+
+#[cfg(feature = "embed")]
+impl memkeeper_embed::Reranker for FixedTestReranker {
+    fn model_id(&self) -> &'static str {
+        "fixed-production"
+    }
+
+    fn rerank(
+        &mut self,
+        _query: &str,
+        documents: &[&str],
+    ) -> memkeeper_embed::ProviderResult<Vec<f32>> {
+        Ok(documents
+            .iter()
+            .map(|document| if document.contains("alpha") { 0.9 } else { 0.2 })
+            .collect())
+    }
+}
+
+#[cfg(feature = "embed")]
+struct BlockingTestReranker {
+    started: std::sync::mpsc::SyncSender<()>,
+    release: std::sync::mpsc::Receiver<()>,
+}
+
+#[cfg(feature = "embed")]
+struct AlternateTestReranker;
+
+#[cfg(feature = "embed")]
+impl memkeeper_embed::Reranker for AlternateTestReranker {
+    fn model_id(&self) -> &'static str {
+        "alternate-shadow"
+    }
+
+    fn rerank(
+        &mut self,
+        _query: &str,
+        documents: &[&str],
+    ) -> memkeeper_embed::ProviderResult<Vec<f32>> {
+        Ok((0..documents.len())
+            .map(|index| if index == 0 { 0.1 } else { 0.8 })
+            .collect())
+    }
+}
+
+#[cfg(feature = "embed")]
+struct PanickingTestReranker {
+    triggered: std::sync::mpsc::SyncSender<()>,
+}
+
+#[cfg(feature = "embed")]
+struct ErrorTestReranker {
+    triggered: std::sync::mpsc::SyncSender<()>,
+}
+
+#[cfg(feature = "embed")]
+impl memkeeper_embed::Reranker for ErrorTestReranker {
+    fn model_id(&self) -> &'static str {
+        "error-shadow"
+    }
+
+    fn rerank(
+        &mut self,
+        _query: &str,
+        _documents: &[&str],
+    ) -> memkeeper_embed::ProviderResult<Vec<f32>> {
+        self.triggered.send(()).expect("test is listening");
+        Err(std::io::Error::other("intentional shadow inference error").into())
+    }
+}
+
+#[cfg(feature = "embed")]
+struct WrongShapeTestReranker {
+    triggered: std::sync::mpsc::SyncSender<()>,
+}
+
+#[cfg(feature = "embed")]
+impl memkeeper_embed::Reranker for WrongShapeTestReranker {
+    fn model_id(&self) -> &'static str {
+        "wrong-shape-shadow"
+    }
+
+    fn rerank(
+        &mut self,
+        _query: &str,
+        _documents: &[&str],
+    ) -> memkeeper_embed::ProviderResult<Vec<f32>> {
+        self.triggered.send(()).expect("test is listening");
+        Ok(Vec::new())
+    }
+}
+
+#[cfg(feature = "embed")]
+struct GateOnceTestReranker {
+    started: std::sync::mpsc::SyncSender<()>,
+    release: Option<std::sync::mpsc::Receiver<()>>,
+    scored: std::sync::mpsc::SyncSender<()>,
+}
+
+#[cfg(feature = "embed")]
+impl memkeeper_embed::Reranker for GateOnceTestReranker {
+    fn model_id(&self) -> &'static str {
+        "gate-once-shadow"
+    }
+
+    fn rerank(
+        &mut self,
+        _query: &str,
+        documents: &[&str],
+    ) -> memkeeper_embed::ProviderResult<Vec<f32>> {
+        if let Some(release) = self.release.take() {
+            self.started.send(()).expect("test is listening");
+            release.recv().expect("test releases shadow");
+            self.scored.send(()).expect("test observes scoring");
+        }
+        Ok(vec![0.5; documents.len()])
+    }
+}
+
+#[cfg(feature = "embed")]
+impl memkeeper_embed::Reranker for PanickingTestReranker {
+    fn model_id(&self) -> &'static str {
+        "panicking-shadow"
+    }
+
+    fn rerank(
+        &mut self,
+        _query: &str,
+        _documents: &[&str],
+    ) -> memkeeper_embed::ProviderResult<Vec<f32>> {
+        self.triggered.send(()).expect("test is listening");
+        panic!("intentional shadow test panic");
+    }
+}
+
+#[cfg(feature = "embed")]
+impl memkeeper_embed::Reranker for BlockingTestReranker {
+    fn model_id(&self) -> &'static str {
+        "blocking-shadow"
+    }
+
+    fn rerank(
+        &mut self,
+        _query: &str,
+        documents: &[&str],
+    ) -> memkeeper_embed::ProviderResult<Vec<f32>> {
+        self.started.send(()).expect("test is listening");
+        self.release.recv().expect("test releases shadow");
+        Ok(vec![0.5; documents.len()])
+    }
+}
+
+#[cfg(feature = "embed")]
+#[test]
+fn served_pack_does_not_wait_for_shadow_reranking() {
+    use std::sync::{mpsc, Mutex};
+    use std::time::Duration;
+
+    let dir = tempfile::tempdir().expect("temp dir");
+    let store = dir.path().join("store.sqlite");
+    memkeeper_store::init_store(&store).expect("store initializes");
+    for content in ["alpha memory", "beta memory"] {
+        let request =
+            remember_request_from_json(&serde_json::json!({"content": content}).to_string())
+                .expect("remember request parses");
+        memkeeper_store::remember_memory(&store, &request).expect("memory is stored");
+    }
+
+    let (started_tx, started_rx) = mpsc::sync_channel(1);
+    let (release_tx, release_rx) = mpsc::sync_channel(1);
+    let models = SemanticModels {
+        embed: None,
+        rerank: Some(Mutex::new(Box::new(FixedTestReranker))),
+        colbert: None,
+        rerank_shadow: super::ShadowRerankWorker::start(Box::new(BlockingTestReranker {
+            started: started_tx,
+            release: release_rx,
+        })),
+    };
+    let request = serde_json::json!({
+        "request_id": "shadow-async",
+        "command": "pack",
+        "store_path": store,
+        "payload": {
+            "title": "shadow isolation",
+            "queries": ["memory"],
+            "max_memories": 2,
+            "max_chars": 1000,
+            "rerank_candidates": 2
+        }
+    })
+    .to_string();
+    let (response_tx, response_rx) = mpsc::sync_channel(1);
+    let handle = std::thread::spawn(move || {
+        let response = serve_line_response(&request, std::time::Instant::now(), &models);
+        response_tx.send(response).expect("test receives response");
+    });
+
+    started_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("shadow scoring starts");
+    let response_before_release = response_rx.recv_timeout(Duration::from_millis(250));
+    release_tx.send(()).expect("release shadow scorer");
+    handle.join().expect("serve request does not panic");
+
+    let response = response_before_release.expect("production response must not wait for shadow");
+    assert!(response.contains("\"ok\":true"), "response: {response}");
+}
+
+#[cfg(feature = "embed")]
+#[test]
+fn shadow_enabled_pack_preserves_output_and_persists_comparison() {
+    use std::sync::Mutex;
+    use std::time::Duration;
+
+    let dir = tempfile::tempdir().expect("temp dir");
+    let store = dir.path().join("store.sqlite");
+    memkeeper_store::init_store(&store).expect("store initializes");
+    for content in ["alpha memory", "beta memory"] {
+        let request =
+            remember_request_from_json(&serde_json::json!({"content": content}).to_string())
+                .expect("remember request parses");
+        memkeeper_store::remember_memory(&store, &request).expect("memory is stored");
+    }
+    let request = serde_json::json!({
+        "request_id": "shadow-output",
+        "command": "pack",
+        "store_path": store,
+        "payload": {
+            "title": "shadow comparison",
+            "queries": ["memory"],
+            "max_memories": 2,
+            "max_chars": 1000,
+            "rerank_candidates": 2
+        }
+    })
+    .to_string();
+    let production_only = SemanticModels {
+        embed: None,
+        rerank: Some(Mutex::new(Box::new(FixedTestReranker))),
+        colbert: None,
+        rerank_shadow: None,
+    };
+    let baseline = serve_line_response(&request, std::time::Instant::now(), &production_only);
+
+    let with_shadow = SemanticModels {
+        embed: None,
+        rerank: Some(Mutex::new(Box::new(FixedTestReranker))),
+        colbert: None,
+        rerank_shadow: super::ShadowRerankWorker::start(Box::new(AlternateTestReranker)),
+    };
+    let shadowed = serve_line_response(&request, std::time::Instant::now(), &with_shadow);
+
+    let baseline_json: serde_json::Value = serde_json::from_str(&baseline).expect("baseline JSON");
+    let shadowed_json: serde_json::Value = serde_json::from_str(&shadowed).expect("shadowed JSON");
+    let baseline_pack = serde_json::to_string(&baseline_json["result"]["pack"]).unwrap();
+    let shadowed_pack = serde_json::to_string(&shadowed_json["result"]["pack"]).unwrap();
+    assert_eq!(baseline_pack.as_bytes(), shadowed_pack.as_bytes());
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(3);
+    let persisted = loop {
+        let rows = rusqlite::Connection::open(&store)
+            .and_then(|connection| {
+                connection.query_row("SELECT COUNT(*) FROM reranker_shadow_events", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+            })
+            .unwrap_or(0);
+        if rows == 2 {
+            break true;
+        }
+        if std::time::Instant::now() >= deadline {
+            break false;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    assert!(
+        persisted,
+        "shadow comparison should be persisted asynchronously"
+    );
+}
+
+#[cfg(feature = "embed")]
+#[test]
+fn served_pack_survives_shadow_panic() {
+    use std::sync::{mpsc, Mutex};
+    use std::time::Duration;
+
+    let dir = tempfile::tempdir().expect("temp dir");
+    let store = dir.path().join("store.sqlite");
+    memkeeper_store::init_store(&store).expect("store initializes");
+    let remember = remember_request_from_json(r#"{"content":"alpha memory"}"#)
+        .expect("remember request parses");
+    memkeeper_store::remember_memory(&store, &remember).expect("memory is stored");
+    let (triggered_tx, triggered_rx) = mpsc::sync_channel(1);
+    let models = SemanticModels {
+        embed: None,
+        rerank: Some(Mutex::new(Box::new(FixedTestReranker))),
+        colbert: None,
+        rerank_shadow: super::ShadowRerankWorker::start(Box::new(PanickingTestReranker {
+            triggered: triggered_tx,
+        })),
+    };
+    let request = serde_json::json!({
+        "request_id": "shadow-panic",
+        "command": "pack",
+        "store_path": store,
+        "payload": {
+            "title": "shadow panic isolation",
+            "queries": ["alpha"],
+            "max_memories": 1,
+            "max_chars": 1000,
+            "rerank_candidates": 1
+        }
+    })
+    .to_string();
+
+    let response = serve_line_response(&request, std::time::Instant::now(), &models);
+    assert!(response.contains("\"ok\":true"), "response: {response}");
+    triggered_rx
+        .recv_timeout(Duration::from_secs(3))
+        .expect("shadow panic path executes");
+}
+
+#[cfg(feature = "embed")]
+#[test]
+fn served_pack_survives_shadow_error_and_score_shape_mismatch() {
+    use std::sync::{mpsc, Mutex};
+    use std::time::Duration;
+
+    let dir = tempfile::tempdir().expect("temp dir");
+    let store = dir.path().join("store.sqlite");
+    memkeeper_store::init_store(&store).expect("store initializes");
+    let remember = remember_request_from_json(r#"{"content":"alpha memory"}"#)
+        .expect("remember request parses");
+    memkeeper_store::remember_memory(&store, &remember).expect("memory is stored");
+    let request = serde_json::json!({
+        "request_id": "shadow-failure",
+        "command": "pack",
+        "store_path": store,
+        "payload": {"title":"failure isolation","queries":["alpha"],"max_memories":1,"max_chars":1000,"rerank_candidates":1}
+    })
+    .to_string();
+
+    for shadow in ["error", "shape"] {
+        let (triggered_tx, triggered_rx) = mpsc::sync_channel(1);
+        let reranker: Box<dyn memkeeper_embed::Reranker> = if shadow == "error" {
+            Box::new(ErrorTestReranker {
+                triggered: triggered_tx,
+            })
+        } else {
+            Box::new(WrongShapeTestReranker {
+                triggered: triggered_tx,
+            })
+        };
+        let models = SemanticModels {
+            embed: None,
+            rerank: Some(Mutex::new(Box::new(FixedTestReranker))),
+            colbert: None,
+            rerank_shadow: super::ShadowRerankWorker::start(reranker),
+        };
+        let response = serve_line_response(&request, std::time::Instant::now(), &models);
+        assert!(response.contains("\"ok\":true"), "response: {response}");
+        triggered_rx
+            .recv_timeout(Duration::from_secs(3))
+            .expect("shadow failure path executes");
+    }
+}
+
+#[cfg(feature = "embed")]
+#[test]
+fn served_pack_stays_nonblocking_when_shadow_queue_and_store_are_busy() {
+    use rusqlite::Connection;
+    use std::sync::{mpsc, Mutex};
+    use std::time::Duration;
+
+    let dir = tempfile::tempdir().expect("temp dir");
+    let store = dir.path().join("store.sqlite");
+    memkeeper_store::init_store(&store).expect("store initializes");
+    let remember = remember_request_from_json(r#"{"content":"alpha memory"}"#)
+        .expect("remember request parses");
+    memkeeper_store::remember_memory(&store, &remember).expect("memory is stored");
+    let writer = Connection::open(&store).expect("open competing writer");
+    writer
+        .execute_batch("BEGIN IMMEDIATE")
+        .expect("hold the SQLite write lock");
+
+    let (started_tx, started_rx) = mpsc::sync_channel(1);
+    let (release_tx, release_rx) = mpsc::sync_channel(1);
+    let (scored_tx, scored_rx) = mpsc::sync_channel(1);
+    let models = SemanticModels {
+        embed: None,
+        rerank: Some(Mutex::new(Box::new(FixedTestReranker))),
+        colbert: None,
+        rerank_shadow: super::ShadowRerankWorker::start(Box::new(GateOnceTestReranker {
+            started: started_tx,
+            release: Some(release_rx),
+            scored: scored_tx,
+        })),
+    };
+    let request = serde_json::json!({
+        "request_id": "shadow-backpressure",
+        "command": "pack",
+        "store_path": store,
+        "payload": {"title":"backpressure","queries":["alpha"],"max_memories":1,"max_chars":1000,"rerank_candidates":1}
+    })
+    .to_string();
+
+    let first = serve_line_response(&request, std::time::Instant::now(), &models);
+    assert!(first.contains("\"ok\":true"));
+    started_rx
+        .recv_timeout(Duration::from_secs(3))
+        .expect("worker holds the first job");
+    for _ in 0..=super::SHADOW_RERANK_QUEUE_CAPACITY {
+        let started = std::time::Instant::now();
+        let response = serve_line_response(&request, std::time::Instant::now(), &models);
+        assert!(response.contains("\"ok\":true"));
+        assert!(
+            started.elapsed() < Duration::from_millis(500),
+            "full shadow queue must not delay production"
+        );
+    }
+    release_tx.send(()).expect("release shadow inference");
+    scored_rx
+        .recv_timeout(Duration::from_secs(3))
+        .expect("worker reaches the blocked telemetry write");
+    std::thread::sleep(Duration::from_millis(50));
+    let started = std::time::Instant::now();
+    let response = serve_line_response(&request, std::time::Instant::now(), &models);
+    assert!(response.contains("\"ok\":true"));
+    assert!(
+        started.elapsed() < Duration::from_millis(500),
+        "SQLite contention in telemetry must not delay production"
+    );
+    writer
+        .execute_batch("ROLLBACK")
+        .expect("release write lock");
+}
+
 #[test]
 fn semantic_unavailable_error_is_retryable_with_stable_code() {
     let err = CliError::SemanticUnavailable("query embedding failed: 429".to_string());

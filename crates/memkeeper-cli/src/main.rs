@@ -479,6 +479,69 @@ struct SemanticModels {
     embed: Option<Mutex<Box<dyn memkeeper_embed::Embedder>>>,
     rerank: Option<Mutex<Box<dyn memkeeper_embed::Reranker>>>,
     colbert: Option<Mutex<Box<dyn memkeeper_embed::TokenEmbedder>>>,
+    /// Optional shadow reranker (opt-in via `MEMKEEPER_RERANK_SHADOW_MODEL_DIR`).
+    /// Scores the same candidates as `rerank` for divergence logging; never
+    /// affects the served order. `None` unless explicitly configured.
+    rerank_shadow: Option<ShadowRerankWorker>,
+}
+
+#[cfg(feature = "embed")]
+const SHADOW_RERANK_QUEUE_CAPACITY: usize = 8;
+
+#[cfg(feature = "embed")]
+struct ShadowRerankJob {
+    store: PathBuf,
+    query: String,
+    documents: Vec<String>,
+    summary_idx: Vec<usize>,
+    prod_model_id: String,
+    candidates: Vec<memkeeper_store::RerankCandidate>,
+}
+
+#[cfg(feature = "embed")]
+struct ShadowRerankWorker {
+    sender: std::sync::mpsc::SyncSender<ShadowRerankJob>,
+}
+
+#[cfg(feature = "embed")]
+impl ShadowRerankWorker {
+    fn start(mut reranker: Box<dyn memkeeper_embed::Reranker>) -> Option<Self> {
+        let (sender, receiver) = std::sync::mpsc::sync_channel(SHADOW_RERANK_QUEUE_CAPACITY);
+        let thread = std::thread::Builder::new()
+            .name("memkeeper-shadow-reranker".to_string())
+            .spawn(move || {
+                while let Ok(job) = receiver.recv() {
+                    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        process_shadow_rerank(&mut *reranker, job);
+                    }));
+                    if result.is_err() {
+                        eprintln!(
+                            "[memkeeper] shadow rerank panicked; disabling shadow worker while production retrieval continues"
+                        );
+                        break;
+                    }
+                }
+            });
+        match thread {
+            Ok(_) => Some(Self { sender }),
+            Err(error) => {
+                eprintln!("[memkeeper] failed to start shadow rerank worker: {error}");
+                None
+            }
+        }
+    }
+
+    fn submit(&self, job: ShadowRerankJob) {
+        match self.sender.try_send(job) {
+            Ok(()) => {}
+            Err(std::sync::mpsc::TrySendError::Full(_)) => eprintln!(
+                "[memkeeper] shadow rerank queue full; dropping comparison without delaying production"
+            ),
+            Err(std::sync::mpsc::TrySendError::Disconnected(_)) => eprintln!(
+                "[memkeeper] shadow rerank worker unavailable; dropping comparison"
+            ),
+        }
+    }
 }
 
 /// Late-interaction retrieval gate: `MEMKEEPER_LATE_INTERACTION=1` plus
@@ -574,6 +637,12 @@ impl SemanticModels {
                 .flatten()
                 .map(Mutex::new),
             colbert: colbert.map(Mutex::new),
+            // Shadow reranker loads only alongside the production reranker and only
+            // when explicitly configured; otherwise it stays off with no cost.
+            rerank_shadow: (rerank)
+                .then(memkeeper_embed::shadow_reranker_from_env)
+                .flatten()
+                .and_then(ShadowRerankWorker::start),
         }
     }
 
@@ -599,7 +668,13 @@ impl SemanticModels {
             embed: None,
             rerank: None,
             colbert: None,
+            rerank_shadow: None,
         }
+    }
+
+    /// Whether a shadow reranker is loaded and active.
+    fn shadow_rerank_active(&self) -> bool {
+        self.rerank_shadow.is_some()
     }
 
     /// Whether the embedder actually loaded. False means the model files were
@@ -649,6 +724,10 @@ impl SemanticModels {
     #[cfg(test)]
     const fn for_test() -> Self {
         Self
+    }
+
+    const fn shadow_rerank_active(&self) -> bool {
+        false
     }
 }
 
@@ -1465,6 +1544,98 @@ fn rerank_candidates_from_pool(
 }
 
 #[cfg(feature = "embed")]
+fn process_shadow_rerank(reranker: &mut dyn memkeeper_embed::Reranker, job: ShadowRerankJob) {
+    let shadow_model_id = reranker.model_id().to_string();
+    let doc_refs: Vec<&str> = job.documents.iter().map(String::as_str).collect();
+    let raw = match reranker.rerank(&job.query, &doc_refs) {
+        Ok(scores) => scores,
+        Err(error) => {
+            eprintln!("[memkeeper] shadow rerank failed: {error}");
+            return;
+        }
+    };
+    if raw.len() != job.documents.len() {
+        eprintln!(
+            "[memkeeper] shadow reranker returned {} scores for {} texts -- skipping shadow log",
+            raw.len(),
+            job.documents.len()
+        );
+        return;
+    }
+    let (content_scores, summary_scores) = raw.split_at(job.candidates.len());
+    let shadow_scores = max_combine_rerank_scores(content_scores, summary_scores, &job.summary_idx);
+    if shadow_scores.len() != job.candidates.len() {
+        eprintln!(
+            "[memkeeper] shadow reranker produced {} combined scores for {} candidates -- skipping shadow log",
+            shadow_scores.len(),
+            job.candidates.len()
+        );
+        return;
+    }
+    let prod_ranks = memkeeper_store::rerank_candidate_ranks(&job.candidates);
+    let mut shadow_candidates = job.candidates.clone();
+    for (candidate, score) in shadow_candidates.iter_mut().zip(&shadow_scores) {
+        candidate.rerank_score = *score;
+    }
+    let shadow_ranks = memkeeper_store::rerank_candidate_ranks(&shadow_candidates);
+    let rows: Vec<memkeeper_store::ShadowRerankRow> = job
+        .candidates
+        .iter()
+        .enumerate()
+        .map(|(index, candidate)| memkeeper_store::ShadowRerankRow {
+            memory_id: candidate.memory_id.clone(),
+            prod_rank: prod_ranks[index],
+            prod_score: candidate.rerank_score,
+            shadow_rank: shadow_ranks[index],
+            shadow_score: shadow_scores[index],
+        })
+        .collect();
+    let batch = memkeeper_store::ShadowRerankBatch {
+        query: Some(job.query),
+        prod_model_id: Some(job.prod_model_id),
+        shadow_model_id: Some(shadow_model_id),
+        rows,
+    };
+    if let Err(error) = memkeeper_store::record_reranker_shadow(&job.store, &batch) {
+        eprintln!("[memkeeper] shadow rerank log write failed: {error}");
+    }
+}
+
+#[cfg(feature = "embed")]
+fn queue_shadow_rerank(models: &SemanticModels, job: ShadowRerankJob) {
+    if let Some(worker) = models.rerank_shadow.as_ref() {
+        worker.submit(job);
+    }
+}
+
+#[cfg(feature = "embed")]
+fn apply_cosine_gate_without_reranker(
+    store: &Path,
+    request: &PackRequest,
+    cosine_gate: f64,
+    expansion: PackExpansionOptions,
+    report: &mut PackReport,
+) {
+    if cosine_gate <= 0.0 {
+        return;
+    }
+    let pool_width = request.rerank_candidates.max(request.max_memories);
+    let mut pool_request = request.clone();
+    pool_request.max_memories = pool_width;
+    pool_request.min_score = 0.0;
+    pool_request.rerank_candidates = 0;
+    match memkeeper_store::build_pack_pool_with_expansion(store, &pool_request, expansion) {
+        Ok(pool) => {
+            let cos_top = pool.iter().map(|item| item.score).fold(f64::MIN, f64::max);
+            if memkeeper_store::pack_blocked_by_cosine_gate(cos_top, cosine_gate) {
+                *report = memkeeper_store::empty_pack(request);
+            }
+        }
+        Err(error) => eprintln!("[memkeeper] cosine gate pool build failed: {error}"),
+    }
+}
+
+#[cfg(feature = "embed")]
 fn maybe_rerank_pack_report(
     store: &Path,
     request: &PackRequest,
@@ -1486,22 +1657,7 @@ fn maybe_rerank_pack_report(
     let Some(reranker) = semantic_models.rerank.as_ref() else {
         // No cross-encoder available: when a gate is configured, still suppress
         // off-topic injection using the embedding's top retrieval score alone.
-        if cosine_gate > 0.0 {
-            let pool_width = request.rerank_candidates.max(request.max_memories);
-            let mut pool_request = request.clone();
-            pool_request.max_memories = pool_width;
-            pool_request.min_score = 0.0;
-            pool_request.rerank_candidates = 0;
-            match memkeeper_store::build_pack_pool_with_expansion(store, &pool_request, expansion) {
-                Ok(pool) => {
-                    let cos_top = pool.iter().map(|item| item.score).fold(f64::MIN, f64::max);
-                    if memkeeper_store::pack_blocked_by_cosine_gate(cos_top, cosine_gate) {
-                        *report = memkeeper_store::empty_pack(request);
-                    }
-                }
-                Err(error) => eprintln!("[memkeeper] cosine gate pool build failed: {error}"),
-            }
-        }
+        apply_cosine_gate_without_reranker(store, request, cosine_gate, expansion, report);
         return;
     };
     let query = request.queries.first().map_or("", String::as_str);
@@ -1545,9 +1701,9 @@ fn maybe_rerank_pack_report(
             doc_refs.push(rerank_doc(summary, doc_limit));
         }
     }
-    let scores = match reranker.lock() {
+    let (prod_model_id, scores) = match reranker.lock() {
         Ok(mut reranker) => match reranker.rerank(query, &doc_refs) {
-            Ok(scores) => scores,
+            Ok(scores) => (reranker.model_id().to_string(), scores),
             Err(e) => {
                 eprintln!("[memkeeper] rerank failed: {e}");
                 return;
@@ -1568,6 +1724,12 @@ fn maybe_rerank_pack_report(
     }
     let (content_scores, summary_scores) = scores.split_at(pool.candidates.len());
     let scores = max_combine_rerank_scores(content_scores, summary_scores, &summary_idx);
+    let shadow_documents = semantic_models.rerank_shadow.as_ref().map(|_| {
+        doc_refs
+            .iter()
+            .map(|document| (*document).to_string())
+            .collect::<Vec<_>>()
+    });
 
     // Hand the scored candidates to the store's pure pack-assembly policy: gate
     // on cos_top / cross-encoder confidence, order by rerank score, then apply
@@ -1581,6 +1743,21 @@ fn maybe_rerank_pack_report(
         expansion.graph_rerank_slots,
         expansion.graph_activation_floor,
     );
+
+    // Queue only after assembly; bounded `try_send` cannot delay the response.
+    if let Some(documents) = shadow_documents {
+        queue_shadow_rerank(
+            semantic_models,
+            ShadowRerankJob {
+                store: store.to_path_buf(),
+                query: query.to_string(),
+                documents,
+                summary_idx,
+                prod_model_id,
+                candidates,
+            },
+        );
+    }
 }
 
 #[cfg(not(feature = "embed"))]

@@ -325,6 +325,65 @@ fn apply_rerank_colbert_guards(models: &SemanticModels, require_semantic: bool) 
     Ok(())
 }
 
+/// Posture of the opt-in shadow reranker at startup.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum ShadowRerankGuard {
+    /// Shadow reranker loaded — it scores every pack for divergence logging.
+    Active,
+    /// Configured (or required) but not loaded, with `MEMKEEPER_REQUIRE_SHADOW_RERANK`
+    /// set — refuse to start (fail closed).
+    Refuse,
+    /// Configured but not loaded, no hard requirement — warn and disable shadowing.
+    Misconfigured,
+    /// Not configured — shadow is off by design, stay silent.
+    Off,
+}
+
+/// Pure decision for the shadow-reranker posture. Shadow is auxiliary, so it only
+/// refuses under the explicit require flag; an unconfigured shadow is silent.
+pub(crate) fn shadow_rerank_guard(
+    active: bool,
+    configured: bool,
+    require: bool,
+) -> ShadowRerankGuard {
+    if active {
+        ShadowRerankGuard::Active
+    } else if require {
+        ShadowRerankGuard::Refuse
+    } else if configured {
+        ShadowRerankGuard::Misconfigured
+    } else {
+        ShadowRerankGuard::Off
+    }
+}
+
+/// Fail-visible guard for the opt-in shadow reranker. Warns when configured but
+/// unloaded; refuses only under `MEMKEEPER_REQUIRE_SHADOW_RERANK`. Returns `Err(2)`
+/// on refusal.
+fn apply_shadow_rerank_guard(models: &SemanticModels) -> Result<(), i32> {
+    let configured = std::env::var_os("MEMKEEPER_RERANK_SHADOW_MODEL_DIR").is_some();
+    let require = env_flag_enabled("MEMKEEPER_REQUIRE_SHADOW_RERANK");
+    match shadow_rerank_guard(models.shadow_rerank_active(), configured, require) {
+        ShadowRerankGuard::Active => eprintln!(
+            "[memkeeper] shadow reranker active: scoring every pack for divergence logging \
+             (production ordering unchanged)"
+        ),
+        ShadowRerankGuard::Refuse => {
+            eprintln!(
+                "[memkeeper] MEMKEEPER_REQUIRE_SHADOW_RERANK=1 but the shadow reranker is not active; \
+                 refusing to start (set MEMKEEPER_RERANK_SHADOW_MODEL_DIR to a valid model dir)"
+            );
+            return Err(2);
+        }
+        ShadowRerankGuard::Misconfigured => eprintln!(
+            "[memkeeper] warning: MEMKEEPER_RERANK_SHADOW_MODEL_DIR is set but the shadow reranker \
+             did not load; shadow logging disabled"
+        ),
+        ShadowRerankGuard::Off => {}
+    }
+    Ok(())
+}
+
 /// Whether the named env var is set truthy (`1`/`true`). Single source of truth
 /// for boolean opt-in/opt-out flags across the CLI.
 pub(crate) fn env_flag_enabled(name: &str) -> bool {
@@ -372,6 +431,10 @@ pub(crate) fn serve_semantic_models_or_refuse() -> Result<SemanticModels, i32> {
     #[cfg(feature = "embed")]
     apply_rerank_colbert_guards(&semantic_models, require_semantic)?;
 
+    // Fourth guard: the opt-in shadow reranker. Warn if configured-but-unloaded;
+    // refuse only under MEMKEEPER_REQUIRE_SHADOW_RERANK.
+    apply_shadow_rerank_guard(&semantic_models)?;
+
     Ok(semantic_models)
 }
 
@@ -415,6 +478,12 @@ pub(crate) fn run_serve(args: &[String]) -> i32 {
     // off. Make those loud; ColBERT refuses under MEMKEEPER_REQUIRE_SEMANTIC.
     #[cfg(feature = "embed")]
     if let Err(code) = apply_rerank_colbert_guards(&semantic_models, require_semantic) {
+        return code;
+    }
+
+    // Fourth guard: the opt-in shadow reranker (warn if configured-but-unloaded;
+    // refuse only under MEMKEEPER_REQUIRE_SHADOW_RERANK).
+    if let Err(code) = apply_shadow_rerank_guard(&semantic_models) {
         return code;
     }
 
@@ -1166,6 +1235,14 @@ pub(crate) fn stats_payload_options(input: &str) -> Result<(bool, bool), CliErro
 mod tests {
     use super::*;
 
+    #[test]
+    fn shadow_require_mode_refuses_when_this_build_cannot_load_shadow() {
+        assert_eq!(
+            shadow_rerank_guard(false, true, true),
+            ShadowRerankGuard::Refuse
+        );
+    }
+
     #[cfg(feature = "embed")]
     #[test]
     fn runtime_guard_serves_when_embedder_loaded() {
@@ -1183,6 +1260,53 @@ mod tests {
     #[test]
     fn runtime_guard_degrades_loud_when_models_absent_and_not_required() {
         assert_eq!(runtime_semantic_guard(false, false), RuntimeGuard::Degraded);
+    }
+
+    #[cfg(feature = "embed")]
+    #[test]
+    fn shadow_guard_active_when_loaded() {
+        // Loaded shadow model logs and proceeds regardless of the require flag.
+        assert_eq!(
+            shadow_rerank_guard(true, true, true),
+            ShadowRerankGuard::Active
+        );
+        assert_eq!(
+            shadow_rerank_guard(true, false, false),
+            ShadowRerankGuard::Active
+        );
+    }
+
+    #[cfg(feature = "embed")]
+    #[test]
+    fn shadow_guard_refuses_when_required_but_inactive() {
+        // Fail-closed: operator required shadow but it did not load.
+        assert_eq!(
+            shadow_rerank_guard(false, true, true),
+            ShadowRerankGuard::Refuse
+        );
+        assert_eq!(
+            shadow_rerank_guard(false, false, true),
+            ShadowRerankGuard::Refuse
+        );
+    }
+
+    #[cfg(feature = "embed")]
+    #[test]
+    fn shadow_guard_warns_when_configured_but_inactive() {
+        assert_eq!(
+            shadow_rerank_guard(false, true, false),
+            ShadowRerankGuard::Misconfigured
+        );
+    }
+
+    #[cfg(feature = "embed")]
+    #[test]
+    fn shadow_guard_silent_when_unconfigured() {
+        // Shadow off by design: no configuration, no requirement -> stay quiet.
+        assert_eq!(
+            shadow_rerank_guard(false, false, false),
+            ShadowRerankGuard::Off
+        );
     }
 
     #[test]

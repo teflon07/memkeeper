@@ -49,8 +49,8 @@ mod archive_spec;
 pub(crate) use archive_spec::{ExportTableSpec, EXPORT_TABLES};
 
 mod recall;
-pub use recall::record_recall;
 pub(crate) use recall::{ensure_recall_events_optional_columns, RECALL_EVENTS_DDL};
+pub use recall::{record_recall, record_reranker_shadow};
 
 mod stats;
 pub(crate) use stats::space_names;
@@ -653,6 +653,37 @@ pub struct RecallLogReport {
     pub recorded: usize,
     /// Memories whose `accessed_at` was updated.
     pub touched: usize,
+}
+
+/// One candidate's production-vs-shadow reranker comparison for a single pack.
+/// Ranks are 1-based positions in each model's ordering of the same candidate set.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ShadowRerankRow {
+    /// Candidate memory id (resolves back to text in this same store for offline judging).
+    pub memory_id: String,
+    /// 1-based rank under the authoritative production reranker.
+    pub prod_rank: usize,
+    /// Production reranker relevance score.
+    pub prod_score: f32,
+    /// 1-based rank under the shadow reranker.
+    pub shadow_rank: usize,
+    /// Shadow reranker relevance score.
+    pub shadow_score: f32,
+}
+
+/// One pack's shadow-reranker telemetry: the production and shadow models scored
+/// an identical candidate set. Production stays authoritative; this only records
+/// where the shadow model would have ordered differently.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ShadowRerankBatch {
+    /// The pack query the candidates were scored against.
+    pub query: Option<String>,
+    /// Authoritative reranker model id.
+    pub prod_model_id: Option<String>,
+    /// Shadow reranker model id.
+    pub shadow_model_id: Option<String>,
+    /// Per-candidate comparison rows.
+    pub rows: Vec<ShadowRerankRow>,
 }
 
 /// Accepted candidate provenance/source types, lowest-trust last.
@@ -1895,6 +1926,34 @@ pub struct RerankCandidate {
     pub graph_pulled: bool,
 }
 
+fn compare_rerank_candidates(a: &RerankCandidate, b: &RerankCandidate) -> std::cmp::Ordering {
+    b.rerank_score
+        .partial_cmp(&a.rerank_score)
+        .unwrap_or(std::cmp::Ordering::Equal)
+        // Activation never overrides a cross-encoder score. It only makes
+        // exact rerank ties deterministic and prefers the memory with more
+        // graph support when both candidates are otherwise equivalent.
+        .then_with(|| {
+            b.activation
+                .partial_cmp(&a.activation)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
+        .then_with(|| a.memory_id.cmp(&b.memory_id))
+}
+
+/// Return each candidate's 1-based position under the authoritative pack
+/// ordering. The returned vector stays aligned with the input slice.
+#[must_use]
+pub fn rerank_candidate_ranks(candidates: &[RerankCandidate]) -> Vec<usize> {
+    let mut order: Vec<usize> = (0..candidates.len()).collect();
+    order.sort_by(|&a, &b| compare_rerank_candidates(&candidates[a], &candidates[b]));
+    let mut ranks = vec![0_usize; candidates.len()];
+    for (position, &index) in order.iter().enumerate() {
+        ranks[index] = position + 1;
+    }
+    ranks
+}
+
 /// Build an empty pack (no injection) that preserves the request's title/format.
 #[must_use]
 pub fn empty_pack(request: &PackRequest) -> PackReport {
@@ -2071,20 +2130,7 @@ pub fn assemble_reranked_pack_with_graph_slots(
         .fold(f32::MIN, f32::max);
 
     let mut ordered: Vec<&RerankCandidate> = candidates.iter().collect();
-    ordered.sort_by(|a, b| {
-        b.rerank_score
-            .partial_cmp(&a.rerank_score)
-            .unwrap_or(std::cmp::Ordering::Equal)
-            // Activation never overrides a cross-encoder score. It only makes
-            // exact rerank ties deterministic and prefers the memory with more
-            // graph support when both candidates are otherwise equivalent.
-            .then_with(|| {
-                b.activation
-                    .partial_cmp(&a.activation)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            })
-            .then_with(|| a.memory_id.cmp(&b.memory_id))
-    });
+    ordered.sort_by(|a, b| compare_rerank_candidates(a, b));
 
     let per_item_floor = if cosine_gate > 0.0 {
         let emit = cos_top >= cosine_gate || f64::from(rr_top) >= request.min_score;

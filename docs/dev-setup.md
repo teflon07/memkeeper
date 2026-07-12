@@ -31,6 +31,22 @@ cargo clippy --workspace --all-targets -- -D warnings
 npm run check --prefix adapters/pi-extension
 ```
 
+With the production and xsmall INT8 reranker artifacts under `models/`, run the
+model-backed shadow checks explicitly:
+
+```bash
+cargo test -p memkeeper-embed --features local reranker_submits_declared_token_type_ids_to_onnx -- --ignored
+cargo test -p memkeeper-embed --features local xsmall_int8_reranker_loads_and_scores -- --ignored
+cargo test -p memkeeper-cli shadow_require_mode_refuses_invalid_model_in_real_server -- --ignored
+cargo test -p memkeeper-cli shadow_daemon_pack_matches_baseline_and_writes_comparison -- --ignored
+```
+
+The first command executes a real ONNX graph that declares `token_type_ids`.
+The second proves the deployed xsmall graph loads and scores. The third proves
+that a real server process refuses an invalid required shadow. The fourth starts
+the real stdio serving path, proves shadow mode leaves the authoritative pack
+bytes unchanged, and waits for the asynchronous telemetry batch.
+
 ## CLI smoke walk
 
 A full command walk against a throwaway store. `memkeeper` resolves the store from

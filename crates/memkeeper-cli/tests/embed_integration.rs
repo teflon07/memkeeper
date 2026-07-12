@@ -2,8 +2,10 @@
 #![cfg(feature = "semantic")]
 #![allow(missing_docs)]
 
+use std::io::{BufRead, Write};
 use std::path::PathBuf;
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 fn workspace_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -26,6 +28,129 @@ fn embed_model_dir() -> PathBuf {
 
 fn rerank_model_dir() -> PathBuf {
     workspace_root().join("models/mxbai-rerank-base")
+}
+
+fn shadow_rerank_model_dir() -> PathBuf {
+    workspace_root().join("models/mxbai-xsmall-int8")
+}
+
+#[test]
+#[ignore = "requires production model files and built binary"]
+fn shadow_require_mode_refuses_invalid_model_in_real_server() {
+    let output = Command::new(memkeeper_bin())
+        .env("MEMKEEPER_EMBED_MODEL_DIR", embed_model_dir())
+        .env("MEMKEEPER_RERANK_MODEL_DIR", rerank_model_dir())
+        .env(
+            "MEMKEEPER_RERANK_SHADOW_MODEL_DIR",
+            "/definitely/missing/shadow-model",
+        )
+        .env("MEMKEEPER_REQUIRE_SHADOW_RERANK", "1")
+        .args(["serve", "--stdio"])
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2), "output: {output:?}");
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("refusing to start"),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+#[ignore = "requires production and xsmall INT8 reranker model files; run with -- --ignored"]
+fn shadow_daemon_pack_matches_baseline_and_writes_comparison() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join("store.sqlite");
+    let init = Command::new(memkeeper_bin())
+        .args(["init", "--store", store.to_str().unwrap(), "--json"])
+        .output()
+        .unwrap();
+    assert!(init.status.success(), "init failed: {init:?}");
+
+    let embedding = vec![0.1_f32; 1024];
+    remember_with_embedding(&store, "alpha memory about SQLite", &embedding);
+    remember_with_embedding(&store, "beta memory about weather", &embedding);
+    let payload = serde_json::json!({
+        "title": "shadow integration",
+        "queries": ["memory"],
+        "query_embeddings": [embedding],
+        "max_memories": 2,
+        "max_chars": 1000,
+        "rerank_candidates": 2,
+        "min_score": 0.0
+    });
+    let baseline = Command::new(memkeeper_bin())
+        .env("MEMKEEPER_EMBED_MODEL_DIR", embed_model_dir())
+        .env("MEMKEEPER_RERANK_MODEL_DIR", rerank_model_dir())
+        .env_remove("MEMKEEPER_RERANK_SHADOW_MODEL_DIR")
+        .args([
+            "pack",
+            "--store",
+            store.to_str().unwrap(),
+            "--json",
+            &payload.to_string(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        baseline.status.success(),
+        "baseline pack failed: {}",
+        String::from_utf8_lossy(&baseline.stderr)
+    );
+    let baseline_json: serde_json::Value = serde_json::from_slice(&baseline.stdout).unwrap();
+
+    let mut daemon = Command::new(memkeeper_bin())
+        .env("MEMKEEPER_EMBED_MODEL_DIR", embed_model_dir())
+        .env("MEMKEEPER_RERANK_MODEL_DIR", rerank_model_dir())
+        .env(
+            "MEMKEEPER_RERANK_SHADOW_MODEL_DIR",
+            shadow_rerank_model_dir(),
+        )
+        .env("MEMKEEPER_REQUIRE_SHADOW_RERANK", "1")
+        .args(["serve", "--stdio"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let request = serde_json::json!({
+        "request_id": "shadow-integration",
+        "command": "pack",
+        "store_path": store,
+        "payload": payload
+    });
+    writeln!(daemon.stdin.as_mut().unwrap(), "{request}").unwrap();
+    let mut response = String::new();
+    std::io::BufReader::new(daemon.stdout.as_mut().unwrap())
+        .read_line(&mut response)
+        .unwrap();
+    let shadow_json: serde_json::Value = serde_json::from_str(&response).unwrap();
+    let baseline_pack = serde_json::to_string(&baseline_json["result"]["pack"]).unwrap();
+    let shadow_pack = serde_json::to_string(&shadow_json["result"]["pack"]).unwrap();
+    assert_eq!(
+        baseline_pack.as_bytes(),
+        shadow_pack.as_bytes(),
+        "shadow mode must not change the authoritative pack bytes"
+    );
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let rows = loop {
+        let rows = rusqlite::Connection::open(&store)
+            .and_then(|connection| {
+                connection.query_row("SELECT COUNT(*) FROM reranker_shadow_events", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+            })
+            .unwrap_or(0);
+        if rows == 2 || Instant::now() >= deadline {
+            break rows;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    };
+    let _ = daemon.kill();
+    let _ = daemon.wait();
+    assert_eq!(rows, 2, "one telemetry row per production candidate");
 }
 
 #[test]

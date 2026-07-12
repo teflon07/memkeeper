@@ -7,7 +7,7 @@ use rusqlite::{params, Transaction};
 
 use crate::{
     limit_i64, now_timestamp, open_initialized_write, Error, RecallLogReport, RecallLogRequest,
-    Result, MAX_METADATA_VALUE_CHARS, MAX_RECALL_EVENTS, MAX_SEARCH_QUERY_CHARS,
+    Result, ShadowRerankBatch, MAX_METADATA_VALUE_CHARS, MAX_RECALL_EVENTS, MAX_SEARCH_QUERY_CHARS,
 };
 
 /// `recall_events` is engine-owned telemetry. It is created lazily (not part
@@ -32,6 +32,79 @@ CREATE TABLE IF NOT EXISTS recall_events (
 CREATE INDEX IF NOT EXISTS idx_recall_events_memory ON recall_events(memory_id);
 CREATE INDEX IF NOT EXISTS idx_recall_events_ts ON recall_events(ts);
 ";
+
+/// `reranker_shadow_events` records production-vs-shadow reranker comparisons.
+/// Like `recall_events` it is engine-owned telemetry: created lazily and
+/// excluded from export/import (local operational data, not memory content).
+pub(crate) const RERANKER_SHADOW_DDL: &str = "
+CREATE TABLE IF NOT EXISTS reranker_shadow_events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  batch INTEGER NOT NULL,
+  ts TEXT NOT NULL,
+  query TEXT,
+  prod_model_id TEXT,
+  shadow_model_id TEXT,
+  memory_id TEXT NOT NULL,
+  prod_rank INTEGER,
+  prod_score REAL,
+  shadow_rank INTEGER,
+  shadow_score REAL
+);
+CREATE INDEX IF NOT EXISTS idx_reranker_shadow_batch ON reranker_shadow_events(batch);
+CREATE INDEX IF NOT EXISTS idx_reranker_shadow_ts ON reranker_shadow_events(ts);
+";
+
+/// Record one pack's production-vs-shadow reranker comparison. Every row shares a
+/// monotonic `batch` id so offline analysis can group a single pack's candidates.
+/// Returns the number of rows written (0 when the batch is empty).
+///
+/// # Errors
+///
+/// Returns an error if the store is missing/incompatible or `SQLite` rejects the
+/// transaction. Callers on the retrieval hot path should treat failures as
+/// non-fatal (shadow telemetry must never break production retrieval).
+pub fn record_reranker_shadow(path: impl AsRef<Path>, batch: &ShadowRerankBatch) -> Result<usize> {
+    if batch.rows.is_empty() {
+        return Ok(0);
+    }
+    let mut connection = open_initialized_write(path.as_ref())?;
+    let transaction = connection.transaction()?;
+    transaction.execute_batch(RERANKER_SHADOW_DDL)?;
+    let now = now_timestamp(&transaction)?;
+    // Next batch id under the write lock: unique and monotonic without an external
+    // dependency, so all rows from this call group cleanly for offline analysis.
+    let batch_id: i64 = transaction.query_row(
+        "SELECT COALESCE(MAX(batch), 0) + 1 FROM reranker_shadow_events",
+        [],
+        |row| row.get(0),
+    )?;
+    let mut recorded = 0_usize;
+    {
+        let mut insert = transaction.prepare_cached(
+            "INSERT INTO reranker_shadow_events
+               (batch, ts, query, prod_model_id, shadow_model_id, memory_id,
+                prod_rank, prod_score, shadow_rank, shadow_score)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+        )?;
+        for row in &batch.rows {
+            insert.execute(params![
+                batch_id,
+                &now,
+                batch.query.as_deref(),
+                batch.prod_model_id.as_deref(),
+                batch.shadow_model_id.as_deref(),
+                &row.memory_id,
+                limit_i64(row.prod_rank)?,
+                f64::from(row.prod_score),
+                limit_i64(row.shadow_rank)?,
+                f64::from(row.shadow_score),
+            ])?;
+            recorded += 1;
+        }
+    }
+    transaction.commit()?;
+    Ok(recorded)
+}
 
 fn ensure_recall_events_column(
     transaction: &Transaction<'_>,

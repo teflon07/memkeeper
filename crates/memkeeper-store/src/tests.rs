@@ -12,23 +12,25 @@ use super::{
     load_token_embeddings, load_token_embeddings_cached, mark_source_episodes_extracted,
     maxsim_score, memory_history, merge_entity, normalize_utc_timestamp, now_julian_day,
     pack_blocked_by_cosine_gate, promotion_candidates, prune_documents, rebuild_fts,
-    recency_score_for_silo, record_recall, reject_candidate, relationship_confidence_from_evidence,
-    remember_memory, schema_mentions_required_objects, search_documents, search_entities,
-    search_memories, sha256_hex, sidecar_path, source_tier_score, store_stats,
-    store_stats_with_health, submit_candidate, upsert_entity, upsert_memory_token_embedding,
-    upsert_relationship, verify_memory, BackupRequest, BatchSearchQuery, BatchSearchRequest,
-    CandidateApproveRequest, CandidateListRequest, CandidateRejectRequest, CandidateSubmitRequest,
+    recency_score_for_silo, record_recall, record_reranker_shadow, reject_candidate,
+    relationship_confidence_from_evidence, remember_memory, rerank_candidate_ranks,
+    schema_mentions_required_objects, search_documents, search_entities, search_memories,
+    sha256_hex, sidecar_path, source_tier_score, store_stats, store_stats_with_health,
+    submit_candidate, upsert_entity, upsert_memory_token_embedding, upsert_relationship,
+    verify_memory, BackupRequest, BatchSearchQuery, BatchSearchRequest, CandidateApproveRequest,
+    CandidateListRequest, CandidateRejectRequest, CandidateSubmitRequest,
     DocumentDuplicatesRequest, DocumentGetRequest, DocumentPruneRequest, DocumentSearchRequest,
     DreamRequest, EntityMergeRequest, EntitySearchRequest, EntityUpsertRequest, Error,
     ExportRequest, ForgetRequest, GetOptions, GraphContextRequest, GraphNeighborsRequest,
     HistoryOptions, ImportRequest, IngestRequest, MarkExtractedRequest, MemoryListRequest,
     PackExpansionOptions, PackRequest, PromotionCandidatesRequest, RecallEvent, RecallLogRequest,
     RelationshipUpsertRequest, RememberRequest, RerankCandidate, RerankPool, SearchFilters,
-    SearchRequest, SearchResult, SiloListRequest, SpaceCreateRequest, VerifyRequest,
-    DEFAULT_PROMOTE_RANK_CAP, DEFAULT_PROMOTE_SCORE_FLOOR, DEFAULT_PROMOTE_THRESHOLD,
-    DOCUMENTS_SPACE, MAX_CONTENT_CHARS, MAX_HISTORY_LIMIT, MAX_MEMORY_LINKS,
-    MAX_METADATA_VALUE_CHARS, MAX_SEARCH_LIMIT, MAX_TIMESTAMP_CHARS, PROJECT_STORE_RELATIVE_PATH,
-    SCHEMA_SQL, SCHEMA_VERSION, USER_STORE_PATH_HINT, VOLATILE_MAX_RECENCY_SCORE,
+    SearchRequest, SearchResult, ShadowRerankBatch, ShadowRerankRow, SiloListRequest,
+    SpaceCreateRequest, VerifyRequest, DEFAULT_PROMOTE_RANK_CAP, DEFAULT_PROMOTE_SCORE_FLOOR,
+    DEFAULT_PROMOTE_THRESHOLD, DOCUMENTS_SPACE, MAX_CONTENT_CHARS, MAX_HISTORY_LIMIT,
+    MAX_MEMORY_LINKS, MAX_METADATA_VALUE_CHARS, MAX_SEARCH_LIMIT, MAX_TIMESTAMP_CHARS,
+    PROJECT_STORE_RELATIVE_PATH, SCHEMA_SQL, SCHEMA_VERSION, USER_STORE_PATH_HINT,
+    VOLATILE_MAX_RECENCY_SCORE,
 };
 use memkeeper_core::DEFAULT_SPACE;
 use rusqlite::{params, Connection};
@@ -8361,6 +8363,116 @@ fn hybrid_rerank_pool_late_interaction_splits_summary_from_content() {
         "flag-off candidates must carry no summary"
     );
     cleanup_store(&path);
+}
+
+#[test]
+fn record_reranker_shadow_writes_grouped_batches() {
+    let path = temp_store_path("record_reranker_shadow");
+    cleanup_store(&path);
+    init_store(&path).expect("init succeeds");
+
+    let batch = ShadowRerankBatch {
+        query: Some("why did we reject zep".to_string()),
+        prod_model_id: Some("mxbai-rerank-base".to_string()),
+        shadow_model_id: Some("mxbai-xsmall-int8".to_string()),
+        rows: vec![
+            ShadowRerankRow {
+                memory_id: "m1".to_string(),
+                prod_rank: 1,
+                prod_score: 0.9,
+                shadow_rank: 2,
+                shadow_score: 0.7,
+            },
+            ShadowRerankRow {
+                memory_id: "m2".to_string(),
+                prod_rank: 2,
+                prod_score: 0.6,
+                shadow_rank: 1,
+                shadow_score: 0.8,
+            },
+        ],
+    };
+    assert_eq!(
+        record_reranker_shadow(&path, &batch).expect("first shadow write"),
+        2
+    );
+    assert_eq!(
+        record_reranker_shadow(&path, &batch).expect("second shadow write"),
+        2
+    );
+
+    let conn = Connection::open(&path).unwrap();
+    let rows: i64 = conn
+        .query_row("SELECT COUNT(*) FROM reranker_shadow_events", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(rows, 4, "all rows from both calls persisted");
+    let batches: i64 = conn
+        .query_row(
+            "SELECT COUNT(DISTINCT batch) FROM reranker_shadow_events",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        batches, 2,
+        "each call groups under its own monotonic batch id"
+    );
+
+    // An empty batch is a no-op, not an error.
+    let empty = record_reranker_shadow(
+        &path,
+        &ShadowRerankBatch {
+            query: None,
+            prod_model_id: None,
+            shadow_model_id: None,
+            rows: vec![],
+        },
+    )
+    .expect("empty batch ok");
+    assert_eq!(empty, 0);
+
+    cleanup_store(&path);
+}
+
+#[test]
+fn rerank_candidate_ranks_match_authoritative_tie_breakers() {
+    let candidates = vec![
+        RerankCandidate {
+            memory_id: "memory-c".to_string(),
+            content: "third by id".to_string(),
+            rerank_score: f32::INFINITY,
+            activation: Some(0.5),
+            graph_pulled: false,
+        },
+        RerankCandidate {
+            memory_id: "memory-b".to_string(),
+            content: "first by activation".to_string(),
+            rerank_score: f32::INFINITY,
+            activation: Some(0.9),
+            graph_pulled: false,
+        },
+        RerankCandidate {
+            memory_id: "memory-a".to_string(),
+            content: "second by id".to_string(),
+            rerank_score: f32::INFINITY,
+            activation: Some(0.5),
+            graph_pulled: false,
+        },
+        RerankCandidate {
+            memory_id: "memory-z".to_string(),
+            content: "last by score".to_string(),
+            rerank_score: f32::NEG_INFINITY,
+            activation: Some(1.0),
+            graph_pulled: false,
+        },
+    ];
+
+    let production_ranks = rerank_candidate_ranks(&candidates);
+    assert_eq!(production_ranks, vec![3, 1, 2, 4]);
+    let shadow_ranks = rerank_candidate_ranks(&candidates.clone());
+    assert_eq!(shadow_ranks, production_ranks);
 }
 
 #[test]

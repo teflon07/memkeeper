@@ -147,6 +147,23 @@ Notes:
   empty pack.
 - `truncated` is `true` when memories or text were dropped to honor limits.
 
+## Shadow reranker telemetry
+
+Set `MEMKEEPER_RERANK_SHADOW_MODEL_DIR` on a long-lived server to score each
+production rerank candidate set with a second local model. Shadow scoring runs
+after the authoritative pack is assembled on a bounded background worker, so
+it cannot alter or delay the served pack. Failures and queue saturation are
+logged and the production response continues.
+
+Set `MEMKEEPER_REQUIRE_SHADOW_RERANK=1` when the server must refuse startup unless
+the shadow model loaded and its worker started. This requirement is enforced in
+semantic and lexical-only builds.
+
+Comparisons are stored in the local `reranker_shadow_events` table, one row per
+candidate and one batch per pack. Rows include the query, production and shadow
+model ids, scores, and ranks. The table is operational telemetry and is excluded
+from export/import.
+
 ## Supersession modes
 
 `remember` takes an optional `mode` that governs how a write resolves against
