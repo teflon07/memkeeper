@@ -3,7 +3,9 @@
 #[cfg(feature = "local")]
 use std::path::Path;
 
-use anyhow::{Context, Result};
+use anyhow::Context;
+#[cfg(feature = "local")]
+use anyhow::Result;
 #[cfg(feature = "local")]
 use ndarray::{Array2, ArrayViewD};
 #[cfg(feature = "local")]

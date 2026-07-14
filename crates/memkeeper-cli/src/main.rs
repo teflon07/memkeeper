@@ -726,6 +726,7 @@ impl SemanticModels {
         Self
     }
 
+    #[allow(clippy::unused_self)]
     const fn shadow_rerank_active(&self) -> bool {
         false
     }
