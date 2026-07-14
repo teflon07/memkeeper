@@ -41,7 +41,7 @@ fn init_then_stats_returns_json_success() {
     let stats_stdout = String::from_utf8(stats.stdout).expect("valid utf8");
     assert!(stats_stdout.contains("\"ok\":true"));
     assert!(stats_stdout.contains("\"command\":\"stats\""));
-    assert!(stats_stdout.contains("\"schema_version\":5"));
+    assert!(stats_stdout.contains("\"schema_version\":6"));
     assert!(stats_stdout.contains("\"space_count\":1"));
     assert!(stats_stdout.contains("\"silo_count\":2"));
     assert!(stats_stdout.contains("\"memory_count\":0"));
@@ -508,6 +508,7 @@ fn assert_duplicate_remember_candidate(path: &Path) {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)]
 fn dream_expires_reindexes_and_reports_duplicates() {
     let path = temp_store_path("dream_expires_reindexes_and_reports_duplicates");
     cleanup_store(&path);
@@ -536,7 +537,10 @@ fn dream_expires_reindexes_and_reports_duplicates() {
     let expired_id = extract_json_string_after(&expired_stdout, "\"id\":\"");
 
     for content in ["duplicate cli dream", "duplicate cli dream"] {
-        let request = format!(r#"{{"content":{}}}"#, json_string(content));
+        let request = format!(
+            r#"{{"content":{},"derive_keys":false}}"#,
+            json_string(content)
+        );
         let remember = memkeeper_command()
             .args(["remember", "--store"])
             .arg(&path)

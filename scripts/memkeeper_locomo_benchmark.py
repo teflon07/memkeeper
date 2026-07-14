@@ -469,6 +469,44 @@ def sample_filters(sample_id: str, mode: str) -> dict[str, list[str]]:
     return {"entity_keys": [f"locomo:{sample_id}"]}
 
 
+def build_pack_payload(
+    qa: QAItem,
+    *,
+    max_memories: int,
+    max_chars: int,
+    query_mode: str,
+    sample_filter: str,
+    rerank_candidates: int = 0,
+    min_score: float = 0.0,
+    query_expansion: bool = False,
+    thread_expansion: bool = False,
+    max_query_variants: int = 8,
+    max_thread_seeds: int = 3,
+    max_thread_neighbors: int = 3,
+) -> dict[str, Any]:
+    """Build the shared request used by pack execution and candidate tracing."""
+    category = category_name(qa.category)
+    payload = {
+        "title": f"LoCoMo retrieval: {qa.qa_id}",
+        "queries": query_bundle(qa.question, category, query_mode),
+        "max_memories": max_memories,
+        "max_chars": max_chars,
+        "format": "markdown",
+        "min_score": min_score,
+        "query_expansion": query_expansion,
+        "thread_expansion": thread_expansion,
+        "max_query_variants": max_query_variants,
+        "max_thread_seeds": max_thread_seeds,
+        "max_thread_neighbors": max_thread_neighbors,
+    }
+    if rerank_candidates > 0:
+        payload["rerank_candidates"] = rerank_candidates
+    filters = sample_filters(qa.sample_id, sample_filter)
+    if filters:
+        payload["filters"] = filters
+    return payload
+
+
 def run_pack(
     binary: Path,
     store: Path,
@@ -479,25 +517,68 @@ def run_pack(
     query_mode: str,
     sample_filter: str,
     rerank_candidates: int = 0,
+    min_score: float = 0.0,
+    query_expansion: bool = False,
+    thread_expansion: bool = False,
+    max_query_variants: int = 8,
+    max_thread_seeds: int = 3,
+    max_thread_neighbors: int = 3,
 ) -> tuple[dict[str, Any], float]:
-    category = category_name(qa.category)
-    payload = {
-        "title": f"LoCoMo retrieval: {qa.qa_id}",
-        "queries": query_bundle(qa.question, category, query_mode),
-        "max_memories": max_memories,
-        "max_chars": max_chars,
-        "format": "markdown",
-    }
-    if rerank_candidates > 0:
-        payload["rerank_candidates"] = rerank_candidates
-    filters = sample_filters(qa.sample_id, sample_filter)
-    if filters:
-        payload["filters"] = filters
+    payload = build_pack_payload(
+        qa,
+        max_memories=max_memories,
+        max_chars=max_chars,
+        query_mode=query_mode,
+        sample_filter=sample_filter,
+        rerank_candidates=rerank_candidates,
+        min_score=min_score,
+        query_expansion=query_expansion,
+        thread_expansion=thread_expansion,
+        max_query_variants=max_query_variants,
+        max_thread_seeds=max_thread_seeds,
+        max_thread_neighbors=max_thread_neighbors,
+    )
     started = time.perf_counter()
     data = run_memkeeper(binary, store, "pack", payload)
     elapsed_ms = (time.perf_counter() - started) * 1000
     pack = (((data.get("result") or {}).get("pack")) or {}) if isinstance(data, dict) else {}
     return pack, elapsed_ms
+
+
+def run_pool_trace(
+    binary: Path,
+    store: Path,
+    qa: QAItem,
+    *,
+    max_memories: int,
+    max_chars: int,
+    query_mode: str,
+    sample_filter: str,
+    rerank_candidates: int = 0,
+    min_score: float = 0.0,
+    query_expansion: bool = False,
+    thread_expansion: bool = False,
+    max_query_variants: int = 8,
+    max_thread_seeds: int = 3,
+    max_thread_neighbors: int = 3,
+) -> dict[str, Any]:
+    """Return the ID-only pre-rerank pool for the exact pack request."""
+    payload = build_pack_payload(
+        qa,
+        max_memories=max_memories,
+        max_chars=max_chars,
+        query_mode=query_mode,
+        sample_filter=sample_filter,
+        rerank_candidates=rerank_candidates,
+        min_score=min_score,
+        query_expansion=query_expansion,
+        thread_expansion=thread_expansion,
+        max_query_variants=max_query_variants,
+        max_thread_seeds=max_thread_seeds,
+        max_thread_neighbors=max_thread_neighbors,
+    )
+    data = run_memkeeper(binary, store, "pool-trace", payload)
+    return (((data.get("result") or {}).get("pool_trace")) or {})
 
 
 def inspect_semantic(

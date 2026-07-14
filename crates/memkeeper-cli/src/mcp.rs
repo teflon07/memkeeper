@@ -676,6 +676,7 @@ pub(crate) fn build_serve_call(
                 "query_expansion",
                 "thread_expansion",
                 "graph_expansion",
+                "graph_within_entity_maxsim",
                 "max_query_variants",
                 "max_thread_seeds",
                 "max_thread_neighbors",
@@ -1060,6 +1061,7 @@ for factual corrections so the signal is captured explicitly rather than inferre
                 "query_expansion": { "type": "boolean", "description": "Default false. Deterministically add subqueries before retrieval." },
                 "thread_expansion": { "type": "boolean", "description": "Default false. Add same-entity/same-claim neighbors to the rerank pool." },
                 "graph_expansion": { "type": "boolean", "description": "Default false. Associative recall: graph-expand the rerank pool one hop from the top seeds so a relationship-reachable memory below the ANN/BM25 threshold can still be reranked (hybrid_assoc_v0)." },
+                "graph_within_entity_maxsim": { "type": "boolean", "description": "Default false. Experimental: select one memory per graph entity by first-query MaxSim; requires late-interaction tokens." },
                 "max_query_variants": { "type": "integer", "description": "Default engine maximum." },
                 "max_thread_seeds": { "type": "integer", "description": "Default 3." },
                 "max_thread_neighbors": { "type": "integer", "description": "Default 3." },
@@ -1218,6 +1220,28 @@ mod tests {
         assert_eq!(value["source"]["type"], json!("mcp"));
         assert_eq!(value["source"]["source_type"], json!("explicit-user"));
         assert_eq!(value["tags"], json!(["t"]));
+    }
+
+    #[test]
+    fn remember_mcp_does_not_expose_or_forward_retrieval_representation() {
+        let remember = tool_definitions()
+            .into_iter()
+            .find(|tool| tool["name"] == "remember")
+            .expect("remember tool");
+        assert!(remember["inputSchema"]["properties"]
+            .get("retrieval_representation")
+            .is_none());
+        let value = payload(
+            "remember",
+            json!({
+                "content": "fact",
+                "retrieval_representation": {
+                    "kind": "contextual-card-v1",
+                    "text": "must not cross MCP"
+                }
+            }),
+        );
+        assert!(value.get("retrieval_representation").is_none());
     }
 
     #[test]

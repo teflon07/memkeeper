@@ -3,28 +3,32 @@
 //! because this is still `mod tests` inside the crate root.
 
 use super::{
-    approve_candidate, assemble_reranked_pack, assemble_reranked_pack_with_graph_slots,
-    backup_store, batch_search_memories, build_hybrid_rerank_pool_with_expansion, build_pack,
-    build_pack_pool_with_expansion, create_space, document_duplicates, dream_store, empty_pack,
-    expanded_pack_queries, export_store, forget_memory, fts_score, get_document, get_memory,
-    graph_context, graph_neighbors, graph_recall_readiness, import_store, ingest_source,
-    init_store, last_synthesis_run, list_candidates, list_memories, list_silos, list_spaces,
-    load_token_embeddings, load_token_embeddings_cached, mark_source_episodes_extracted,
-    maxsim_score, memory_history, merge_entity, normalize_utc_timestamp, now_julian_day,
+    apply_graph_admission_observations, approve_candidate, assemble_reranked_pack,
+    assemble_reranked_pack_with_graph_slots, backup_store, batch_search_memories,
+    build_hybrid_rerank_pool_trace_with_expansion, build_hybrid_rerank_pool_with_expansion,
+    build_pack, build_pack_pool_with_expansion, create_space, diversify_graph_neighbors,
+    document_duplicates, dream_store, empty_pack, expanded_pack_queries, export_store,
+    forget_memory, fts_score, get_document, get_memory, graph_context, graph_neighbors,
+    graph_recall_readiness, import_store, ingest_source, init_store, last_synthesis_run,
+    list_candidates, list_memories, list_silos, list_spaces, load_token_embeddings,
+    load_token_embeddings_cached, mark_source_episodes_extracted, maxsim_score, memory_history,
+    merge_entity, normalize_utc_timestamp, now_julian_day, open_initialized_write,
     pack_blocked_by_cosine_gate, promotion_candidates, prune_documents, rebuild_fts,
     recency_score_for_silo, record_recall, record_reranker_shadow, reject_candidate,
-    relationship_confidence_from_evidence, remember_memory, rerank_candidate_ranks,
-    schema_mentions_required_objects, search_documents, search_entities, search_memories,
-    sha256_hex, sidecar_path, source_tier_score, store_stats, store_stats_with_health,
-    submit_candidate, upsert_entity, upsert_memory_token_embedding, upsert_relationship,
-    verify_memory, BackupRequest, BatchSearchQuery, BatchSearchRequest, CandidateApproveRequest,
-    CandidateListRequest, CandidateRejectRequest, CandidateSubmitRequest,
-    DocumentDuplicatesRequest, DocumentGetRequest, DocumentPruneRequest, DocumentSearchRequest,
-    DreamRequest, EntityMergeRequest, EntitySearchRequest, EntityUpsertRequest, Error,
-    ExportRequest, ForgetRequest, GetOptions, GraphContextRequest, GraphNeighborsRequest,
-    HistoryOptions, ImportRequest, IngestRequest, MarkExtractedRequest, MemoryListRequest,
-    PackExpansionOptions, PackRequest, PromotionCandidatesRequest, RecallEvent, RecallLogRequest,
-    RelationshipUpsertRequest, RememberRequest, RerankCandidate, RerankPool, SearchFilters,
+    relationship_confidence_from_evidence, remember_memory, representation_document,
+    rerank_candidate_ranks, retrieval_companion, schema_mentions_required_objects,
+    score_graph_entity_memories, search_documents, search_entities, search_memories,
+    select_graph_entity_memory, sha256_hex, sidecar_path, source_tier_score, store_stats,
+    store_stats_with_health, submit_candidate, upsert_entity, upsert_memory_token_embedding,
+    upsert_relationship, validate_retrieval_representation, verify_memory, BackupRequest,
+    BatchSearchQuery, BatchSearchRequest, CandidateApproveRequest, CandidateListRequest,
+    CandidateRejectRequest, CandidateSubmitRequest, DocumentDuplicatesRequest, DocumentGetRequest,
+    DocumentPruneRequest, DocumentSearchRequest, DreamRequest, EntityMergeRequest,
+    EntitySearchRequest, EntityUpsertRequest, Error, ExportRequest, ForgetRequest, GetOptions,
+    GraphContextRequest, GraphNeighborsRequest, HistoryOptions, ImportRequest, IngestRequest,
+    MarkExtractedRequest, MemoryListRequest, PackExpansionOptions, PackRequest,
+    PromotionCandidatesRequest, RecallEvent, RecallLogRequest, RelationshipUpsertRequest,
+    RememberRequest, RerankCandidate, RerankPool, RetrievalRepresentationInput, SearchFilters,
     SearchRequest, SearchResult, ShadowRerankBatch, ShadowRerankRow, SiloListRequest,
     SpaceCreateRequest, VerifyRequest, DEFAULT_PROMOTE_RANK_CAP, DEFAULT_PROMOTE_SCORE_FLOOR,
     DEFAULT_PROMOTE_THRESHOLD, DOCUMENTS_SPACE, MAX_CONTENT_CHARS, MAX_HISTORY_LIMIT,
@@ -34,11 +38,485 @@ use super::{
 };
 use memkeeper_core::DEFAULT_SPACE;
 use rusqlite::{params, Connection};
-use std::{env, fs, path::Path, path::PathBuf, process, time::SystemTime};
+use std::{collections::BTreeMap, env, fs, path::Path, path::PathBuf, process, time::SystemTime};
 
 #[test]
 fn schema_embeds_required_objects() {
     assert!(schema_mentions_required_objects());
+}
+
+#[test]
+fn retrieval_representation_contract_is_bounded_and_versioned() {
+    let valid = RetrievalRepresentationInput {
+        kind: "contextual-card-v1".to_string(),
+        text: "2026-07-14. Release owner requested the verified branch".to_string(),
+    };
+    validate_retrieval_representation(&valid).expect("valid card");
+    assert_eq!(
+        retrieval_companion(Some("summary"), Some(&valid)),
+        Some(valid.text.as_str())
+    );
+    assert_eq!(retrieval_companion(Some("summary"), None), Some("summary"));
+
+    for invalid in [
+        RetrievalRepresentationInput {
+            kind: "contextual-card-v2".into(),
+            text: "ok".into(),
+        },
+        RetrievalRepresentationInput {
+            kind: "contextual-card-v1".into(),
+            text: "   ".into(),
+        },
+        RetrievalRepresentationInput {
+            kind: "contextual-card-v1".into(),
+            text: "x".repeat(513),
+        },
+    ] {
+        assert!(validate_retrieval_representation(&invalid).is_err());
+    }
+}
+
+#[test]
+fn representation_document_uses_one_companion() {
+    assert_eq!(
+        representation_document("content", Some("card")),
+        "card\n\ncontent"
+    );
+    assert_eq!(representation_document("content", None), "content");
+}
+
+fn represented_request(content: &str, card: &str) -> RememberRequest {
+    let mut request = basic_request(content);
+    request.summary = Some("deployment summary".to_string());
+    request.retrieval_representation = Some(RetrievalRepresentationInput {
+        kind: "contextual-card-v1".to_string(),
+        text: card.to_string(),
+    });
+    request
+}
+
+#[test]
+fn remember_persists_retrieval_representation() {
+    let path = temp_store_path("remember_persists_retrieval_representation");
+    cleanup_store(&path);
+    init_store(&path).expect("init succeeds");
+    let card = "2026-07-14. Release owner requested canonical deployment memory";
+
+    let report = remember_memory(
+        &path,
+        &represented_request("fact: canonical deployment memory", card),
+    )
+    .expect("represented remember succeeds");
+    let stored = report
+        .memory
+        .retrieval_representation
+        .as_ref()
+        .expect("active representation");
+    assert_eq!(stored.version_id, report.memory.version_id);
+    assert_eq!(stored.kind, "contextual-card-v1");
+    assert_eq!(stored.text, card);
+    assert_eq!(stored.text_sha256, sha256_hex(card.as_bytes()));
+
+    let status = report.representation.as_ref().expect("write status");
+    assert_eq!(status.kind, stored.kind);
+    assert_eq!(status.text_sha256, stored.text_sha256);
+    assert!(status.fts_indexed);
+    assert!(!status.semantic_indexed);
+    assert_eq!(status.status, "lexical_only");
+
+    let loaded = get_memory(
+        &path,
+        &report.memory.id,
+        GetOptions {
+            include_history: true,
+            include_links: false,
+            include_source: false,
+        },
+    )
+    .expect("represented memory loads");
+    assert_eq!(loaded.retrieval_representation.as_ref(), Some(stored));
+    assert_eq!(
+        loaded.versions.as_ref().expect("history")[0]
+            .retrieval_representation
+            .as_ref(),
+        Some(stored)
+    );
+
+    let connection = Connection::open(&path).expect("open store");
+    let representation_rows: i64 = connection
+        .query_row("SELECT COUNT(*) FROM memory_representations", [], |row| {
+            row.get(0)
+        })
+        .expect("representation count");
+    let fts_rows: i64 = connection
+        .query_row("SELECT COUNT(*) FROM memory_fts", [], |row| row.get(0))
+        .expect("fts count");
+    assert_eq!(representation_rows, 1);
+    assert_eq!(fts_rows, 1);
+    cleanup_store(&path);
+}
+
+#[test]
+fn representation_dry_run_rolls_back() {
+    let path = temp_store_path("representation_dry_run_rolls_back");
+    cleanup_store(&path);
+    init_store(&path).expect("init succeeds");
+    let mut request = represented_request(
+        "fact: canonical deployment memory",
+        "2026-07-14. Release owner requested canonical deployment memory",
+    );
+    request.dry_run = true;
+    remember_memory(&path, &request).expect("dry run succeeds");
+
+    let connection = Connection::open(&path).expect("open store");
+    for table in ["memories", "memory_versions", "memory_representations"] {
+        let count: i64 = connection
+            .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                row.get(0)
+            })
+            .expect("count rows");
+        assert_eq!(count, 0, "{table} must roll back");
+    }
+    cleanup_store(&path);
+}
+
+#[test]
+fn representation_sqlite_failure_rolls_back() {
+    let path = temp_store_path("representation_sqlite_failure_rolls_back");
+    cleanup_store(&path);
+    init_store(&path).expect("init succeeds");
+    Connection::open(&path)
+        .expect("open store")
+        .execute_batch(
+            "CREATE TRIGGER fail_remember_event BEFORE INSERT ON memory_events
+             BEGIN SELECT RAISE(ABORT, 'injected remember failure'); END;",
+        )
+        .expect("create failure trigger");
+
+    let error = remember_memory(
+        &path,
+        &represented_request(
+            "fact: canonical deployment memory",
+            "2026-07-14. Release owner requested canonical deployment memory",
+        ),
+    )
+    .expect_err("injected failure aborts remember");
+    assert!(error.to_string().contains("injected remember failure"));
+
+    let connection = Connection::open(&path).expect("open store");
+    for table in [
+        "memories",
+        "memory_versions",
+        "memory_representations",
+        "memory_events",
+        "memory_fts",
+        "memory_fts_public",
+    ] {
+        let count: i64 = connection
+            .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                row.get(0)
+            })
+            .expect("count rows");
+        assert_eq!(count, 0, "{table} must roll back");
+    }
+    connection
+        .execute_batch("DROP TRIGGER fail_remember_event;")
+        .expect("drop failure trigger");
+    cleanup_store(&path);
+}
+
+#[test]
+fn representation_survives_lifecycle_changes() {
+    let path = temp_store_path("representation_survives_lifecycle_changes");
+    cleanup_store(&path);
+    init_store(&path).expect("init succeeds");
+
+    let mut old = represented_request("fact: deployment target is blue", "old blue card");
+    old.entity_key = Some("deployment".to_string());
+    old.claim_key = Some("target".to_string());
+    old.observed_at = Some("2026-07-13T12:00:00Z".to_string());
+    old.source_ref_json = Some(r#"{"type":"manual","path":"/private/old"}"#.to_string());
+    let old = remember_memory(&path, &old).expect("remember old");
+
+    let mut active = represented_request("fact: deployment target is green", "new green card");
+    active.entity_key = Some("deployment".to_string());
+    active.claim_key = Some("target".to_string());
+    active.observed_at = Some("2026-07-14T12:00:00Z".to_string());
+    active.source_ref_json = Some(r#"{"type":"manual","path":"/private/new"}"#.to_string());
+    let active = remember_memory(&path, &active).expect("remember replacement");
+    assert_eq!(active.auto_superseded, vec![old.memory.id.clone()]);
+
+    let mut conflict =
+        represented_request("continuity: deployment target is red", "red conflict card");
+    conflict.kind = Some("continuity".to_string());
+    conflict.entity_key = Some("deployment".to_string());
+    conflict.claim_key = Some("target".to_string());
+    let conflict = remember_memory(&path, &conflict).expect("remember conflict");
+    assert!(!conflict.conflict_candidates.is_empty());
+
+    forget_memory(
+        &path,
+        &ForgetRequest {
+            id: active.memory.id.clone(),
+            reason: Some("lifecycle test".to_string()),
+            mode: "tombstone".to_string(),
+            corrected_by: None,
+            dry_run: false,
+        },
+    )
+    .expect("tombstone represented memory");
+
+    for (memory_id, expected_text) in [
+        (&old.memory.id, "old blue card"),
+        (&active.memory.id, "new green card"),
+        (&conflict.memory.id, "red conflict card"),
+    ] {
+        for include_source in [false, true] {
+            let loaded = get_memory(
+                &path,
+                memory_id,
+                GetOptions {
+                    include_history: true,
+                    include_links: true,
+                    include_source,
+                },
+            )
+            .expect("load lifecycle memory");
+            let representation = loaded
+                .retrieval_representation
+                .as_ref()
+                .expect("active version representation");
+            assert_eq!(representation.text, expected_text);
+            assert_eq!(
+                representation.text_sha256,
+                sha256_hex(expected_text.as_bytes())
+            );
+            assert_eq!(
+                loaded.versions.as_ref().expect("versions")[0]
+                    .retrieval_representation
+                    .as_ref(),
+                Some(representation)
+            );
+        }
+    }
+    let rows: i64 = Connection::open(&path)
+        .expect("open store")
+        .query_row("SELECT COUNT(*) FROM memory_representations", [], |row| {
+            row.get(0)
+        })
+        .expect("representation count");
+    assert_eq!(rows, 3);
+    cleanup_store(&path);
+}
+
+#[test]
+fn fts_uses_retrieval_representation_instead_of_summary() {
+    let path = temp_store_path("fts_uses_retrieval_representation");
+    cleanup_store(&path);
+    init_store(&path).expect("init succeeds");
+
+    let mut represented = represented_request(
+        "fact: represented lexical target",
+        "context includes zephyr-card-term",
+    );
+    represented.summary = Some("shared summary-only-term".to_string());
+    let represented = remember_memory(&path, &represented).expect("remember represented");
+    let mut identity = basic_request("fact: identity lexical target");
+    identity.summary = Some("shared summary-only-term".to_string());
+    let identity = remember_memory(&path, &identity).expect("remember identity");
+
+    let connection = Connection::open(&path).expect("open store");
+    let transaction = connection
+        .unchecked_transaction()
+        .expect("start rebuild transaction");
+    rebuild_fts(&transaction).expect("rebuild fts");
+    transaction.commit().expect("commit rebuild");
+
+    let search = |query: &str| {
+        search_memories(
+            &path,
+            &SearchRequest {
+                query: query.to_string(),
+                filters: SearchFilters::default(),
+                limit: 10,
+                offset: 0,
+                snippet_chars: 80,
+                include_content: true,
+                include_source: false,
+                semantic_fallback: "disabled".to_string(),
+                lexical_fallback: "disabled".to_string(),
+                embedding: None,
+                query_token_embedding: None,
+                token_model_id: None,
+            },
+        )
+        .expect("search succeeds")
+    };
+    let card_hit = search("zephyr-card-term");
+    assert_eq!(card_hit.results[0].memory_id, represented.memory.id);
+
+    let hidden_summary = search("summary-only-term");
+    assert!(!hidden_summary
+        .results
+        .iter()
+        .any(|row| row.memory_id == represented.memory.id));
+    assert!(hidden_summary
+        .results
+        .iter()
+        .any(|row| row.memory_id == identity.memory.id));
+    cleanup_store(&path);
+}
+
+#[test]
+fn token_backfill_uses_retrieval_representation() {
+    let path = temp_store_path("token_backfill_uses_retrieval_representation");
+    cleanup_store(&path);
+    init_store(&path).expect("init succeeds");
+
+    let mut identity = basic_request("identity content");
+    identity.summary = Some("identity summary".to_string());
+    let identity = remember_memory(&path, &identity).expect("remember identity");
+    let mut represented = represented_request("represented content", "context card");
+    represented.summary = Some("persisted summary".to_string());
+    let represented = remember_memory(&path, &represented).expect("remember represented");
+
+    let targets = super::collect_token_backfill_targets(&path, true).expect("collect targets");
+    let by_id = |id: &str| {
+        targets
+            .iter()
+            .find(|(memory_id, _)| memory_id == id)
+            .map(|(_, text)| text.as_str())
+            .expect("target exists")
+    };
+    assert_eq!(
+        by_id(&identity.memory.id),
+        "identity summary\n\nidentity content"
+    );
+    assert_eq!(
+        by_id(&represented.memory.id),
+        "context card\n\nrepresented content"
+    );
+
+    #[cfg(feature = "semantic")]
+    {
+        let dense = super::collect_reembed_targets(&path).expect("collect dense targets");
+        let represented_dense = dense
+            .iter()
+            .find(|target| target.memory_id == represented.memory.id)
+            .expect("dense target exists");
+        assert_eq!(represented_dense.content, "represented content");
+    }
+    cleanup_store(&path);
+}
+
+fn normalized_production_rust_sources(owner_file: &str) -> Vec<(PathBuf, String)> {
+    let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let tests_file = src.join("tests.rs");
+    let owner_file = src.join(owner_file);
+    let mut pending = vec![src];
+    let mut sources = Vec::new();
+
+    while let Some(directory) = pending.pop() {
+        for entry in fs::read_dir(&directory).expect("read memkeeper-store source directory") {
+            let path = entry.expect("read source entry").path();
+            if path.is_dir() {
+                pending.push(path);
+                continue;
+            }
+            if path.extension().and_then(|value| value.to_str()) != Some("rs")
+                || path == tests_file
+                || path == owner_file
+            {
+                continue;
+            }
+            let source = fs::read_to_string(&path).expect("read production Rust source");
+            let uncommented = source
+                .lines()
+                .map(|line| line.split_once("//").map_or(line, |(code, _)| code))
+                .collect::<Vec<_>>()
+                .join("\n");
+            let normalized = uncommented
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+                .to_ascii_uppercase();
+            sources.push((path, normalized));
+        }
+    }
+
+    sources.sort_by(|left, right| left.0.cmp(&right.0));
+    sources
+}
+
+#[test]
+fn schema_changing_sql_is_owned_by_schema_module() {
+    let prohibited = [
+        "CREATE TABLE",
+        "CREATE TEMP TABLE",
+        "CREATE TEMPORARY TABLE",
+        "CREATE VIRTUAL TABLE",
+        "CREATE INDEX",
+        "CREATE UNIQUE INDEX",
+        "CREATE TRIGGER",
+        "CREATE VIEW",
+        "ALTER TABLE",
+        "DROP TABLE",
+        "DROP INDEX",
+        "DROP TRIGGER",
+        "DROP VIEW",
+        "PRAGMA USER_VERSION =",
+        "PRAGMA USER_VERSION(",
+        "INSERT INTO SCHEMA_MIGRATIONS",
+        "INSERT OR IGNORE INTO SCHEMA_MIGRATIONS",
+        "INSERT OR REPLACE INTO SCHEMA_MIGRATIONS",
+        "REPLACE INTO SCHEMA_MIGRATIONS",
+        "UPDATE SCHEMA_MIGRATIONS",
+        "DELETE FROM SCHEMA_MIGRATIONS",
+    ];
+    let mut violations = Vec::new();
+
+    for (path, normalized) in normalized_production_rust_sources("schema.rs") {
+        for token in prohibited {
+            if normalized.contains(token) {
+                violations.push(format!("{} contains {token}", path.display()));
+            }
+        }
+    }
+
+    assert!(
+        violations.is_empty(),
+        "schema-changing SQL must live in schema.rs:\n{}",
+        violations.join("\n")
+    );
+}
+
+#[test]
+fn connection_lifecycle_is_owned_by_connection_module() {
+    let owned_functions = [
+        "init_store",
+        "open_initialized_read_fast",
+        "open_initialized_write",
+        "configure_connection",
+        "inspect_on_copy",
+        "claim_or_preflight_init_path",
+        "inspect_existing_store",
+    ];
+    let mut violations = Vec::new();
+
+    for (path, normalized) in normalized_production_rust_sources("connection.rs") {
+        for function in owned_functions {
+            let definition = format!("FN {}", function.to_ascii_uppercase());
+            if normalized.contains(&definition) {
+                violations.push(format!("{} defines {function}", path.display()));
+            }
+        }
+    }
+
+    assert!(
+        violations.is_empty(),
+        "connection lifecycle must live in connection.rs:\n{}",
+        violations.join("\n")
+    );
 }
 
 #[test]
@@ -74,6 +552,7 @@ fn store_stats_health_rollup_reports_governance_signals() {
         kind: None,
         content: content.to_string(),
         summary: None,
+        retrieval_representation: None,
         tags: Vec::new(),
         entity_key: keys.map(|(entity, _)| entity.to_string()),
         claim_key: keys.map(|(_, claim)| claim.to_string()),
@@ -104,6 +583,14 @@ fn store_stats_health_rollup_reports_governance_signals() {
     .expect("keyed remember succeeds");
     remember_memory(&path, &remember_request("fact: keyless memory", None))
         .expect("keyless remember succeeds");
+    let connection = Connection::open(&path).expect("open store");
+    connection
+        .execute(
+            "DELETE FROM entities WHERE space_name = 'workspace-memory' AND entity_key = 'entity:a'",
+            [],
+        )
+        .expect("delete entity projection to simulate drift");
+    drop(connection);
 
     // Default stats omits the rollup; the opt-in variant includes it.
     assert!(store_stats(&path, false).expect("stats").health.is_none());
@@ -115,6 +602,7 @@ fn store_stats_health_rollup_reports_governance_signals() {
     assert_eq!(health.active, 2);
     assert_eq!(health.tombstoned, 0);
     assert_eq!(health.active_without_keys, 1);
+    assert_eq!(health.active_missing_entity_projection, 1);
     assert_eq!(health.duplicate_key_groups, 0);
     // No embeddings written in this FTS-only test store.
     assert_eq!(health.active_without_embedding, 2);
@@ -679,6 +1167,7 @@ fn remember_and_get_write_atomic_memory_records() {
             kind: None,
             content: "decision: keep memkeeper deterministic".to_string(),
             summary: Some("Keep memkeeper deterministic.".to_string()),
+            retrieval_representation: None,
             tags: vec!["memory".to_string(), "sqlite".to_string()],
             entity_key: Some("project:memkeeper".to_string()),
             claim_key: Some("mvp.boundary".to_string()),
@@ -3824,6 +4313,92 @@ fn pack_pool_thread_expansion_interleaves_same_entity_neighbors() {
     cleanup_store(&path);
 }
 
+#[test]
+fn pack_pool_retains_query_variant_overlap_for_admitted_candidate() {
+    use super::build_pack_pool;
+    let path = temp_store_path("pack_pool_query_overlap");
+    cleanup_store(&path);
+    init_store(&path).expect("init succeeds");
+    let memory =
+        remember_memory(&path, &basic_request("alpha overlap memory")).expect("remember succeeds");
+    let request = PackRequest {
+        title: "query overlap".to_string(),
+        queries: vec!["alpha overlap".to_string(), "overlap memory".to_string()],
+        filters: SearchFilters::default(),
+        max_memories: 1,
+        max_chars: 1_000,
+        format: "markdown".to_string(),
+        min_score: 0.0,
+        rerank_candidates: 0,
+        query_embeddings: None,
+        query_token_embeddings: None,
+        token_model_id: None,
+    };
+
+    let pool = build_pack_pool(&path, &request).expect("pool builds");
+    let candidate = pool
+        .iter()
+        .find(|candidate| candidate.memory_id == memory.memory.id)
+        .expect("candidate admitted");
+    assert_eq!(
+        candidate
+            .admissions
+            .iter()
+            .map(|observation| observation.query_index)
+            .collect::<Vec<_>>(),
+        vec![0, 1]
+    );
+    cleanup_store(&path);
+}
+
+#[test]
+fn pack_pool_retains_thread_overlap_for_direct_candidate() {
+    use super::AdmissionSource;
+    use std::collections::BTreeSet;
+    let path = temp_store_path("pack_pool_thread_overlap");
+    cleanup_store(&path);
+    init_store(&path).expect("init succeeds");
+    for content in ["alpha overlap first", "alpha overlap second"] {
+        let mut request = basic_request(content);
+        request.entity_key = Some("thread:overlap".to_string());
+        remember_memory(&path, &request).expect("remember succeeds");
+    }
+    let request = PackRequest {
+        title: "thread overlap".to_string(),
+        queries: vec!["alpha overlap".to_string()],
+        filters: SearchFilters::default(),
+        max_memories: 2,
+        max_chars: 1_000,
+        format: "markdown".to_string(),
+        min_score: 0.0,
+        rerank_candidates: 0,
+        query_embeddings: None,
+        query_token_embeddings: None,
+        token_model_id: None,
+    };
+
+    let pool = build_pack_pool_with_expansion(
+        &path,
+        &request,
+        PackExpansionOptions {
+            thread_expansion: true,
+            max_thread_seeds: 1,
+            max_thread_neighbors: 2,
+            ..PackExpansionOptions::default()
+        },
+    )
+    .expect("pool builds");
+    assert!(pool.iter().any(|candidate| {
+        let sources = candidate
+            .admissions
+            .iter()
+            .map(|observation| observation.source)
+            .collect::<BTreeSet<_>>();
+        sources.contains(&AdmissionSource::Bm25) && sources.contains(&AdmissionSource::Thread)
+    }));
+    cleanup_store(&path);
+}
+
 /// Part 2 (memory-to-memory edges): the `link` dream task writes cross-entity
 /// `memory_links` between curated memories that share discriminative tags, and
 /// the `graph` task then bridges their entities — so associative recall finally
@@ -5025,6 +5600,158 @@ fn dream_graph_diagnostics_reports_orphans_and_bad_relationship_evidence() {
 }
 
 #[test]
+fn dream_graph_reports_and_repairs_missing_entity_projections() {
+    let path = temp_store_path("dream_graph_repairs_missing_entity_projections");
+    cleanup_store(&path);
+    init_store(&path).expect("init succeeds");
+    let remembered = remember_memory(
+        &path,
+        &RememberRequest {
+            entity_key: Some("entity:projection-drift".to_string()),
+            claim_key: Some("claim:projection-drift".to_string()),
+            ..remember_request("fact: graph projection drift")
+        },
+    )
+    .expect("remember succeeds");
+
+    let connection = Connection::open(&path).expect("open store");
+    connection
+        .execute(
+            "DELETE FROM entities WHERE space_name = ?1 AND entity_key = ?2",
+            params![remembered.memory.space, "entity:projection-drift"],
+        )
+        .expect("delete entity projection");
+    drop(connection);
+
+    let dry_run = dream_store(
+        &path,
+        &DreamRequest {
+            tasks: vec!["graph".to_string()],
+            max_memories: 10,
+            dry_run: true,
+            ..dream_request_defaults()
+        },
+    )
+    .expect("graph dry-run succeeds");
+    assert_eq!(dry_run.graph.missing_entity_projections.len(), 1);
+    assert_eq!(
+        dry_run.graph.missing_entity_projections[0].entity_key,
+        "entity:projection-drift"
+    );
+    assert!(
+        search_entities(
+            &path,
+            &EntitySearchRequest {
+                entity_key: Some("entity:projection-drift".to_string()),
+                limit: 10,
+                ..entity_search_defaults()
+            },
+        )
+        .expect("search after dry-run")
+        .results
+        .is_empty(),
+        "dry-run must not recreate the entity projection"
+    );
+
+    let applied = dream_store(
+        &path,
+        &DreamRequest {
+            tasks: vec!["graph".to_string()],
+            max_memories: 10,
+            dry_run: false,
+            ..dream_request_defaults()
+        },
+    )
+    .expect("graph apply succeeds");
+    assert_eq!(applied.graph.missing_entity_projections.len(), 1);
+    assert_eq!(
+        search_entities(
+            &path,
+            &EntitySearchRequest {
+                entity_key: Some("entity:projection-drift".to_string()),
+                limit: 10,
+                ..entity_search_defaults()
+            },
+        )
+        .expect("search after apply")
+        .results
+        .len(),
+        1
+    );
+
+    let idempotent = dream_store(
+        &path,
+        &DreamRequest {
+            tasks: vec!["graph".to_string()],
+            max_memories: 10,
+            dry_run: false,
+            ..dream_request_defaults()
+        },
+    )
+    .expect("second graph apply succeeds");
+    assert!(idempotent.graph.missing_entity_projections.is_empty());
+
+    cleanup_store(&path);
+}
+
+#[test]
+fn dream_graph_preserves_intentionally_merged_entity_status() {
+    let path = temp_store_path("dream_graph_preserves_merged_entity_status");
+    cleanup_store(&path);
+    init_store(&path).expect("init succeeds");
+    remember_memory(
+        &path,
+        &RememberRequest {
+            entity_key: Some("file:variant".to_string()),
+            claim_key: Some("claim:variant".to_string()),
+            ..remember_request("fact: variant memory remains historical evidence")
+        },
+    )
+    .expect("variant memory succeeds");
+    remember_memory(
+        &path,
+        &RememberRequest {
+            entity_key: Some("file:canon".to_string()),
+            claim_key: Some("claim:canon".to_string()),
+            ..remember_request("fact: canonical memory backs the merged entity")
+        },
+    )
+    .expect("canonical memory succeeds");
+    merge_entity(
+        &path,
+        &EntityMergeRequest {
+            from_entity_key: Some("file:variant".to_string()),
+            into_entity_key: Some("file:canon".to_string()),
+            ..merge_request_defaults()
+        },
+    )
+    .expect("merge succeeds");
+
+    let report = dream_store(
+        &path,
+        &DreamRequest {
+            tasks: vec!["graph".to_string()],
+            max_memories: 10,
+            dry_run: false,
+            ..dream_request_defaults()
+        },
+    )
+    .expect("graph dream succeeds");
+    assert!(report.graph.missing_entity_projections.is_empty());
+    let connection = Connection::open(&path).expect("open store");
+    assert_eq!(entity_status(&connection, "file:variant"), "tombstoned");
+    assert_eq!(entity_status(&connection, "file:canon"), "active");
+    drop(connection);
+    let health = store_stats_with_health(&path, false)
+        .expect("health stats")
+        .health
+        .expect("health present");
+    assert_eq!(health.active_missing_entity_projection, 0);
+
+    cleanup_store(&path);
+}
+
+#[test]
 fn dream_graph_sweeps_edges_into_tombstoned_entity() {
     let path = temp_store_path("dream_graph_sweeps_edges_into_tombstoned_entity");
     cleanup_store(&path);
@@ -5274,6 +6001,12 @@ fn dream_graph_proposes_relationships_from_memory_links() {
             params![subject_memory.memory.id, object_memory.memory.id, now],
         )
         .expect("insert memory link");
+    connection
+        .execute(
+            "DELETE FROM entities WHERE space_name = ?1 AND entity_key = 'entity:object'",
+            params![object_memory.memory.space],
+        )
+        .expect("delete object projection");
     drop(connection);
 
     let report = dream_store(
@@ -5286,6 +6019,7 @@ fn dream_graph_proposes_relationships_from_memory_links() {
         },
     )
     .expect("graph dream succeeds");
+    assert_eq!(report.graph.missing_entity_projections.len(), 1);
     assert_eq!(report.graph.relationship_proposals.len(), 1);
     let proposal = &report.graph.relationship_proposals[0];
     assert_eq!(proposal.link_type, "supports");
@@ -5327,6 +6061,72 @@ fn dream_graph_proposes_relationships_from_memory_links() {
 }
 
 #[test]
+fn dream_graph_bounds_relationship_proposals_to_staged_projection_repairs() {
+    let path = temp_store_path("dream_graph_bounds_projection_repairs");
+    cleanup_store(&path);
+    init_store(&path).expect("init succeeds");
+    let mut memory_ids = Vec::new();
+    for key in ["entity:a", "entity:b", "entity:c"] {
+        let remembered = remember_memory(
+            &path,
+            &RememberRequest {
+                entity_key: Some(key.to_string()),
+                claim_key: Some(format!("claim:{key}")),
+                ..remember_request(&format!("fact: bounded projection {key}"))
+            },
+        )
+        .expect("remember succeeds");
+        memory_ids.push(remembered.memory.id);
+    }
+    let connection = Connection::open(&path).expect("open store");
+    connection
+        .execute(
+            "INSERT INTO memory_links (
+                src_memory_id, dst_memory_id, link_type, status, confidence, created_at
+             ) VALUES (?1, ?2, 'supports', 'active', 1.0, CURRENT_TIMESTAMP)",
+            params![memory_ids[1], memory_ids[2]],
+        )
+        .expect("insert link outside first repair batch");
+    connection
+        .execute("DELETE FROM entities", [])
+        .expect("delete projections");
+    drop(connection);
+
+    let report = dream_store(
+        &path,
+        &DreamRequest {
+            tasks: vec!["graph".to_string()],
+            max_memories: 1,
+            dry_run: false,
+            ..dream_request_defaults()
+        },
+    )
+    .expect("bounded graph apply succeeds");
+    assert!(report.graph.truncated);
+    assert_eq!(report.graph.missing_entity_projections.len(), 1);
+    assert_eq!(
+        report.graph.missing_entity_projections[0].entity_key,
+        "entity:a"
+    );
+    assert!(report.graph.relationship_proposals.is_empty());
+    assert_eq!(
+        search_entities(
+            &path,
+            &EntitySearchRequest {
+                limit: 10,
+                ..entity_search_defaults()
+            },
+        )
+        .expect("search repaired projections")
+        .results
+        .len(),
+        1
+    );
+
+    cleanup_store(&path);
+}
+
+#[test]
 fn relationship_confidence_rises_with_evidence_multiplicity() {
     // Saturating, monotonic, in (0,1): one link is moderate, more links stronger.
     assert!((relationship_confidence_from_evidence(1) - 0.5).abs() < 1e-9);
@@ -5339,6 +6139,442 @@ fn relationship_confidence_rises_with_evidence_multiplicity() {
         relationship_confidence_from_evidence(100) < 1.0,
         "stays below 1.0"
     );
+}
+
+#[test]
+fn graph_neighbor_allocation_diversifies_entities_before_filling() {
+    let candidates = vec![
+        (
+            "a-second".to_string(),
+            "workspace-memory".to_string(),
+            "entity:a".to_string(),
+            0.80,
+        ),
+        (
+            "entity-c".to_string(),
+            "workspace-memory".to_string(),
+            "entity:c".to_string(),
+            0.60,
+        ),
+        (
+            "a-first".to_string(),
+            "workspace-memory".to_string(),
+            "entity:a".to_string(),
+            0.90,
+        ),
+        (
+            "entity-b".to_string(),
+            "workspace-memory".to_string(),
+            "entity:b".to_string(),
+            0.70,
+        ),
+    ];
+
+    let first_pass = diversify_graph_neighbors(candidates.clone(), 3);
+    assert_eq!(
+        first_pass
+            .iter()
+            .map(|(memory_id, _)| memory_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["a-first", "entity-b", "entity-c"],
+        "the first pass admits at most one memory per neighbor entity"
+    );
+
+    let filled = diversify_graph_neighbors(candidates, 4);
+    assert_eq!(
+        filled
+            .iter()
+            .map(|(memory_id, _)| memory_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["a-first", "entity-b", "entity-c", "a-second"],
+        "remaining slots preserve the original global activation order"
+    );
+
+    let same_key_across_spaces = vec![
+        (
+            "workspace-shared".to_string(),
+            "workspace-memory".to_string(),
+            "entity:shared".to_string(),
+            0.90,
+        ),
+        (
+            "trading-shared".to_string(),
+            "trading".to_string(),
+            "entity:shared".to_string(),
+            0.80,
+        ),
+        (
+            "workspace-second".to_string(),
+            "workspace-memory".to_string(),
+            "entity:shared".to_string(),
+            0.70,
+        ),
+    ];
+    assert_eq!(
+        diversify_graph_neighbors(same_key_across_spaces, 2)
+            .iter()
+            .map(|(memory_id, _)| memory_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["workspace-shared", "trading-shared"],
+        "entity identity is scoped by space"
+    );
+
+    assert!(
+        diversify_graph_neighbors(
+            vec![(
+                "memory".to_string(),
+                "workspace-memory".to_string(),
+                "entity:a".to_string(),
+                1.0,
+            )],
+            0,
+        )
+        .is_empty(),
+        "a zero limit admits no graph memories"
+    );
+}
+
+#[test]
+fn graph_cap_drops_remain_visible_without_changing_admitted_pool() {
+    let mut merged = vec![super::PackPoolItem {
+        memory_id: "selected".to_string(),
+        score: 0.9,
+        admissions: Vec::new(),
+    }];
+    let activations = BTreeMap::from([("selected".to_string(), 0.9), ("dropped".to_string(), 0.8)]);
+    let mut observed = Vec::new();
+
+    let allocation_ranks =
+        BTreeMap::from([("selected".to_string(), 1), ("dropped".to_string(), 2)]);
+    apply_graph_admission_observations(&mut merged, &activations, &allocation_ranks, &mut observed);
+
+    assert_eq!(
+        merged
+            .iter()
+            .map(|item| item.memory_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["selected"],
+        "trace instrumentation must not mutate reranker input membership"
+    );
+    let dropped = observed
+        .iter()
+        .find(|candidate| candidate.memory_id == "dropped")
+        .expect("graph-cap drop remains observable");
+    assert!(!dropped.admitted);
+    assert_eq!(dropped.dropped_at.as_deref(), Some("graph_cap"));
+    assert_eq!(dropped.graph_allocation_rank, Some(2));
+    assert_eq!(dropped.admissions.len(), 1);
+    assert_eq!(dropped.admissions[0].source, super::AdmissionSource::Graph);
+    assert_eq!(dropped.admissions[0].source_rank, 2);
+    assert_eq!(dropped.admissions[0].activation, Some(0.8));
+}
+
+#[test]
+fn graph_within_entity_maxsim_selects_highest_score_and_preserves_ties() {
+    let ids = vec!["newer-first".to_string(), "older-relevant".to_string()];
+    let scores = BTreeMap::from([
+        ("newer-first".to_string(), 0.2),
+        ("older-relevant".to_string(), 0.9),
+    ]);
+    assert_eq!(
+        select_graph_entity_memory(ids.clone(), &scores).expect("scores complete"),
+        vec!["older-relevant"]
+    );
+
+    let ties = BTreeMap::from([
+        ("newer-first".to_string(), 0.9),
+        ("older-relevant".to_string(), 0.9),
+    ]);
+    assert_eq!(
+        select_graph_entity_memory(ids, &ties).expect("ties deterministic"),
+        vec!["newer-first"]
+    );
+}
+
+#[test]
+fn graph_within_entity_maxsim_requires_complete_scores() {
+    let error = select_graph_entity_memory(
+        vec!["scored".to_string(), "missing".to_string()],
+        &BTreeMap::from([("scored".to_string(), 0.8)]),
+    )
+    .expect_err("missing token score must fail loudly");
+    assert!(error.to_string().contains("missing token embedding"));
+}
+
+#[test]
+fn graph_within_entity_maxsim_scores_only_considered_memories() {
+    let scores = score_graph_entity_memories(
+        &["considered".to_string()],
+        &[vec![1.0, 0.0]],
+        &[
+            ("considered".to_string(), vec![vec![0.8, 0.2]]),
+            ("unrelated".to_string(), vec![vec![1.0, 0.0]]),
+        ],
+    )
+    .expect("considered memory has tokens");
+    assert_eq!(
+        scores.keys().cloned().collect::<Vec<_>>(),
+        vec!["considered"]
+    );
+}
+
+#[test]
+fn graph_within_entity_maxsim_rejects_missing_prerequisites() {
+    let request = associative_recall_request();
+    let path = temp_store_path("graph_maxsim_prerequisites");
+    for expansion in [
+        PackExpansionOptions {
+            graph_within_entity_selection: super::GraphWithinEntitySelection::Maxsim,
+            ..PackExpansionOptions::default()
+        },
+        PackExpansionOptions {
+            graph_expansion: true,
+            graph_within_entity_selection: super::GraphWithinEntitySelection::Maxsim,
+            ..PackExpansionOptions::default()
+        },
+    ] {
+        let error = build_hybrid_rerank_pool_with_expansion(&path, &request, 10, expansion)
+            .expect_err("invalid prerequisites fail before store access");
+        assert!(matches!(error, super::Error::InvalidRequest { .. }));
+    }
+
+    let expansion = PackExpansionOptions {
+        graph_expansion: true,
+        graph_within_entity_selection: super::GraphWithinEntitySelection::Maxsim,
+        ..PackExpansionOptions::default()
+    };
+    let tokens_without_model = PackRequest {
+        query_token_embeddings: Some(vec![vec![vec![1.0, 0.0]]]),
+        ..request.clone()
+    };
+    let model_without_tokens = PackRequest {
+        token_model_id: Some("graph-maxsim-test".to_string()),
+        ..request
+    };
+    for incomplete in [&tokens_without_model, &model_without_tokens] {
+        let error = build_hybrid_rerank_pool_with_expansion(&path, incomplete, 10, expansion)
+            .expect_err("each missing token prerequisite fails before store access");
+        assert!(matches!(error, super::Error::InvalidRequest { .. }));
+    }
+}
+
+#[test]
+fn graph_within_entity_maxsim_changes_only_entity_memory_choice() {
+    let path = temp_store_path("graph_within_entity_maxsim");
+    cleanup_store(&path);
+    init_store(&path).expect("init");
+    upsert_entity(&path, &entity_upsert_request("ent:seed", "Seed")).expect("seed entity");
+    upsert_entity(&path, &entity_upsert_request("ent:target", "Target")).expect("target entity");
+    upsert_relationship(
+        &path,
+        &RelationshipUpsertRequest {
+            subject_entity_key: Some("ent:seed".to_string()),
+            relation_type: "related_to".to_string(),
+            object_entity_key: Some("ent:target".to_string()),
+            confidence: 1.0,
+            ..relationship_upsert_request_defaults()
+        },
+    )
+    .expect("relationship");
+    insert_graph_synthesis_run(&path);
+
+    let mut seed = basic_request("orchard anchor");
+    seed.entity_key = Some("ent:seed".to_string());
+    let seed_id = remember_memory(&path, &seed).expect("seed").memory.id;
+    let mut older = basic_request("answer-bearing older memory");
+    older.entity_key = Some("ent:target".to_string());
+    let older_id = remember_memory(&path, &older).expect("older").memory.id;
+    let mut newer = basic_request("recent but irrelevant memory");
+    newer.entity_key = Some("ent:target".to_string());
+    let newer_id = remember_memory(&path, &newer).expect("newer").memory.id;
+
+    let model = "graph-maxsim-test";
+    let connection = Connection::open(&path).expect("open");
+    for (memory_id, vector) in [
+        (&seed_id, vec![vec![1.0, 0.0]]),
+        (&older_id, vec![vec![0.9, 0.1]]),
+        (&newer_id, vec![vec![0.0, 1.0]]),
+    ] {
+        upsert_memory_token_embedding(&connection, memory_id, model, &vector).expect("tokens");
+    }
+    drop(connection);
+
+    let request = PackRequest {
+        title: "graph maxsim".to_string(),
+        queries: vec!["orchard anchor".to_string()],
+        filters: SearchFilters::default(),
+        max_memories: 1,
+        max_chars: 1_000,
+        format: "markdown".to_string(),
+        min_score: 0.0,
+        rerank_candidates: 0,
+        query_embeddings: None,
+        query_token_embeddings: Some(vec![vec![vec![1.0, 0.0]]]),
+        token_model_id: Some(model.to_string()),
+    };
+    let expansion = PackExpansionOptions {
+        graph_expansion: true,
+        max_graph_seeds: 1,
+        max_graph_neighbors: 1,
+        ..PackExpansionOptions::default()
+    };
+    let recency = build_hybrid_rerank_pool_with_expansion(&path, &request, 1, expansion)
+        .expect("recency pool");
+    let semantic = build_hybrid_rerank_pool_with_expansion(
+        &path,
+        &request,
+        1,
+        PackExpansionOptions {
+            graph_within_entity_selection: super::GraphWithinEntitySelection::Maxsim,
+            ..expansion
+        },
+    )
+    .expect("maxsim pool");
+    let graph_id = |pool: &RerankPool| {
+        pool.candidates
+            .iter()
+            .find(|candidate| candidate.graph_pulled)
+            .map(|candidate| candidate.memory_id.clone())
+    };
+    assert_eq!(graph_id(&recency), Some(newer_id.clone()));
+    assert_eq!(graph_id(&semantic), Some(older_id));
+
+    let connection = Connection::open(&path).expect("reopen");
+    connection
+        .execute(
+            "DELETE FROM memory_token_embeddings WHERE memory_id = ?1",
+            [&newer_id],
+        )
+        .expect("remove one considered token row");
+    drop(connection);
+    let error = build_hybrid_rerank_pool_with_expansion(
+        &path,
+        &request,
+        1,
+        PackExpansionOptions {
+            graph_within_entity_selection: super::GraphWithinEntitySelection::Maxsim,
+            ..expansion
+        },
+    )
+    .expect_err("missing considered token row fails loudly");
+    assert!(error.to_string().contains("missing token embedding"));
+    cleanup_store(&path);
+}
+
+#[test]
+fn hybrid_dropped_candidate_retains_graph_activation_observation() {
+    let mut merged = Vec::new();
+    let activations = BTreeMap::from([("shared".to_string(), 0.8)]);
+    let mut observed = vec![super::RerankPoolObservedCandidate {
+        memory_id: "shared".to_string(),
+        merged_rank: 6,
+        admitted: false,
+        dropped_at: Some("hybrid_cap".to_string()),
+        graph_allocation_rank: None,
+        admissions: vec![super::AdmissionObservation {
+            source: super::AdmissionSource::Bm25,
+            query_index: 0,
+            source_rank: 6,
+            seed_memory_id: None,
+            activation: None,
+        }],
+    }];
+
+    let allocation_ranks = BTreeMap::from([("shared".to_string(), 1)]);
+    apply_graph_admission_observations(&mut merged, &activations, &allocation_ranks, &mut observed);
+
+    assert_eq!(
+        observed.len(),
+        1,
+        "the existing observation is enriched in place"
+    );
+    assert_eq!(observed[0].dropped_at.as_deref(), Some("hybrid_cap"));
+    assert_eq!(observed[0].graph_allocation_rank, Some(1));
+    let graph = observed[0]
+        .admissions
+        .iter()
+        .find(|admission| admission.source == super::AdmissionSource::Graph)
+        .expect("graph activation is retained alongside the direct source");
+    assert_eq!(graph.source_rank, 1);
+    assert_eq!(graph.activation, Some(0.8));
+}
+
+#[test]
+fn production_observation_mode_does_not_materialize_graph_cap_drops() {
+    let mut merged = vec![super::PackPoolItem {
+        memory_id: "selected".to_string(),
+        score: 0.9,
+        admissions: Vec::new(),
+    }];
+    let activations = BTreeMap::from([("selected".to_string(), 0.9), ("dropped".to_string(), 0.8)]);
+    let admitted_before = merged
+        .iter()
+        .map(|item| item.memory_id.clone())
+        .collect::<Vec<_>>();
+    let mut observed = Vec::new();
+
+    apply_graph_admission_observations(&mut merged, &activations, &BTreeMap::new(), &mut observed);
+
+    assert_eq!(
+        merged
+            .iter()
+            .map(|item| item.memory_id.clone())
+            .collect::<Vec<_>>(),
+        admitted_before,
+        "observation mode must never change admitted membership"
+    );
+    assert!(
+        observed
+            .iter()
+            .all(|candidate| candidate.memory_id != "dropped"),
+        "normal pack retrieval retains the prior bounded observation payload"
+    );
+}
+
+#[test]
+fn pool_trace_rejects_unbounded_graph_expansion_limits() {
+    let error = build_hybrid_rerank_pool_trace_with_expansion(
+        temp_store_path("trace_graph_bounds"),
+        &associative_recall_request(),
+        10,
+        PackExpansionOptions {
+            graph_expansion: true,
+            max_graph_seeds: super::MAX_PACK_MEMORIES + 1,
+            ..associative_recall_on()
+        },
+    )
+    .expect_err("trace graph limits must fail before opening the store");
+
+    assert!(matches!(error, super::Error::InvalidRequest { .. }));
+    assert!(error.to_string().contains("must not exceed 50"));
+}
+
+#[test]
+fn canonical_graph_observation_replaces_provisional_rank() {
+    let mut merged = vec![super::PackPoolItem {
+        memory_id: "selected".to_string(),
+        score: 0.9,
+        admissions: vec![super::AdmissionObservation {
+            source: super::AdmissionSource::Graph,
+            query_index: 0,
+            source_rank: 99,
+            seed_memory_id: None,
+            activation: Some(0.9),
+        }],
+    }];
+    let activations = BTreeMap::from([("selected".to_string(), 0.9)]);
+    let allocation_ranks = BTreeMap::from([("selected".to_string(), 1)]);
+    let mut observed = Vec::new();
+
+    apply_graph_admission_observations(&mut merged, &activations, &allocation_ranks, &mut observed);
+
+    let graph_sources = merged[0]
+        .admissions
+        .iter()
+        .filter(|source| source.source == super::AdmissionSource::Graph)
+        .collect::<Vec<_>>();
+    assert_eq!(graph_sources.len(), 1);
+    assert_eq!(graph_sources[0].source_rank, 1);
 }
 
 /// v0.3.1 / mem_...3cc end-to-end: a graph edge backed by MORE co-occurring
@@ -5355,6 +6591,7 @@ fn graph_edge_multiplicity_differentiates_neighbor_activation() {
         ("ent:seed", "Seed"),
         ("ent:dense", "Dense"),
         ("ent:sparse", "Sparse"),
+        ("ent:overlap", "Overlap"),
     ] {
         upsert_entity(&path, &entity_upsert_request(key, name)).expect("entity upsert");
     }
@@ -5375,10 +6612,13 @@ fn graph_edge_multiplicity_differentiates_neighbor_activation() {
     let mut sparse = basic_request("yfact unrelated trivia for the sparse neighbor");
     sparse.entity_key = Some("ent:sparse".to_string());
     let sparse_id = remember_memory(&path, &sparse).expect("sparse").memory.id;
+    let mut overlap = basic_request("orchard pipeline retrieval anchor point overlap memory");
+    overlap.entity_key = Some("ent:overlap".to_string());
+    let overlap_id = remember_memory(&path, &overlap).expect("overlap").memory.id;
 
     let now = "2026-05-28T00:00:00.000Z";
     let connection = Connection::open(&path).expect("open store");
-    for dst in dense_ids.iter().chain(std::iter::once(&sparse_id)) {
+    for dst in dense_ids.iter().chain([&sparse_id, &overlap_id]) {
         connection
             .execute(
                 "INSERT INTO memory_links (src_memory_id, dst_memory_id, link_type, status, confidence, created_at) \
@@ -5442,7 +6682,88 @@ fn graph_edge_multiplicity_differentiates_neighbor_activation() {
          (conf 0.5): dense={dense_act} sparse={sparse_act}"
     );
 
+    assert_graph_trace_is_neutral_and_excludes_hybrid_overlap(&path, &request, &overlap_id);
+
     cleanup_store(&path);
+}
+
+fn assert_graph_trace_is_neutral_and_excludes_hybrid_overlap(
+    path: &Path,
+    request: &PackRequest,
+    overlap_id: &str,
+) {
+    let expansion = PackExpansionOptions {
+        graph_expansion: true,
+        max_graph_seeds: 3,
+        max_graph_neighbors: 1,
+        graph_decay: 0.5,
+        ..PackExpansionOptions::default()
+    };
+    let production_pool = build_hybrid_rerank_pool_with_expansion(path, request, 50, expansion)
+        .expect("production pool");
+    let trace_pool = build_hybrid_rerank_pool_trace_with_expansion(path, request, 50, expansion)
+        .expect("trace pool");
+    assert_eq!(
+        production_pool
+            .candidates
+            .iter()
+            .map(|candidate| candidate.memory_id.as_str())
+            .collect::<Vec<_>>(),
+        trace_pool
+            .candidates
+            .iter()
+            .map(|candidate| candidate.memory_id.as_str())
+            .collect::<Vec<_>>(),
+        "diagnostic observations preserve admitted order"
+    );
+    let overlap_record = trace_pool
+        .observed
+        .iter()
+        .find(|candidate| candidate.memory_id == overlap_id)
+        .expect("hybrid-overlap record");
+    assert_eq!(overlap_record.graph_allocation_rank, None);
+    assert!(
+        overlap_record
+            .admissions
+            .iter()
+            .any(|source| source.source == super::AdmissionSource::Graph),
+        "hybrid overlap keeps graph provenance without consuming allocation"
+    );
+    let allocation_records = trace_pool
+        .observed
+        .iter()
+        .filter(|candidate| candidate.graph_allocation_rank.is_some())
+        .collect::<Vec<_>>();
+    assert_eq!(allocation_records.len(), 2);
+    assert_eq!(
+        allocation_records
+            .iter()
+            .filter(|candidate| candidate.admitted)
+            .count(),
+        1
+    );
+    assert_eq!(
+        allocation_records
+            .iter()
+            .filter(|candidate| !candidate.admitted)
+            .count(),
+        1
+    );
+    for candidate in trace_pool
+        .candidates
+        .iter()
+        .filter(|candidate| candidate.graph_pulled)
+    {
+        assert_eq!(
+            candidate
+                .admissions
+                .iter()
+                .filter(|source| source.source == super::AdmissionSource::Graph)
+                .count(),
+            1,
+            "selected graph additions have one canonical graph rank"
+        );
+    }
 }
 
 /// A graph-reachable memory that ALSO landed in the base retrieval pool (so it is
@@ -5821,7 +7142,8 @@ fn export_writes_deterministic_jsonl_with_audit_history() {
 }
 
 #[test]
-fn import_round_trips_export_and_rebuilds_indexes() {
+#[allow(clippy::too_many_lines)]
+fn export_import_preserves_retrieval_representation() {
     let path = temp_store_path("import_round_trips_export_source");
     let import_path = temp_store_path("import_round_trips_export_target");
     let export_a = temp_store_path("import_round_trips_export_a").with_extension("jsonl");
@@ -5847,6 +7169,11 @@ fn import_round_trips_export_and_rebuilds_indexes() {
     drop(connection);
 
     let mut request = basic_request("decision: import round trip keeps searchable content");
+    request.summary = Some("persisted import summary".to_string());
+    request.retrieval_representation = Some(RetrievalRepresentationInput {
+        kind: "contextual-card-v1".to_string(),
+        text: "archive card contains zephyr-archive-term".to_string(),
+    });
     request.tags = vec!["import".to_string(), "roundtrip".to_string()];
     request.source_episode_id = Some("src-import".to_string());
     request.source_ref_json =
@@ -5909,6 +7236,36 @@ fn import_round_trips_export_and_rebuilds_indexes() {
         .source_ref_json
         .as_deref()
         .is_some_and(|source| { source.contains("/private/import-source") }));
+    assert_eq!(
+        loaded
+            .retrieval_representation
+            .as_ref()
+            .expect("imported representation"),
+        remembered
+            .memory
+            .retrieval_representation
+            .as_ref()
+            .expect("source representation")
+    );
+    let search = search_memories(
+        &import_path,
+        &SearchRequest {
+            query: "zephyr-archive-term".to_string(),
+            filters: SearchFilters::default(),
+            limit: 10,
+            offset: 0,
+            snippet_chars: 80,
+            include_content: false,
+            include_source: false,
+            semantic_fallback: "disabled".to_string(),
+            lexical_fallback: "disabled".to_string(),
+            embedding: None,
+            query_token_embedding: None,
+            token_model_id: None,
+        },
+    )
+    .expect("search imported card");
+    assert_eq!(search.results[0].memory_id, remembered.memory.id);
 
     export_store(
         &import_path,
@@ -5930,100 +7287,196 @@ fn import_round_trips_export_and_rebuilds_indexes() {
 }
 
 #[test]
-fn import_round_trip_preserves_custom_long_term_default() {
-    let path = temp_store_path("import_custom_long_term_source");
-    let import_path = temp_store_path("import_custom_long_term_target");
-    let export_a = temp_store_path("import_custom_long_term_a").with_extension("jsonl");
-    let export_b = temp_store_path("import_custom_long_term_b").with_extension("jsonl");
-    cleanup_store(&path);
-    cleanup_store(&import_path);
-    cleanup_store(&export_a);
-    cleanup_store(&export_b);
-
-    init_store(&path).expect("init succeeds");
-    create_space(
-        &path,
-        &SpaceCreateRequest {
-            name: "hosted-validation".to_string(),
-            display_name: Some("Hosted Validation".to_string()),
-            description: Some("Synthetic hosted contract validation".to_string()),
-            default_silo: Some("long-term".to_string()),
-            ontology: None,
-            config_json: None,
-            if_not_exists: false,
-        },
+fn import_rejects_representation_hash_mismatch() {
+    let source = temp_store_path("representation_hash_source");
+    let target = temp_store_path("representation_hash_target");
+    let archive = temp_store_path("representation_hash_archive").with_extension("jsonl");
+    cleanup_store(&source);
+    cleanup_store(&target);
+    cleanup_store(&archive);
+    init_store(&source).expect("init source");
+    let remembered = remember_memory(
+        &source,
+        &represented_request("fact: archive hash target", "archive hash card"),
     )
-    .expect("custom space create succeeds");
-
-    init_store(&path).expect("re-init preserves custom space");
-    let source_space = list_spaces(&path)
-        .expect("list source spaces")
-        .spaces
-        .into_iter()
-        .find(|space| space.name == "hosted-validation")
-        .expect("custom source space exists");
-    assert_eq!(source_space.default_silo, "long-term");
-    let source_silos = list_silos(
-        &path,
-        &SiloListRequest {
-            space: Some("hosted-validation".to_string()),
-        },
-    )
-    .expect("list source silos");
-    assert!(source_silos
-        .silos
-        .iter()
-        .any(|silo| silo.name == "long-term" && silo.is_default));
-
-    let mut request = basic_request("preference: synthetic hosted contract uses long-term");
-    request.space = Some("hosted-validation".to_string());
-    request.silo = None;
-    let remembered = remember_memory(&path, &request).expect("remember in custom space");
-    assert_eq!(remembered.memory.silo, "long-term");
-
+    .expect("remember represented");
     export_store(
-        &path,
+        &source,
         &ExportRequest {
-            output_path: export_a.clone(),
+            output_path: archive.clone(),
             format: "jsonl".to_string(),
         },
     )
-    .expect("source export succeeds");
-    import_store(
-        &import_path,
-        &ImportRequest {
-            input_path: export_a.clone(),
-            format: "jsonl".to_string(),
-            dry_run: false,
-            conflict_policy: "fail_if_exists".to_string(),
-        },
-    )
-    .expect("strict import succeeds");
+    .expect("export represented store");
+    let hash = remembered
+        .memory
+        .retrieval_representation
+        .as_ref()
+        .expect("representation")
+        .text_sha256
+        .clone();
+    let contents = fs::read_to_string(&archive)
+        .expect("read archive")
+        .replacen(&hash, &"0".repeat(64), 1);
+    fs::write(&archive, contents).expect("write corrupted archive");
 
-    let imported_space = list_spaces(&import_path)
-        .expect("list imported spaces")
-        .spaces
-        .into_iter()
-        .find(|space| space.name == "hosted-validation")
-        .expect("custom imported space exists");
-    assert_eq!(imported_space.default_silo, "long-term");
+    let error = import_store(&target, &import_request_for(&archive, false))
+        .expect_err("hash mismatch must fail");
+    assert!(error
+        .to_string()
+        .contains("import archive has representation hash mismatch"));
+    assert!(!target.exists());
+    cleanup_store(&source);
+    cleanup_store(&target);
+    cleanup_store(&archive);
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn import_accepts_v5_archive_with_identity_fallback() {
+    let source = temp_store_path("legacy_v5_archive_source");
+    let target = temp_store_path("legacy_v5_archive_target");
+    let current = temp_store_path("legacy_v5_archive_current").with_extension("jsonl");
+    let legacy = temp_store_path("legacy_v5_archive_legacy").with_extension("jsonl");
+    for path in [&source, &target, &current, &legacy] {
+        cleanup_store(path);
+    }
+    init_store(&source).expect("init source");
+    let mut first_request = basic_request("decision: legacy archive alpha target");
+    first_request.summary = Some("legacy alpha summary".to_string());
+    first_request.tags = vec!["legacy".to_string()];
+    let first = remember_memory(&source, &first_request).expect("remember first");
+    remember_memory(&source, &basic_request("fact: legacy archive beta filler"))
+        .expect("remember second");
     export_store(
-        &import_path,
+        &source,
         &ExportRequest {
-            output_path: export_b.clone(),
+            output_path: current.clone(),
             format: "jsonl".to_string(),
         },
     )
-    .expect("round-trip export succeeds");
+    .expect("export current archive");
+
+    let mut legacy_lines = Vec::new();
+    for line in fs::read_to_string(&current)
+        .expect("read current archive")
+        .lines()
+    {
+        let mut value: serde_json::Value = serde_json::from_str(line).expect("parse archive row");
+        match value["type"].as_str().expect("record type") {
+            "header" => {
+                value["schema_version"] = serde_json::json!(5);
+                value["tables"]
+                    .as_array_mut()
+                    .expect("tables")
+                    .retain(|table| table != "memory_representations");
+            }
+            "row" if value["table"] == "memory_representations" => continue,
+            "row" if value["table"] == "schema_migrations" && value["data"]["version"] == 6 => {
+                continue;
+            }
+            "row" if value["table"] == "config_kv" && value["data"]["key"] == "schema_version" => {
+                value["data"]["value"] = serde_json::json!("5");
+            }
+            "footer" => {
+                let counts = value["table_counts"].as_object_mut().expect("table counts");
+                counts.remove("memory_representations");
+                let migrations = counts["schema_migrations"]
+                    .as_u64()
+                    .expect("migration count");
+                counts.insert(
+                    "schema_migrations".to_string(),
+                    serde_json::json!(migrations - 1),
+                );
+                let rows = value["row_count"].as_u64().expect("row count");
+                value["row_count"] = serde_json::json!(rows - 1);
+            }
+            _ => {}
+        }
+        legacy_lines.push(serde_json::to_string(&value).expect("serialize legacy row"));
+    }
+    fs::write(&legacy, legacy_lines.join("\n") + "\n").expect("write legacy archive");
+
+    let report = import_store(&target, &import_request_for(&legacy, false)).expect("import v5");
+    assert_eq!(report.schema_version, 5);
     assert_eq!(
-        fs::read(&export_a).expect("read source export"),
-        fs::read(&export_b).expect("read round-trip export")
+        store_stats(&target, true)
+            .expect("target stats")
+            .schema_version,
+        6
+    );
+    let connection = Connection::open(&target).expect("open target");
+    let representations: i64 = connection
+        .query_row("SELECT COUNT(*) FROM memory_representations", [], |row| {
+            row.get(0)
+        })
+        .expect("representation count");
+    assert_eq!(representations, 0);
+    drop(connection);
+    let loaded = get_memory(
+        &target,
+        &first.memory.id,
+        GetOptions {
+            include_history: true,
+            include_links: false,
+            include_source: false,
+        },
+    )
+    .expect("load imported identity memory");
+    assert_eq!(loaded.content_sha256, first.memory.content_sha256);
+    assert!(loaded.retrieval_representation.is_none());
+    let source_search = search_memories(
+        &source,
+        &SearchRequest {
+            query: "legacy archive".to_string(),
+            filters: SearchFilters::default(),
+            limit: 10,
+            offset: 0,
+            snippet_chars: 80,
+            include_content: false,
+            include_source: false,
+            semantic_fallback: "disabled".to_string(),
+            lexical_fallback: "disabled".to_string(),
+            embedding: None,
+            query_token_embedding: None,
+            token_model_id: None,
+        },
+    )
+    .expect("source search");
+    let target_search = search_memories(
+        &target,
+        &SearchRequest {
+            query: "legacy archive".to_string(),
+            filters: SearchFilters::default(),
+            limit: 10,
+            offset: 0,
+            snippet_chars: 80,
+            include_content: false,
+            include_source: false,
+            semantic_fallback: "disabled".to_string(),
+            lexical_fallback: "disabled".to_string(),
+            embedding: None,
+            query_token_embedding: None,
+            token_model_id: None,
+        },
+    )
+    .expect("target search");
+    assert_eq!(
+        source_search
+            .results
+            .iter()
+            .map(|row| row.memory_id.as_str())
+            .collect::<Vec<_>>(),
+        target_search
+            .results
+            .iter()
+            .map(|row| row.memory_id.as_str())
+            .collect::<Vec<_>>()
     );
 
-    cleanup_store(&path);
-    cleanup_store(&import_path);
-    cleanup_store(&export_a);
-    cleanup_store(&export_b);
+    for path in [&source, &target, &current, &legacy] {
+        cleanup_store(path);
+    }
 }
 
 #[test]
@@ -6709,6 +8162,7 @@ fn remember_dry_run_rolls_back() {
         kind: Some("fact".to_string()),
         content: "dry run only".to_string(),
         summary: None,
+        retrieval_representation: None,
         tags: Vec::new(),
         entity_key: None,
         claim_key: None,
@@ -7444,6 +8898,26 @@ fn candidate_submit_list_approve_promotes_to_memory() {
     assert_eq!(approved.candidate.status, "approved");
     assert_eq!(approved.memory.status, "active");
     assert_eq!(approved.memory.kind, "preference");
+    assert!(approved
+        .memory
+        .entity_key
+        .as_deref()
+        .is_some_and(|key| key.starts_with("auto:")));
+    assert!(approved
+        .memory
+        .claim_key
+        .as_deref()
+        .is_some_and(|key| key.starts_with("auto:")));
+    let projected_entities = search_entities(
+        &path,
+        &EntitySearchRequest {
+            entity_key: approved.memory.entity_key.clone(),
+            limit: 10,
+            ..entity_search_defaults()
+        },
+    )
+    .expect("candidate entity projection search succeeds");
+    assert_eq!(projected_entities.results.len(), 1);
     assert_eq!(
         approved.candidate.resulting_memory_id.as_deref(),
         Some(approved.memory.id.as_str())
@@ -7685,6 +9159,7 @@ fn remember_request(content: &str) -> RememberRequest {
         kind: None,
         content: content.to_string(),
         summary: None,
+        retrieval_representation: None,
         tags: Vec::new(),
         entity_key: None,
         claim_key: None,
@@ -7798,6 +9273,7 @@ fn basic_request(content: &str) -> RememberRequest {
         kind: Some("fact".to_string()),
         content: content.to_string(),
         summary: None,
+        retrieval_representation: None,
         tags: Vec::new(),
         entity_key: None,
         claim_key: None,
@@ -7903,7 +9379,10 @@ fn schema_v4_uses_1024_dim_vec_table() {
     let version: i32 = conn
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .expect("user_version");
-    assert_eq!(version, 5, "schema version should be 5");
+    assert_eq!(
+        version, SCHEMA_VERSION,
+        "fresh store should use the current schema version"
+    );
     assert!(has_1024 > 0, "memory_vec_1024 table should exist");
     assert_eq!(has_1536, 0, "memory_vec_1536 table should not exist");
 }
@@ -8332,6 +9811,7 @@ fn merge_rerank_pools_interleaves_ann_first_dedupes_and_caps() {
     let item = |id: &str, score: f64| PackPoolItem {
         memory_id: id.to_string(),
         score,
+        admissions: Vec::new(),
     };
     let ann = vec![item("a", 0.9), item("b", 0.8), item("c", 0.7)];
     let bm25 = vec![item("b", 0.5), item("d", 0.4)];
@@ -8353,8 +9833,99 @@ fn merge_rerank_pools_interleaves_ann_first_dedupes_and_caps() {
 }
 
 #[test]
+fn merge_rerank_pools_retains_overlapping_admission_sources() {
+    use super::{merge_rerank_pools, AdmissionSource, PackPoolItem};
+
+    let ann = vec![PackPoolItem::direct_candidate(
+        "shared".to_string(),
+        0.9,
+        AdmissionSource::Ann,
+        0,
+        1,
+    )];
+    let bm25 = vec![PackPoolItem::direct_candidate(
+        "shared".to_string(),
+        0.8,
+        AdmissionSource::Bm25,
+        0,
+        1,
+    )];
+
+    let merged = merge_rerank_pools(&ann, &bm25, 1);
+
+    assert_eq!(merged.len(), 1);
+    assert_eq!(merged[0].memory_id, "shared");
+    assert!((merged[0].score - 0.9).abs() < f64::EPSILON);
+    assert_eq!(merged[0].admissions.len(), 2);
+    assert_eq!(merged[0].admissions[0].source, AdmissionSource::Ann);
+    assert_eq!(merged[0].admissions[1].source, AdmissionSource::Bm25);
+}
+
+#[test]
+fn interleave_pools_retains_later_query_observations_at_cap() {
+    use super::{interleave_pools, AdmissionSource, PackPoolItem};
+
+    let first_query = vec![PackPoolItem::direct_candidate(
+        "shared".to_string(),
+        0.9,
+        AdmissionSource::Maxsim,
+        0,
+        1,
+    )];
+    let second_query = vec![PackPoolItem::direct_candidate(
+        "shared".to_string(),
+        0.8,
+        AdmissionSource::Maxsim,
+        1,
+        1,
+    )];
+
+    let merged = interleave_pools(&[first_query, second_query], 1);
+
+    assert_eq!(merged.len(), 1);
+    assert_eq!(merged[0].memory_id, "shared");
+    assert_eq!(
+        merged[0]
+            .admissions
+            .iter()
+            .map(|observation| observation.query_index)
+            .collect::<Vec<_>>(),
+        vec![0, 1]
+    );
+}
+
+#[test]
+fn merge_rerank_pools_traces_candidates_displaced_by_hybrid_cap() {
+    use super::{merge_rerank_pools_with_trace, AdmissionSource, PackPoolItem};
+
+    let ann = vec![
+        PackPoolItem::direct_candidate("ann-1".to_string(), 0.9, AdmissionSource::Ann, 0, 1),
+        PackPoolItem::direct_candidate("ann-2".to_string(), 0.8, AdmissionSource::Ann, 0, 2),
+    ];
+    let bm25 = vec![
+        PackPoolItem::direct_candidate("bm25-1".to_string(), 0.7, AdmissionSource::Bm25, 0, 1),
+        PackPoolItem::direct_candidate("bm25-2".to_string(), 0.6, AdmissionSource::Bm25, 0, 2),
+    ];
+
+    let (admitted, observed) = merge_rerank_pools_with_trace(&ann, &bm25, 2);
+
+    assert_eq!(
+        admitted
+            .iter()
+            .map(|item| item.memory_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["ann-1", "bm25-1"]
+    );
+    assert_eq!(observed.len(), 4);
+    assert!(observed[0].admitted);
+    assert!(observed[1].admitted);
+    assert_eq!(observed[2].dropped_at.as_deref(), Some("hybrid_cap"));
+    assert_eq!(observed[3].dropped_at.as_deref(), Some("hybrid_cap"));
+}
+
+#[test]
 fn build_hybrid_rerank_pool_fetches_contents_on_one_snapshot() {
-    use super::build_hybrid_rerank_pool;
+    use super::{build_hybrid_rerank_pool, AdmissionSource};
     let path = temp_store_path("hybrid_rerank_pool_contents");
     cleanup_store(&path);
     init_store(&path).expect("init succeeds");
@@ -8385,12 +9956,17 @@ fn build_hybrid_rerank_pool_fetches_contents_on_one_snapshot() {
     assert!(!pool.candidates.is_empty());
     assert_eq!(pool.candidates[0].memory_id, first.memory.id);
     assert_eq!(pool.candidates[0].content, "alpha retrieval probe content");
+    assert_eq!(pool.candidates[0].admissions.len(), 1);
+    assert_eq!(
+        pool.candidates[0].admissions[0].source,
+        AdmissionSource::Bm25
+    );
     assert!(pool.cos_top > f64::MIN);
     cleanup_store(&path);
 }
 
 #[test]
-fn hybrid_rerank_pool_late_interaction_splits_summary_from_content() {
+fn rerank_pool_uses_retrieval_companion() {
     // LI mode must NOT concatenate summary into the rerank/pack text: on
     // prefix-duplicate summaries the concat corrupts cross-encoder ordering
     // (2026-06-12 adversarial diagnosis, -0.066 LoCoMo MRR). The summary is
@@ -8403,9 +9979,14 @@ fn hybrid_rerank_pool_late_interaction_splits_summary_from_content() {
 
     let mut with_summary = basic_request("gamma retrieval probe content");
     with_summary.summary = Some("gamma summary line".to_string());
+    with_summary.retrieval_representation = Some(RetrievalRepresentationInput {
+        kind: "contextual-card-v1".to_string(),
+        text: "gamma contextual card".to_string(),
+    });
     let first = remember_memory(&path, &with_summary).expect("remember with summary");
-    let second = remember_memory(&path, &basic_request("delta retrieval probe content"))
-        .expect("remember without summary");
+    let mut identity = basic_request("delta retrieval probe content");
+    identity.summary = Some("delta identity summary".to_string());
+    let second = remember_memory(&path, &identity).expect("remember identity summary");
 
     let model = "colbert-li-split-test";
     {
@@ -8439,25 +10020,155 @@ fn hybrid_rerank_pool_late_interaction_splits_summary_from_content() {
             .unwrap_or_else(|| panic!("candidate {id} present"))
     };
     let cand = by_id(&first.memory.id);
+    assert!(cand
+        .admissions
+        .iter()
+        .any(|observation| observation.source == super::AdmissionSource::Maxsim));
     assert_eq!(
         cand.content, "gamma retrieval probe content",
         "LI content must stay content-only (no summary concat)"
     );
     assert_eq!(
         cand.summary.as_deref(),
-        Some("gamma summary line"),
-        "LI candidate carries the summary as an alternate rerank text"
+        Some("gamma contextual card"),
+        "LI candidate carries the representation as its alternate rerank text"
     );
     assert_eq!(
-        by_id(&second.memory.id).summary,
-        None,
-        "empty summary must not produce an alternate text"
+        by_id(&second.memory.id).summary.as_deref(),
+        Some("delta identity summary"),
+        "identity candidate carries its persisted summary"
     );
 
     let legacy = build_hybrid_rerank_pool(&path, &request(false), 5).expect("legacy pool builds");
     assert!(
         legacy.candidates.iter().all(|c| c.summary.is_none()),
         "flag-off candidates must carry no summary"
+    );
+    cleanup_store(&path);
+}
+
+#[test]
+fn hybrid_maxsim_applies_entity_filter_before_selection() {
+    let path = temp_store_path("hybrid_maxsim_prefilters_entity");
+    cleanup_store(&path);
+    init_store(&path).expect("init succeeds");
+
+    let mut target_request = basic_request("target needle belongs to the requested entity");
+    target_request.entity_key = Some("conversation-target".to_string());
+    let target = remember_memory(&path, &target_request)
+        .expect("remember target")
+        .memory
+        .id;
+
+    let mut distractor_request = basic_request("unrelated globally stronger memory");
+    distractor_request.entity_key = Some("conversation-distractor".to_string());
+    let distractor = remember_memory(&path, &distractor_request)
+        .expect("remember distractor")
+        .memory
+        .id;
+
+    let model = "colbert-hybrid-prefilter-test";
+    let connection = Connection::open(&path).expect("open store");
+    upsert_memory_token_embedding(&connection, &target, model, &[vec![0.8, 0.0]])
+        .expect("upsert target tokens");
+    upsert_memory_token_embedding(&connection, &distractor, model, &[vec![1.0, 0.0]])
+        .expect("upsert distractor tokens");
+    drop(connection);
+
+    let pool = super::build_hybrid_rerank_pool(
+        &path,
+        &PackRequest {
+            title: "filtered maxsim".to_string(),
+            queries: vec!["target needle".to_string()],
+            filters: SearchFilters {
+                entity_keys: vec!["conversation-target".to_string()],
+                ..SearchFilters::default()
+            },
+            max_memories: 1,
+            max_chars: 2_000,
+            format: "markdown".to_string(),
+            min_score: 0.0,
+            rerank_candidates: 0,
+            query_embeddings: None,
+            query_token_embeddings: Some(vec![vec![vec![1.0, 0.0]]]),
+            token_model_id: Some(model.to_string()),
+        },
+        1,
+    )
+    .expect("hybrid pool builds");
+
+    assert_eq!(pool.candidates.len(), 1);
+    assert_eq!(
+        pool.candidates[0].memory_id, target,
+        "MaxSim width must be applied inside the requested entity scope"
+    );
+    assert!(pool.candidates[0]
+        .admissions
+        .iter()
+        .any(|observation| observation.source == super::AdmissionSource::Maxsim));
+    cleanup_store(&path);
+}
+
+#[cfg(feature = "semantic")]
+#[test]
+fn semantic_maxsim_applies_entity_filter_before_selection() {
+    let path = temp_store_path("semantic_maxsim_prefilters_entity");
+    cleanup_store(&path);
+    init_store(&path).expect("init succeeds");
+
+    let mut target_request = basic_request("semantic target content");
+    target_request.entity_key = Some("conversation-target".to_string());
+    target_request.embedding = Some(vec![1.0, 0.0, 0.0, 0.0]);
+    target_request.embedding_model_id = Some("semantic-prefilter-test".to_string());
+    let target = remember_memory(&path, &target_request)
+        .expect("remember target")
+        .memory
+        .id;
+
+    let mut distractor_request = basic_request("semantic distractor content");
+    distractor_request.entity_key = Some("conversation-distractor".to_string());
+    distractor_request.embedding = Some(vec![1.0, 0.0, 0.0, 0.0]);
+    distractor_request.embedding_model_id = Some("semantic-prefilter-test".to_string());
+    let distractor = remember_memory(&path, &distractor_request)
+        .expect("remember distractor")
+        .memory
+        .id;
+
+    let token_model = "colbert-semantic-prefilter-test";
+    let connection = Connection::open(&path).expect("open store");
+    upsert_memory_token_embedding(&connection, &target, token_model, &[vec![0.8, 0.0]])
+        .expect("upsert target tokens");
+    upsert_memory_token_embedding(&connection, &distractor, token_model, &[vec![1.0, 0.0]])
+        .expect("upsert distractor tokens");
+    drop(connection);
+
+    let report = search_memories(
+        &path,
+        &SearchRequest {
+            query: "lexically unmatched probe".to_string(),
+            filters: SearchFilters {
+                entity_keys: vec!["conversation-target".to_string()],
+                ..SearchFilters::default()
+            },
+            limit: 1,
+            offset: 0,
+            snippet_chars: 80,
+            include_content: false,
+            include_source: false,
+            semantic_fallback: "fallback".to_string(),
+            lexical_fallback: "disabled".to_string(),
+            embedding: Some(vec![1.0, 0.0, 0.0, 0.0]),
+            query_token_embedding: Some(vec![vec![1.0, 0.0]]),
+            token_model_id: Some(token_model.to_string()),
+        },
+    )
+    .expect("semantic search succeeds");
+
+    assert_eq!(report.strategy, "semantic_primary_v0");
+    assert_eq!(report.results.len(), 1);
+    assert_eq!(
+        report.results[0].memory_id, target,
+        "MaxSim selection must retain the requested entity before SQL projection"
     );
     cleanup_store(&path);
 }
@@ -9303,6 +11014,241 @@ fn schema_v5_has_token_table() {
         })
         .expect("token table exists");
     assert_eq!(n, 0);
+}
+
+#[test]
+fn schema_v6_has_version_representations_and_retrieval_text_fts() {
+    let path = temp_store_path("schema_v6_representation");
+    cleanup_store(&path);
+    init_store(&path).expect("init");
+    let connection = Connection::open(&path).expect("open");
+    let version: i32 = connection
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
+        .expect("version");
+    assert_eq!(version, 6);
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE name='memory_representations'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("table count"),
+        1
+    );
+    for table in ["memory_fts", "memory_fts_public"] {
+        let fts_sql: String = connection
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE name=?1",
+                [table],
+                |row| row.get(0),
+            )
+            .expect("fts sql");
+        assert!(fts_sql.contains("retrieval_text"));
+        assert!(!fts_sql.contains("summary"));
+    }
+    drop(connection);
+    cleanup_store(&path);
+}
+
+fn downgrade_representation_fixture_to_v5(connection: &Connection) {
+    connection
+        .execute_batch(
+            "DROP TABLE IF EXISTS memory_representations;
+             CREATE VIRTUAL TABLE memory_fts_v5 USING fts5(
+               memory_id UNINDEXED, version_id UNINDEXED, space_name UNINDEXED,
+               silo_name UNINDEXED, status UNINDEXED, kind UNINDEXED,
+               content, summary, tags, source_text, metadata_text,
+               tokenize = 'unicode61 remove_diacritics 2'
+             );
+             INSERT INTO memory_fts_v5 SELECT * FROM memory_fts;
+             DROP TABLE memory_fts;
+             CREATE VIRTUAL TABLE memory_fts USING fts5(
+               memory_id UNINDEXED, version_id UNINDEXED, space_name UNINDEXED,
+               silo_name UNINDEXED, status UNINDEXED, kind UNINDEXED,
+               content, summary, tags, source_text, metadata_text,
+               tokenize = 'unicode61 remove_diacritics 2'
+             );
+             INSERT INTO memory_fts SELECT * FROM memory_fts_v5;
+             DROP TABLE memory_fts_v5;
+             CREATE VIRTUAL TABLE memory_fts_public_v5 USING fts5(
+               memory_id UNINDEXED, version_id UNINDEXED, space_name UNINDEXED,
+               silo_name UNINDEXED, status UNINDEXED, kind UNINDEXED,
+               content, summary, tags, metadata_text,
+               tokenize = 'unicode61 remove_diacritics 2'
+             );
+             INSERT INTO memory_fts_public_v5 SELECT * FROM memory_fts_public;
+             DROP TABLE memory_fts_public;
+             CREATE VIRTUAL TABLE memory_fts_public USING fts5(
+               memory_id UNINDEXED, version_id UNINDEXED, space_name UNINDEXED,
+               silo_name UNINDEXED, status UNINDEXED, kind UNINDEXED,
+               content, summary, tags, metadata_text,
+               tokenize = 'unicode61 remove_diacritics 2'
+             );
+             INSERT INTO memory_fts_public SELECT * FROM memory_fts_public_v5;
+             DROP TABLE memory_fts_public_v5;
+             DELETE FROM schema_migrations WHERE version = 6;
+             UPDATE config_kv SET value = '5' WHERE key = 'schema_version';
+             PRAGMA user_version = 5;",
+        )
+        .expect("downgrade fixture to v5");
+}
+
+fn representation_migration_search_ids(path: &Path) -> Vec<String> {
+    search_memories(
+        path,
+        &SearchRequest {
+            query: "representation migration marker".to_string(),
+            filters: SearchFilters::default(),
+            limit: 10,
+            offset: 0,
+            snippet_chars: 240,
+            include_content: false,
+            include_source: false,
+            semantic_fallback: "disabled".to_string(),
+            lexical_fallback: "disabled".to_string(),
+            embedding: None,
+            query_token_embedding: None,
+            token_model_id: None,
+        },
+    )
+    .expect("lexical search")
+    .results
+    .into_iter()
+    .map(|row| row.memory_id)
+    .collect()
+}
+
+fn representation_migration_pack_ids(path: &Path) -> Vec<String> {
+    build_pack(
+        path,
+        &PackRequest {
+            title: "representation migration".to_string(),
+            queries: vec!["representation migration marker".to_string()],
+            filters: SearchFilters::default(),
+            max_memories: 10,
+            max_chars: 2_000,
+            format: "markdown".to_string(),
+            min_score: 0.0,
+            rerank_candidates: 0,
+            query_embeddings: None,
+            query_token_embeddings: None,
+            token_model_id: None,
+        },
+    )
+    .expect("pack")
+    .memory_ids
+}
+
+#[test]
+fn migrate_v5_representation_preserves_identity_observables() {
+    let path = temp_store_path("migrate_v5_representation");
+    cleanup_store(&path);
+    init_store(&path).expect("init");
+    let mut request = basic_request("fact: representation migration marker remains searchable");
+    request.summary = Some("representation migration marker".to_string());
+    request.tags = vec!["migration-fixture".to_string()];
+    request.entity_key = Some("test:representation-migration".to_string());
+    request.claim_key = Some("test.representation-migration".to_string());
+    let remembered = remember_memory(&path, &request).expect("remember fixture");
+
+    let before_search = representation_migration_search_ids(&path);
+    let before_pack = representation_migration_pack_ids(&path);
+    let connection = Connection::open(&path).expect("open fixture");
+    let count_queries = [
+        "SELECT count(*) FROM memories",
+        "SELECT count(*) FROM memory_versions",
+        "SELECT count(*) FROM memory_events",
+        "SELECT count(*) FROM memory_tags",
+        "SELECT count(*) FROM source_episodes",
+        "SELECT count(*) FROM entities",
+        "SELECT count(*) FROM relationships",
+        "SELECT count(*) FROM embeddings",
+        "SELECT count(*) FROM memory_token_embeddings",
+    ];
+    let before_counts: Vec<i64> = count_queries
+        .iter()
+        .map(|sql| {
+            connection
+                .query_row(sql, [], |row| row.get(0))
+                .expect("fixture count")
+        })
+        .collect();
+    let before_hash: String = connection
+        .query_row(
+            "SELECT content_sha256 FROM memory_versions WHERE id=?1",
+            [&remembered.memory.version_id],
+            |row| row.get(0),
+        )
+        .expect("content hash");
+    downgrade_representation_fixture_to_v5(&connection);
+    drop(connection);
+
+    init_store(&path).expect("migrate v5 to v6");
+    let connection = Connection::open(&path).expect("open migrated fixture");
+    assert_eq!(
+        connection
+            .query_row("PRAGMA user_version", [], |row| row.get::<_, i32>(0))
+            .expect("schema version"),
+        6
+    );
+    assert_eq!(
+        connection
+            .query_row("SELECT count(*) FROM memory_representations", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .expect("representation count"),
+        0
+    );
+    let after_counts: Vec<i64> = count_queries
+        .iter()
+        .map(|sql| {
+            connection
+                .query_row(sql, [], |row| row.get(0))
+                .expect("migrated count")
+        })
+        .collect();
+    let after_hash: String = connection
+        .query_row(
+            "SELECT content_sha256 FROM memory_versions WHERE id=?1",
+            [&remembered.memory.version_id],
+            |row| row.get(0),
+        )
+        .expect("migrated content hash");
+    drop(connection);
+
+    assert_eq!(after_counts, before_counts);
+    assert_eq!(after_hash, before_hash);
+    assert_eq!(representation_migration_search_ids(&path), before_search);
+    assert_eq!(representation_migration_pack_ids(&path), before_pack);
+    cleanup_store(&path);
+}
+
+#[test]
+fn open_initialized_write_migrates_v5_representation_schema() {
+    let path = temp_store_path("open_write_migrates_v5_representation");
+    cleanup_store(&path);
+    init_store(&path).expect("init");
+    let connection = Connection::open(&path).expect("open fixture");
+    downgrade_representation_fixture_to_v5(&connection);
+    drop(connection);
+
+    let connection = open_initialized_write(&path).expect("write open migrates v5");
+    assert_eq!(
+        connection
+            .query_row("PRAGMA user_version", [], |row| row.get::<_, i32>(0))
+            .expect("schema version"),
+        6
+    );
+    assert_eq!(
+        connection
+            .query_row("SELECT count(*) FROM memory_representations", [], |row| row
+                .get::<_, i64>(0),)
+            .expect("representation table"),
+        0
+    );
+    drop(connection);
+    cleanup_store(&path);
 }
 
 #[test]

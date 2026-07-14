@@ -1,27 +1,255 @@
 //! Unit tests for the memkeeper CLI binary.
 
+#[cfg(feature = "semantic")]
+use super::run_rerank_payload;
 use super::{
     backup_request_from_json, batch_search_request_from_json, diagnostic_store_candidate_from,
-    dream_request_from_json, entity_search_request_from_json, entity_upsert_request_from_json,
-    export_request_from_json, forget_request_from_json, get_request_from_json,
-    graph_context_request_from_json, graph_neighbors_request_from_json, history_request_from_json,
-    hook_query_text, import_request_from_json, json_string, memory_list_request_from_json,
-    pack_expansion_options_from_json, pack_request_from_json, parse_backup_args,
-    parse_batch_search_args, parse_doctor_args, parse_dream_args, parse_entity_search_args,
-    parse_entity_upsert_args, parse_export_args, parse_forget_args, parse_graph_context_args,
-    parse_graph_neighbors_args, parse_history_args, parse_hook_flags, parse_import_args,
-    parse_memory_list_args, parse_pack_args, parse_relationship_upsert_args, parse_remember_args,
-    parse_serve_args, parse_serve_request, parse_silo_list_args, parse_space_create_args,
-    parse_space_list_args, parse_stats_args, parse_store_args,
-    relationship_upsert_request_from_json, remember_request_from_json, rerank_request_from_json,
-    search_request_from_json, serve_line_response, silo_list_request_from_json,
-    space_create_request_from_json, space_record_json, CliError, SemanticModels, SpaceRecord,
+    dream_graph_json, dream_request_from_json, entity_search_request_from_json,
+    entity_upsert_request_from_json, export_request_from_json, forget_request_from_json,
+    get_request_from_json, graph_context_request_from_json, graph_neighbors_request_from_json,
+    history_request_from_json, hook_query_text, import_request_from_json, json_string, memory_json,
+    memory_list_request_from_json, pack_expansion_options_from_json, pack_request_from_json,
+    parse_backup_args, parse_batch_search_args, parse_doctor_args, parse_dream_args,
+    parse_entity_search_args, parse_entity_upsert_args, parse_export_args, parse_forget_args,
+    parse_graph_context_args, parse_graph_neighbors_args, parse_history_args, parse_hook_flags,
+    parse_import_args, parse_memory_list_args, parse_pack_args, parse_relationship_upsert_args,
+    parse_remember_args, parse_serve_args, parse_serve_request, parse_silo_list_args,
+    parse_space_create_args, parse_space_list_args, parse_stats_args, parse_store_args,
+    pool_trace_result_json, relationship_upsert_request_from_json, remember_request_from_json,
+    remember_result_json, rerank_request_from_json, search_request_from_json, serve_line_response,
+    silo_list_request_from_json, space_create_request_from_json, space_record_json, versions_json,
+    CliError, DreamEntityProjection, DreamGraphReport, SemanticModels, SpaceRecord,
     DEFAULT_PROMOTE_THRESHOLD, PROJECT_STORE_RELATIVE_PATH,
 };
 use std::path::PathBuf;
 
+#[test]
+fn representation_output_is_conditional_and_auditable() {
+    use std::{fs, process, time::SystemTime};
+
+    let unique = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .expect("clock after epoch")
+        .as_nanos();
+    let path = std::env::temp_dir().join(format!(
+        "memkeeper-cli-representation-output-{}-{unique}.sqlite",
+        process::id()
+    ));
+    memkeeper_store::init_store(&path).expect("init succeeds");
+
+    let legacy_request = remember_request_from_json(r#"{"content":"fact: legacy output"}"#)
+        .expect("legacy request parses");
+    let legacy = memkeeper_store::remember_memory(&path, &legacy_request).expect("legacy remember");
+    assert!(!remember_result_json(&legacy).contains("\"representation\""));
+
+    let request = remember_request_from_json(
+        r#"{"content":"fact: represented output","summary":"visible summary","retrieval_representation":{"kind":"contextual-card-v1","text":"2026-07-14. represented output card"}}"#,
+    )
+    .expect("represented request parses");
+    let report = memkeeper_store::remember_memory(&path, &request).expect("represented remember");
+    let result_json = remember_result_json(&report);
+    assert!(!result_json.contains("2026-07-14. represented output card"));
+    let result: serde_json::Value = serde_json::from_str(&result_json).expect("result json");
+    assert!(result["memory"].get("retrieval_representation").is_none());
+    let status = &result["representation"];
+    assert_eq!(status["kind"], "contextual-card-v1");
+    assert_eq!(status["fts_indexed"], true);
+    assert_eq!(status["semantic_indexed"], false);
+    assert_eq!(status["status"], "lexical_only");
+    assert_eq!(status["text_sha256"].as_str().expect("hash").len(), 64);
+    assert!(status.get("text").is_none());
+
+    let loaded = memkeeper_store::get_memory(
+        &path,
+        &report.memory.id,
+        memkeeper_store::GetOptions {
+            include_history: true,
+            include_links: false,
+            include_source: false,
+        },
+    )
+    .expect("load represented memory");
+    let memory: serde_json::Value = serde_json::from_str(&memory_json(
+        &loaded,
+        memkeeper_store::GetOptions {
+            include_history: true,
+            include_links: false,
+            include_source: false,
+        },
+    ))
+    .expect("memory json");
+    assert_eq!(
+        memory["retrieval_representation"]["text"],
+        "2026-07-14. represented output card"
+    );
+    let versions: serde_json::Value = serde_json::from_str(&versions_json(
+        loaded.versions.as_deref().expect("versions"),
+    ))
+    .expect("versions json");
+    assert_eq!(
+        versions[0]["retrieval_representation"]["kind"],
+        "contextual-card-v1"
+    );
+
+    let _ = fs::remove_file(&path);
+    let base = path.to_string_lossy();
+    let _ = fs::remove_file(format!("{base}-wal"));
+    let _ = fs::remove_file(format!("{base}-shm"));
+}
+
+#[test]
+fn representation_rerank_documents_are_bounded() {
+    let content = "canonical-content-".repeat(50);
+    assert!(content.chars().count() > 512);
+    let card = "c".repeat(512);
+    let pool = vec![memkeeper_store::RerankPoolCandidate {
+        memory_id: "mem-represented".to_string(),
+        content: content.clone(),
+        summary: Some(card.clone()),
+        activation: None,
+        graph_pulled: false,
+        admissions: Vec::new(),
+    }];
+
+    let (documents, companion_indexes) = super::rerank_pool_documents(&pool, 512);
+    assert_eq!(documents.len(), 2);
+    assert_eq!(companion_indexes, vec![0]);
+    assert_eq!(documents[0].chars().count(), 512);
+    assert_eq!(documents[1], card);
+
+    let report = memkeeper_store::assemble_reranked_pack(
+        &memkeeper_store::PackRequest {
+            title: "bounded representation".to_string(),
+            queries: vec!["query".to_string()],
+            filters: memkeeper_store::SearchFilters::default(),
+            max_memories: 1,
+            max_chars: 5_000,
+            format: "markdown".to_string(),
+            min_score: 0.0,
+            rerank_candidates: 1,
+            query_embeddings: None,
+            query_token_embeddings: None,
+            token_model_id: None,
+        },
+        0.0,
+        1.0,
+        &[memkeeper_store::RerankCandidate {
+            memory_id: "mem-represented".to_string(),
+            content: content.clone(),
+            rerank_score: 1.0,
+            activation: None,
+            graph_pulled: false,
+        }],
+    );
+    assert!(report.content.contains(&content));
+}
+
+#[test]
+fn colbert_document_prefers_representation_over_summary() {
+    let request = remember_request_from_json(
+        r#"{"content":"canonical","summary":"summary","retrieval_representation":{"kind":"contextual-card-v1","text":"card"}}"#,
+    )
+    .expect("request parses");
+    assert_eq!(
+        super::remember_token_document(&request),
+        "card\n\ncanonical"
+    );
+}
+
+#[cfg(feature = "embed")]
+#[test]
+fn required_semantic_rejects_representation_encode_failure() {
+    let directory = tempfile::tempdir().expect("temp directory");
+    let path = directory.path().join("required-representation.sqlite");
+    memkeeper_store::init_store(&path).expect("init succeeds");
+    let payload = r#"{"content":"fact: canonical","retrieval_representation":{"kind":"contextual-card-v1","text":"context card"}}"#;
+    let args = vec![
+        "--store".to_string(),
+        path.to_string_lossy().into_owned(),
+        "--json".to_string(),
+        payload.to_string(),
+    ];
+    let models = SemanticModels::with_colbert_for_test(Box::new(FailingTokenEmbedder));
+
+    let refused = super::run_remember_with_models_and_requirement(&args, &models, true);
+    assert_ne!(refused, 0);
+    let connection = rusqlite::Connection::open(&path).expect("open store");
+    for table in ["memories", "memory_versions", "memory_representations"] {
+        let rows: i64 = connection
+            .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                row.get(0)
+            })
+            .expect("count rows");
+        assert_eq!(rows, 0, "required-mode failure must not write {table}");
+    }
+    drop(connection);
+
+    let degraded = super::run_remember_with_models_and_requirement(&args, &models, false);
+    assert_eq!(degraded, 0);
+    let connection = rusqlite::Connection::open(&path).expect("open store");
+    let memories: i64 = connection
+        .query_row("SELECT COUNT(*) FROM memories", [], |row| row.get(0))
+        .expect("memory count");
+    let representations: i64 = connection
+        .query_row("SELECT COUNT(*) FROM memory_representations", [], |row| {
+            row.get(0)
+        })
+        .expect("representation count");
+    let token_embeddings: i64 = connection
+        .query_row("SELECT COUNT(*) FROM memory_token_embeddings", [], |row| {
+            row.get(0)
+        })
+        .expect("token count");
+    assert_eq!(memories, 1);
+    assert_eq!(representations, 1);
+    assert_eq!(token_embeddings, 0);
+}
+
 #[cfg(feature = "embed")]
 struct FixedTestReranker;
+
+#[cfg(feature = "embed")]
+struct FixedTestEmbedder;
+
+#[cfg(feature = "embed")]
+struct FailingTokenEmbedder;
+
+#[cfg(feature = "embed")]
+impl memkeeper_embed::TokenEmbedder for FailingTokenEmbedder {
+    fn model_id(&self) -> &'static str {
+        "failing-token-embedder"
+    }
+
+    fn dims(&self) -> usize {
+        96
+    }
+
+    fn encode_query(&mut self, _text: &str) -> memkeeper_embed::ProviderResult<Vec<Vec<f32>>> {
+        Err(std::io::Error::other("injected token encode failure").into())
+    }
+
+    fn encode_docs(
+        &mut self,
+        _texts: &[&str],
+    ) -> memkeeper_embed::ProviderResult<Vec<Vec<Vec<f32>>>> {
+        Err(std::io::Error::other("injected token encode failure").into())
+    }
+}
+
+#[cfg(feature = "embed")]
+impl memkeeper_embed::Embedder for FixedTestEmbedder {
+    fn model_id(&self) -> &'static str {
+        "fixed-test-embedder"
+    }
+
+    fn dims(&self) -> usize {
+        2
+    }
+
+    fn embed(&mut self, texts: &[&str]) -> memkeeper_embed::ProviderResult<Vec<Vec<f32>>> {
+        Ok(texts.iter().map(|_| vec![1.0, 0.0]).collect())
+    }
+}
 
 #[cfg(feature = "embed")]
 impl memkeeper_embed::Reranker for FixedTestReranker {
@@ -39,6 +267,30 @@ impl memkeeper_embed::Reranker for FixedTestReranker {
             .map(|document| if document.contains("alpha") { 0.9 } else { 0.2 })
             .collect())
     }
+}
+
+#[cfg(feature = "semantic")]
+#[test]
+fn standalone_rerank_reports_loaded_provider_model_id() {
+    use std::sync::Mutex;
+
+    let models = SemanticModels {
+        embed: None,
+        rerank: Some(Mutex::new(Box::new(FixedTestReranker))),
+        colbert: None,
+        rerank_shadow: None,
+    };
+    let request = super::RerankRequest {
+        query: "alpha".to_string(),
+        documents: vec!["alpha document".to_string()],
+    };
+
+    let result = run_rerank_payload(&request, &models).expect("rerank succeeds");
+
+    assert!(
+        result.contains(r#""model_id":"fixed-production""#),
+        "result: {result}"
+    );
 }
 
 #[cfg(feature = "embed")]
@@ -749,6 +1001,28 @@ fn remember_json_parses_source_and_arrays() {
 }
 
 #[test]
+fn remember_json_parses_retrieval_representation() {
+    let request = remember_request_from_json(
+        r#"{"content":"fact","retrieval_representation":{"kind":"contextual-card-v1","text":"dated card"}}"#,
+    )
+    .expect("request parses");
+    let representation = request
+        .retrieval_representation
+        .expect("retrieval representation");
+    assert_eq!(representation.kind, "contextual-card-v1");
+    assert_eq!(representation.text, "dated card");
+}
+
+#[test]
+fn remember_json_rejects_unknown_representation_fields() {
+    let error = remember_request_from_json(
+        r#"{"content":"fact","retrieval_representation":{"kind":"contextual-card-v1","text":"card","query":"forbidden"}}"#,
+    )
+    .expect_err("unknown nested field fails");
+    assert!(error.to_string().contains("unknown field: query"));
+}
+
+#[test]
 fn json_parses_text_embedding_3_small_sized_arrays() {
     let embedding = std::iter::repeat_n("0.0", 1_536)
         .collect::<Vec<_>>()
@@ -794,9 +1068,22 @@ fn remember_json_derive_keys_does_not_override_caller_keys() {
 }
 
 #[test]
-fn remember_json_without_derive_keys_leaves_keys_unset() {
+fn remember_json_without_derive_keys_derives_keys_by_default() {
     let request =
         remember_request_from_json(r#"{"content":"fact: no keys here"}"#).expect("parse succeeds");
+    assert_eq!(request.entity_key.as_deref(), Some("auto:no-keys-here"));
+    assert!(request
+        .claim_key
+        .as_deref()
+        .is_some_and(|claim| claim.starts_with("auto:")));
+}
+
+#[test]
+fn remember_json_explicitly_disables_key_derivation() {
+    let request = remember_request_from_json(
+        r#"{"content":"fact: intentionally no keys here","derive_keys":false}"#,
+    )
+    .expect("parse succeeds");
     assert_eq!(request.entity_key, None);
     assert_eq!(request.claim_key, None);
 }
@@ -1136,6 +1423,63 @@ fn pack_json_and_flags_parse() {
 }
 
 #[test]
+fn graph_within_entity_maxsim_parses_defaults_and_is_documented() {
+    let enabled = pack_expansion_options_from_json(
+        r#"{"graph_expansion":true,"graph_within_entity_maxsim":true}"#,
+    )
+    .expect("experimental graph selector parses");
+    assert_eq!(
+        enabled.graph_within_entity_selection,
+        memkeeper_store::GraphWithinEntitySelection::Maxsim
+    );
+
+    let defaulted = pack_expansion_options_from_json("{}").expect("defaults parse");
+    assert_eq!(
+        defaulted.graph_within_entity_selection,
+        memkeeper_store::GraphWithinEntitySelection::Recency
+    );
+
+    for command in ["pack", "pool-trace"] {
+        let schema = crate::schema::COMMAND_SCHEMAS
+            .iter()
+            .find(|schema| schema.command == command)
+            .expect("command schema exists");
+        assert!(
+            schema
+                .fields
+                .iter()
+                .any(|field| field.name == "graph_within_entity_maxsim"),
+            "{command} documents the request-only selector"
+        );
+    }
+
+    let pack_tool = crate::mcp::tool_definitions()
+        .into_iter()
+        .find(|tool| tool["name"] == "pack")
+        .expect("pack tool exists");
+    assert!(
+        pack_tool["inputSchema"]["properties"]
+            .get("graph_within_entity_maxsim")
+            .is_some(),
+        "MCP pack schema exposes the selector"
+    );
+    let args = serde_json::Map::from_iter([
+        ("queries".to_string(), serde_json::json!(["graph recall"])),
+        (
+            "graph_within_entity_maxsim".to_string(),
+            serde_json::json!(true),
+        ),
+    ]);
+    let (_, payload) = crate::mcp::build_serve_call("pack", &args).expect("MCP maps pack");
+    assert_eq!(
+        pack_expansion_options_from_json(&payload)
+            .expect("mapped payload parses")
+            .graph_within_entity_selection,
+        memkeeper_store::GraphWithinEntitySelection::Maxsim
+    );
+}
+
+#[test]
 fn pack_json_rejects_unknown_fields() {
     let error = pack_request_from_json(r#"{"title":"impl","queries":["sqlite"],"surprise":true}"#)
         .expect_err("unknown field should fail");
@@ -1383,6 +1727,28 @@ fn dream_json_rejects_unknown_fields() {
 }
 
 #[test]
+fn dream_graph_json_includes_missing_entity_projections() {
+    let json = dream_graph_json(&DreamGraphReport {
+        attempted: true,
+        orphan_entities: 0,
+        dangling_relationships: 0,
+        inactive_evidence_relationships: 0,
+        missing_entity_projections: vec![DreamEntityProjection {
+            space: "workspace-memory".to_string(),
+            entity_key: "entity:missing".to_string(),
+        }],
+        relationship_proposals: Vec::new(),
+        truncated: false,
+        orphan_entity_ids: Vec::new(),
+        dangling_relationship_ids: Vec::new(),
+        inactive_evidence_relationship_ids: Vec::new(),
+    });
+    assert!(json.contains(
+        r#""missing_entity_projections":[{"space":"workspace-memory","entity_key":"entity:missing"}]"#
+    ));
+}
+
+#[test]
 fn backup_json_and_flags_parse() {
     let request = backup_request_from_json(r#"{"out":"backup.sqlite"}"#).expect("parse succeeds");
     assert_eq!(request.output_path.to_string_lossy(), "backup.sqlite");
@@ -1457,14 +1823,20 @@ fn semantic_guard_decides_serve_posture() {
 
 #[cfg(feature = "embed")]
 #[test]
-fn rerank_guard_is_loud_but_never_refuses() {
-    // The reranker only reorders results, so a missing reranker is loud but
-    // never fatal: NOTE by default, ERROR under require, always keep serving.
+fn rerank_guard_refuses_when_primary_required() {
     use super::serve::{rerank_guard, RerankGuard};
     assert_eq!(rerank_guard(true, false), RerankGuard::Ok);
     assert_eq!(rerank_guard(true, true), RerankGuard::Ok);
     assert_eq!(rerank_guard(false, false), RerankGuard::Degraded);
-    assert_eq!(rerank_guard(false, true), RerankGuard::Required);
+    assert_eq!(rerank_guard(false, true), RerankGuard::Refuse);
+}
+
+#[test]
+fn required_reranker_only_refuses_requested_missing_path() {
+    assert!(!super::must_refuse_without_reranker(false, false, true));
+    assert!(!super::must_refuse_without_reranker(true, true, true));
+    assert!(!super::must_refuse_without_reranker(true, false, false));
+    assert!(super::must_refuse_without_reranker(true, false, true));
 }
 
 #[cfg(feature = "embed")]
@@ -1518,6 +1890,7 @@ fn parse_payload_for(command: &str, json: &str) -> Result<(), CliError> {
         "memory-list" => memory_list_request_from_json(json).map(|_| ()),
         "batch-search" => batch_search_request_from_json(json).map(|_| ()),
         "pack" => pack_request_from_json(json).map(|_| ()),
+        "pool-trace" => pack_request_from_json(json).map(|_| ()),
         "get" => get_request_from_json(json).map(|_| ()),
         "forget" => forget_request_from_json(json).map(|_| ()),
         "verify" => verify_request_from_json(json).map(|_| ()),
@@ -1550,7 +1923,10 @@ fn dummy_value(field: &crate::schema::FieldDoc) -> &'static str {
         "int" => "1",
         "float" => "1.0",
         "bool" => "true",
-        "object" => "{}",
+        "object" => match field.name {
+            "retrieval_representation" => r#"{"kind":"contextual-card-v1","text":"context card"}"#,
+            _ => "{}",
+        },
         "float[]" => "[0.1]",
         "float[][]" => "[[0.1]]",
         "object[]" => match field.name {
@@ -1683,7 +2059,14 @@ fn schema_index_renders_valid_json() {
             .unwrap_or_else(|err| panic!("schema JSON for '{}' is invalid: {err}", schema.command));
     }
     // Reviewer-critical commands must be documented.
-    for command in ["remember", "search", "pack", "dream", "batch-search"] {
+    for command in [
+        "remember",
+        "search",
+        "pack",
+        "pool-trace",
+        "dream",
+        "batch-search",
+    ] {
         assert!(
             crate::schema::schema_for(command).is_some(),
             "command '{command}' must have a documented schema"
@@ -1726,6 +2109,121 @@ fn pack_result_json_contract_is_stable() {
             "pack output must contain '{field}'"
         );
     }
+}
+
+#[test]
+fn pool_trace_result_is_id_only_and_preserves_source_observations() {
+    let pool = memkeeper_store::RerankPool {
+        cos_top: 0.9,
+        candidates: Vec::new(),
+        observed: vec![memkeeper_store::RerankPoolObservedCandidate {
+            memory_id: "mem-1".to_string(),
+            merged_rank: 1,
+            admitted: true,
+            dropped_at: None,
+            graph_allocation_rank: Some(2),
+            admissions: vec![memkeeper_store::AdmissionObservation {
+                source: memkeeper_store::AdmissionSource::Ann,
+                query_index: 0,
+                source_rank: 1,
+                seed_memory_id: None,
+                activation: None,
+            }],
+        }],
+        pool_width: 16,
+    };
+
+    let json = pool_trace_result_json(&pool);
+    let value = crate::json::parse_json(&json).expect("trace JSON parses");
+    let object = value.as_object().expect("top-level object");
+    let trace = object
+        .get("pool_trace")
+        .and_then(crate::json::JsonValue::as_object)
+        .expect("pool_trace object");
+    assert_eq!(
+        trace
+            .get("pool_width")
+            .map(crate::json::JsonValue::to_json)
+            .as_deref(),
+        Some("16")
+    );
+    assert!(trace.get("candidates").is_some());
+    assert!(json.contains("\"memory_id\":\"mem-1\""));
+    assert!(json.contains("\"source\":\"ann\""));
+    assert!(json.contains("\"graph_allocation_rank\":2"));
+    assert!(!json.contains("content"));
+}
+
+#[test]
+#[cfg(feature = "embed")]
+fn served_pool_trace_uses_exact_hybrid_pool_without_returning_content() {
+    use std::sync::Mutex;
+
+    let dir = tempfile::tempdir().expect("temp dir");
+    let store = dir.path().join("store.sqlite");
+    memkeeper_store::init_store(&store).expect("store initializes");
+    for content in ["alpha retrieval memory", "alpha lexical safety net"] {
+        let request = remember_request_from_json(
+            &serde_json::json!({"content": content, "embedding": [1.0, 0.0]}).to_string(),
+        )
+        .expect("remember request parses");
+        memkeeper_store::remember_memory(&store, &request).expect("memory is stored");
+    }
+    let models = SemanticModels {
+        embed: Some(Mutex::new(Box::new(FixedTestEmbedder))),
+        rerank: None,
+        colbert: None,
+        rerank_shadow: None,
+    };
+    let request = serde_json::json!({
+        "request_id": "pool-trace-test",
+        "command": "pool-trace",
+        "store_path": store,
+        "payload": {
+            "title": "trace",
+            "queries": ["alpha retrieval"],
+            "max_memories": 1,
+            "max_chars": 1000,
+            "rerank_candidates": 2
+        }
+    })
+    .to_string();
+
+    let response = serve_line_response(&request, std::time::Instant::now(), &models);
+
+    assert!(response.contains("\"ok\":true"));
+    assert!(response.contains("\"command\":\"pool-trace\""));
+    assert!(response.contains("\"source\":\"ann\""));
+    assert!(response.contains("\"source\":\"bm25\""));
+    assert!(!response.contains("alpha retrieval memory"));
+}
+
+#[test]
+fn served_pool_trace_fails_loud_without_embedder() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let store = dir.path().join("store.sqlite");
+    memkeeper_store::init_store(&store).expect("store initializes");
+    let request = serde_json::json!({
+        "request_id": "pool-trace-no-embed",
+        "command": "pool-trace",
+        "store_path": store,
+        "payload": {
+            "title": "trace",
+            "queries": ["alpha"],
+            "max_memories": 1,
+            "max_chars": 1000
+        }
+    })
+    .to_string();
+
+    let response = serve_line_response(
+        &request,
+        std::time::Instant::now(),
+        &SemanticModels::for_test(),
+    );
+
+    assert!(response.contains("\"ok\":false"));
+    assert!(response.contains("\"code\":\"semantic_unavailable\""));
 }
 
 #[test]

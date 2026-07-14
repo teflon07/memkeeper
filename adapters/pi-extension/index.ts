@@ -1,5 +1,6 @@
 import { constants, existsSync } from "node:fs";
 import { access } from "node:fs/promises";
+import { homedir } from "node:os";
 import { dirname, isAbsolute, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { DEFAULT_TIMEOUT_MS, runMemkeeperViaTransport, shutdownStdioTransports } from "./transport.mjs";
@@ -771,12 +772,17 @@ function resolveMemkeeperRoot() {
 	return configured ? resolve(configured) : resolve(EXTENSION_DIR, "../..");
 }
 
-async function resolveMemkeeperBinary() {
-	const envBin = firstNonEmpty(process.env.MEMKEEPER_BIN, process.env.PI_MEMKEEPER_BIN);
+export async function resolveMemkeeperBinary({
+	env = process.env,
+	installedBin = resolve(homedir(), ".local/libexec/memkeeper/current/memkeeper"),
+	memkeeperRoot = MEMKEEPER_ROOT,
+} = {}) {
+	const envBin = firstNonEmpty(env.MEMKEEPER_BIN, env.PI_MEMKEEPER_BIN);
 	const candidates = [
 		envBin,
-		resolve(MEMKEEPER_ROOT, "target/release/memkeeper"),
-		resolve(MEMKEEPER_ROOT, "target/debug/memkeeper"),
+		installedBin,
+		resolve(memkeeperRoot, "target/release/memkeeper"),
+		resolve(memkeeperRoot, "target/debug/memkeeper"),
 	].filter(Boolean);
 	for (const candidate of candidates) {
 		if (await isExecutable(candidate)) return candidate;

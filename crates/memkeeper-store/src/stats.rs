@@ -193,6 +193,18 @@ pub(crate) fn health_stats(connection: &Connection) -> Result<HealthStats> {
             "SELECT COUNT(*) FROM memories \
              WHERE status = 'active' AND (entity_key IS NULL OR claim_key IS NULL)",
         )?,
+        active_missing_entity_projection: count(
+            connection,
+            "SELECT COUNT(*) FROM memories m \
+             WHERE m.status = 'active' \
+               AND m.entity_key IS NOT NULL \
+               AND TRIM(m.entity_key) <> '' \
+               AND NOT EXISTS ( \
+                 SELECT 1 FROM entities e \
+                  WHERE e.space_name = m.space_name \
+                    AND e.entity_key = m.entity_key \
+               )",
+        )?,
         duplicate_key_groups: count(
             connection,
             "SELECT COUNT(*) FROM ( \

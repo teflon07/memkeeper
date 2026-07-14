@@ -35,6 +35,42 @@ fn shadow_rerank_model_dir() -> PathBuf {
 }
 
 #[test]
+fn primary_require_mode_refuses_invalid_model_in_real_pack() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join("store.sqlite");
+    let init = Command::new(memkeeper_bin())
+        .args(["init", "--store", store.to_str().unwrap(), "--json"])
+        .output()
+        .unwrap();
+    assert!(init.status.success(), "init failed: {init:?}");
+
+    let output = Command::new(memkeeper_bin())
+        .env("MEMKEEPER_EMBED_PROVIDER", "none")
+        .env("MEMKEEPER_LATE_INTERACTION", "0")
+        .env(
+            "MEMKEEPER_RERANK_MODEL_DIR",
+            "/definitely/missing/primary-rerank-model",
+        )
+        .env("MEMKEEPER_REQUIRE_RERANK", "1")
+        .args([
+            "pack",
+            "--store",
+            store.to_str().unwrap(),
+            "--json",
+            r#"{"title":"required-reranker","queries":["memory"],"max_memories":1,"max_chars":1000}"#,
+        ])
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(2), "output: {output:?}");
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("primary reranker is not active"),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
 #[ignore = "requires production model files and built binary"]
 fn shadow_require_mode_refuses_invalid_model_in_real_server() {
     let output = Command::new(memkeeper_bin())

@@ -50,10 +50,11 @@ The adapter resolves the binary in this order:
 
 1. `MEMKEEPER_BIN`,
 2. `PI_MEMKEEPER_BIN`,
-3. `$MEMKEEPER_ROOT/target/release/memkeeper` or `$PI_MEMKEEPER_ROOT/target/release/memkeeper`,
-4. `$MEMKEEPER_ROOT/target/debug/memkeeper` or `$PI_MEMKEEPER_ROOT/target/debug/memkeeper`,
-5. `target/release/memkeeper` or `target/debug/memkeeper` under the versioned adapter's `memory/memkeeper` root,
-6. `memkeeper` on `PATH`.
+3. `~/.local/libexec/memkeeper/current/memkeeper`,
+4. `$MEMKEEPER_ROOT/target/release/memkeeper` or `$PI_MEMKEEPER_ROOT/target/release/memkeeper`,
+5. `$MEMKEEPER_ROOT/target/debug/memkeeper` or `$PI_MEMKEEPER_ROOT/target/debug/memkeeper`,
+6. `target/release/memkeeper` or `target/debug/memkeeper` under the versioned adapter's `memory/memkeeper` root,
+7. `memkeeper` on `PATH`.
 
 Optional timeout override for explicit tools:
 

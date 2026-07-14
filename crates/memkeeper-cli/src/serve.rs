@@ -63,31 +63,25 @@ pub(crate) fn runtime_semantic_guard(embed_active: bool, require_semantic: bool)
     }
 }
 
-/// Serve posture for the reranker once models are loaded. The reranker only
-/// reorders an already-retrieved candidate set — it never drops results — so a
-/// missing reranker is a quality degradation, not a correctness one. It is
-/// therefore made loud but never refuses: `Degraded` warns (NOTE), `Required`
-/// shouts (ERROR) under `MEMKEEPER_REQUIRE_SEMANTIC`, and serving continues either
-/// way. The point is that it is never *silent*.
-#[cfg(feature = "embed")]
+/// Serve posture for the primary reranker once models are loaded. Missing models
+/// degrade loudly by default; `MEMKEEPER_REQUIRE_RERANK=1` makes the same condition
+/// fail closed for deployments that require cross-encoder ordering.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum RerankGuard {
     /// Reranker loaded — rerank applies.
     Ok,
     /// Reranker absent, no hard requirement — serve plain order but warn (NOTE).
     Degraded,
-    /// Reranker absent and `MEMKEEPER_REQUIRE_SEMANTIC` set — loud ERROR, keep
-    /// serving (rerank only reorders, it never drops results).
-    Required,
+    /// Reranker absent and `MEMKEEPER_REQUIRE_RERANK` set — refuse to serve.
+    Refuse,
 }
 
-/// Pure decision for the reranker posture. Never refuses (see `RerankGuard`).
-#[cfg(feature = "embed")]
-pub(crate) fn rerank_guard(rerank_active: bool, require_semantic: bool) -> RerankGuard {
+/// Pure decision for the primary-reranker posture.
+pub(crate) fn rerank_guard(rerank_active: bool, require_rerank: bool) -> RerankGuard {
     if rerank_active {
         RerankGuard::Ok
-    } else if require_semantic {
-        RerankGuard::Required
+    } else if require_rerank {
+        RerankGuard::Refuse
     } else {
         RerankGuard::Degraded
     }
@@ -247,23 +241,20 @@ fn warn_models_absent(refusing: bool) {
     }
 }
 
-/// Surface that the reranker did not load. Always visible (never silent): a calm
-/// NOTE by default, a loud ERROR when `MEMKEEPER_REQUIRE_SEMANTIC` demanded
-/// semantic. Serving continues regardless — rerank only reorders results.
-#[cfg(feature = "embed")]
-fn warn_rerank_absent(required: bool) {
-    if required {
+/// Surface that the primary reranker did not load. Always visible: a calm NOTE
+/// by default, or a loud refusal under `MEMKEEPER_REQUIRE_RERANK`.
+fn warn_rerank_absent(refusing: bool) {
+    if refusing {
         eprintln!(
-            "[memkeeper] ERROR: MEMKEEPER_REQUIRE_SEMANTIC is set, but the reranker model did not \
-             load (MEMKEEPER_RERANK_MODEL_DIR unset or files missing) — results serve in plain \
-             retrieval order, not cross-encoder reranked. Run `memkeeper pull-models`. Continuing: \
-             rerank only reorders, it never drops results."
+            "[memkeeper] ERROR: MEMKEEPER_REQUIRE_RERANK=1 but the primary reranker is not active; \
+             refusing to start or serve the request (set MEMKEEPER_RERANK_MODEL_DIR to a valid \
+             model dir)"
         );
     } else {
         eprintln!(
             "[memkeeper] NOTE: reranker model not loaded — serving plain retrieval order (no \
              cross-encoder rerank). Run `memkeeper pull-models` to enable it. Set \
-             MEMKEEPER_REQUIRE_SEMANTIC=1 to escalate this to an error."
+             MEMKEEPER_REQUIRE_RERANK=1 to refuse this degradation."
         );
     }
 }
@@ -300,16 +291,24 @@ fn warn_colbert_absent(refusing: bool) {
     }
 }
 
-/// Apply the rerank and `ColBERT` posture guards after the embedder guard has
-/// passed. Both are made loud (never silent); `ColBERT` refuses under
-/// `MEMKEEPER_REQUIRE_SEMANTIC`. Returns `Err(2)` only when `ColBERT` refuses.
-#[cfg(feature = "embed")]
-fn apply_rerank_colbert_guards(models: &SemanticModels, require_semantic: bool) -> Result<(), i32> {
-    match rerank_guard(models.rerank_active(), require_semantic) {
+/// Apply the primary-reranker and `ColBERT` posture guards after model loading.
+/// Either explicit require mode returns `Err(2)` when its model is unavailable.
+fn apply_rerank_colbert_guards(
+    models: &SemanticModels,
+    require_semantic: bool,
+    require_rerank: bool,
+) -> Result<(), i32> {
+    #[cfg(not(feature = "embed"))]
+    let _ = require_semantic;
+    match rerank_guard(models.rerank_active(), require_rerank) {
         RerankGuard::Ok => {}
         RerankGuard::Degraded => warn_rerank_absent(false),
-        RerankGuard::Required => warn_rerank_absent(true),
+        RerankGuard::Refuse => {
+            warn_rerank_absent(true);
+            return Err(2);
+        }
     }
+    #[cfg(feature = "embed")]
     match colbert_guard(
         crate::late_interaction_enabled(),
         models.colbert_active(),
@@ -397,6 +396,11 @@ pub(crate) fn require_semantic_env() -> bool {
     env_flag_enabled("MEMKEEPER_REQUIRE_SEMANTIC")
 }
 
+/// Whether `MEMKEEPER_REQUIRE_RERANK` is set truthy (`1`/`true`).
+pub(crate) fn require_rerank_env() -> bool {
+    env_flag_enabled("MEMKEEPER_REQUIRE_RERANK")
+}
+
 /// Load the warm semantic models for a long-lived loop (serve or mcp), applying
 /// both fail-loud guards: a non-semantic build, and a semantic build whose model
 /// files are missing at runtime. Returns `Err(exit_code)` when the operator
@@ -404,6 +408,7 @@ pub(crate) fn require_semantic_env() -> bool {
 /// MCP server gets byte-identical degradation behavior to `serve`.
 pub(crate) fn serve_semantic_models_or_refuse() -> Result<SemanticModels, i32> {
     let require_semantic = require_semantic_env();
+    let require_rerank = require_rerank_env();
     match semantic_guard(cfg!(feature = "embed"), require_semantic) {
         SemanticGuard::Ok => {}
         SemanticGuard::Degraded => warn_non_semantic(false),
@@ -428,8 +433,7 @@ pub(crate) fn serve_semantic_models_or_refuse() -> Result<SemanticModels, i32> {
 
     // Third guard: the embedder loaded, but rerank/ColBERT can still be silently
     // off. Make those loud; ColBERT refuses under MEMKEEPER_REQUIRE_SEMANTIC.
-    #[cfg(feature = "embed")]
-    apply_rerank_colbert_guards(&semantic_models, require_semantic)?;
+    apply_rerank_colbert_guards(&semantic_models, require_semantic, require_rerank)?;
 
     // Fourth guard: the opt-in shadow reranker. Warn if configured-but-unloaded;
     // refuse only under MEMKEEPER_REQUIRE_SHADOW_RERANK.
@@ -440,6 +444,7 @@ pub(crate) fn serve_semantic_models_or_refuse() -> Result<SemanticModels, i32> {
 
 pub(crate) fn run_serve(args: &[String]) -> i32 {
     let require_semantic = require_semantic_env();
+    let require_rerank = require_rerank_env();
     match semantic_guard(cfg!(feature = "embed"), require_semantic) {
         SemanticGuard::Ok => {}
         SemanticGuard::Degraded => warn_non_semantic(false),
@@ -476,8 +481,9 @@ pub(crate) fn run_serve(args: &[String]) -> i32 {
 
     // Third guard: the embedder loaded, but rerank/ColBERT can still be silently
     // off. Make those loud; ColBERT refuses under MEMKEEPER_REQUIRE_SEMANTIC.
-    #[cfg(feature = "embed")]
-    if let Err(code) = apply_rerank_colbert_guards(&semantic_models, require_semantic) {
+    if let Err(code) =
+        apply_rerank_colbert_guards(&semantic_models, require_semantic, require_rerank)
+    {
         return code;
     }
 
@@ -856,7 +862,7 @@ pub(crate) fn execute_serve_request_result(
             let store = required_serve_store_path(request)?;
             let mut remember_request = remember_request_from_json(&request.payload_json)?;
             maybe_embed_remember_request(&mut remember_request, semantic_models);
-            maybe_colbert_embed_remember_request(&mut remember_request, semantic_models);
+            maybe_colbert_embed_remember_request(&mut remember_request, semantic_models)?;
             let report = remember_memory(&store, &remember_request)?;
             Ok((store, Some(SCHEMA_VERSION), remember_result_json(&report)))
         }
@@ -991,6 +997,18 @@ pub(crate) fn execute_serve_request_result(
                 semantic_models,
             );
             Ok((store, Some(SCHEMA_VERSION), pack_result_json(&report)))
+        }
+        Command::PoolTrace => {
+            let store = required_serve_store_path(request)?;
+            let pack_request = pack_request_from_json(&request.payload_json)?;
+            let expansion = pack_expansion_options_from_json(&request.payload_json)?;
+            let result_json = execute_pool_trace(
+                &store,
+                pack_request,
+                expansion,
+                semantic_models,
+            )?;
+            Ok((store, Some(SCHEMA_VERSION), result_json))
         }
         Command::Get => {
             let store = required_serve_store_path(request)?;

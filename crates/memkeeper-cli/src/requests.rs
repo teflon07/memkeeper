@@ -218,6 +218,27 @@ pub(crate) fn silo_list_request_from_json(input: &str) -> Result<SiloListRequest
     })
 }
 
+fn optional_retrieval_representation(
+    object: &JsonObject,
+) -> Result<Option<RetrievalRepresentationInput>, CliError> {
+    let Some(value) = object.get("retrieval_representation") else {
+        return Ok(None);
+    };
+    if matches!(value, JsonValue::Null) {
+        return Ok(None);
+    }
+    let JsonValue::Object(fields) = value else {
+        return Err(CliError::InvalidRequest(
+            "field retrieval_representation must be an object".to_string(),
+        ));
+    };
+    reject_unknown_fields(fields, &["kind", "text"])?;
+    Ok(Some(RetrievalRepresentationInput {
+        kind: required_string_field(fields, "kind")?,
+        text: required_string_field(fields, "text")?,
+    }))
+}
+
 pub(crate) fn remember_request_from_json(input: &str) -> Result<RememberRequest, CliError> {
     let value = parse_json(input)?;
     let object = value.as_object().ok_or_else(|| {
@@ -233,6 +254,7 @@ pub(crate) fn remember_request_from_json(input: &str) -> Result<RememberRequest,
             "kind",
             "content",
             "summary",
+            "retrieval_representation",
             "tags",
             "entity_key",
             "claim_key",
@@ -272,11 +294,11 @@ pub(crate) fn remember_request_from_json(input: &str) -> Result<RememberRequest,
     let summary = optional_string_field(object, "summary")?;
     let mut entity_key = optional_string_field(object, "entity_key")?;
     let mut claim_key = optional_string_field(object, "claim_key")?;
-    // `derive_keys` fabricates deterministic keys from the memory text for any
-    // key the caller left unset, so keyless writes still participate in
-    // entity/claim grouping and exact-duplicate supersession. Caller-supplied
-    // keys always win.
-    if optional_bool_field(object, "derive_keys")?.unwrap_or(false) {
+    // Derive deterministic keys by default so every adapter using the generic
+    // JSON contract participates in entity/claim grouping and exact-duplicate
+    // supersession. Caller-supplied keys always win, and an explicit false
+    // remains available for intentionally keyless writes.
+    if optional_bool_field(object, "derive_keys")?.unwrap_or(true) {
         let (derived_entity, derived_claim) =
             memkeeper_core::derive::keys(&content, summary.as_deref());
         if entity_key.is_none() {
@@ -295,6 +317,7 @@ pub(crate) fn remember_request_from_json(input: &str) -> Result<RememberRequest,
         kind: optional_string_field(object, "kind")?,
         content,
         summary,
+        retrieval_representation: optional_retrieval_representation(object)?,
         tags: optional_string_array_field(object, "tags")?.unwrap_or_default(),
         entity_key,
         claim_key,
@@ -756,6 +779,13 @@ pub(crate) fn pack_expansion_options_from_json(
         query_expansion: optional_bool_field(object, "query_expansion")?.unwrap_or(false),
         thread_expansion: optional_bool_field(object, "thread_expansion")?.unwrap_or(false),
         graph_expansion: optional_bool_field(object, "graph_expansion")?.unwrap_or(false),
+        graph_within_entity_selection: if optional_bool_field(object, "graph_within_entity_maxsim")?
+            .unwrap_or(false)
+        {
+            memkeeper_store::GraphWithinEntitySelection::Maxsim
+        } else {
+            memkeeper_store::GraphWithinEntitySelection::Recency
+        },
         max_query_variants: optional_usize_field(object, "max_query_variants")?
             .unwrap_or(PackExpansionOptions::default().max_query_variants),
         max_thread_seeds: optional_usize_field(object, "max_thread_seeds")?
@@ -796,6 +826,7 @@ pub(crate) fn pack_request_from_json(input: &str) -> Result<PackRequest, CliErro
             "query_expansion",
             "thread_expansion",
             "graph_expansion",
+            "graph_within_entity_maxsim",
             "max_query_variants",
             "max_thread_seeds",
             "max_thread_neighbors",

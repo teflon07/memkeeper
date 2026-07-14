@@ -147,6 +147,19 @@ Notes:
   empty pack.
 - `truncated` is `true` when memories or text were dropped to honor limits.
 
+## Required primary reranker
+
+Memkeeper warns and serves plain retrieval order by default when the primary
+cross-encoder cannot load. Set `MEMKEEPER_REQUIRE_RERANK=1` when that degradation
+is unacceptable. The flag makes `pack`, reranked one-shot `search`, `serve`,
+and in-process native MCP refuse rather than return a successful non-reranked
+result. Non-reranked search remains available because it does not request the
+primary reranker.
+
+Use this independently from `MEMKEEPER_REQUIRE_SEMANTIC=1`: the semantic flag
+protects embeddings and requested late interaction, while the reranker flag
+protects cross-encoder ordering.
+
 ## Shadow reranker telemetry
 
 Set `MEMKEEPER_RERANK_SHADOW_MODEL_DIR` on a long-lived server to score each

@@ -119,6 +119,11 @@ pub(crate) const EXPORT_TABLES: &[ExportTableSpec] = &[
         order_by: "memory_id, version_num, id",
     },
     ExportTableSpec {
+        name: "memory_representations",
+        columns: &["version_id", "kind", "text", "text_sha256", "created_at"],
+        order_by: "version_id",
+    },
+    ExportTableSpec {
         name: "memory_events",
         columns: &[
             "id",

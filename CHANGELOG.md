@@ -6,6 +6,58 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html) once it reache
 1.0. Until then, minor releases may include breaking changes to the storage
 schema and wire protocol.
 
+## [0.3.0] - 2026-07-14
+
+### Added
+- **Version-owned retrieval representations.** CLI and `serve` callers can attach
+  an optional `contextual-card-v1` companion of up to 512 characters when they
+  save a memory. Memkeeper uses that companion for lexical retrieval,
+  late-interaction scoring, and reranking while preserving the canonical memory
+  text returned to agents.
+- **Representation lifecycle support.** `get`, `history`, logical
+  export/import, physical backup, and token reindexing now preserve or rebuild
+  the representation with its owning memory version. Legacy schema-5 archives
+  remain importable.
+- **Pre-rerank pool diagnostics.** The new semantic-only `pool-trace` command
+  replays a `pack` request and returns memory IDs, retrieval routes, admission
+  state, drop stages, and graph-allocation ranks without returning memory text.
+- **Required-reranker mode.** Set `MEMKEEPER_REQUIRE_RERANK=1` to make `pack`,
+  reranked one-shot `search`, `serve`, and native MCP fail closed when the
+  primary cross-encoder is unavailable instead of serving plain retrieval
+  order.
+- `stats --health` now reports active memories that have an entity key but no
+  matching entity projection.
+
+### Changed
+- **Storage schema 6.** Existing schema-5 stores migrate on the first write by
+  adding `memory_representations` and the representation-aware FTS projection.
+  The migration preserves canonical content, summaries, embeddings, and memory
+  identity.
+- `remember` now derives missing entity and claim keys by default. Set
+  `derive_keys:false` to preserve an intentionally keyless write; explicit
+  caller-provided keys are never replaced.
+- The generic MCP `remember` tool intentionally does not expose the new field.
+  Formation remains an explicit CLI or `serve` adapter responsibility until a
+  separate MCP formation contract is reviewed.
+- The Pi extension now checks the managed Memkeeper runtime at
+  `~/.local/libexec/memkeeper/current/memkeeper` before falling back to source
+  build paths or `PATH`.
+
+### Experimental
+- Graph expansion can select one memory per reached entity using first-query
+  late-interaction MaxSim by setting `graph_within_entity_maxsim`. It remains
+  off by default and requires late-interaction tokens.
+
+### Fixed
+- Non-default feature builds remain clean under strict Clippy checks when local
+  semantic components are disabled.
+
+### Internal
+- Schema mutation and initialized-connection lifecycle now live in focused
+  store modules. Structural tests guard those ownership boundaries.
+- The LoCoMo harness can capture the exact pre-rerank pool alongside retrieval
+  results for admission and miss analysis.
+
 ## [0.2.15] - 2026-07-14
 
 ### Fixed

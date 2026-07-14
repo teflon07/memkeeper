@@ -480,13 +480,13 @@ impl<'transaction> FixtureInserter<'transaction> {
             )?,
             fts: transaction.prepare(
                 "INSERT INTO memory_fts (
-                    memory_id, version_id, space_name, silo_name, status, kind, content, summary,
+                    memory_id, version_id, space_name, silo_name, status, kind, content, retrieval_text,
                     tags, source_text, metadata_text
                  ) VALUES (?1, ?2, 'workspace-memory', 'durable', 'active', ?3, ?4, ?5, ?6, ?7, ?8)",
             )?,
             public_fts: transaction.prepare(
                 "INSERT INTO memory_fts_public (
-                    memory_id, version_id, space_name, silo_name, status, kind, content, summary,
+                    memory_id, version_id, space_name, silo_name, status, kind, content, retrieval_text,
                     tags, metadata_text
                  ) VALUES (?1, ?2, 'workspace-memory', 'durable', 'active', ?3, ?4, ?5, ?6, ?7)",
             )?,

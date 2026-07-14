@@ -59,6 +59,8 @@ pub enum Command {
     BatchSearch,
     /// Produce a compact memory pack.
     Pack,
+    /// Diagnose the exact pre-rerank candidate pool without returning memory content.
+    PoolTrace,
     /// Fetch one memory by id.
     Get,
     /// Tombstone a memory by id.
@@ -122,6 +124,7 @@ impl Command {
             Self::MemoryList => "memory-list",
             Self::BatchSearch => "batch-search",
             Self::Pack => "pack",
+            Self::PoolTrace => "pool-trace",
             Self::Get => "get",
             Self::Forget => "forget",
             Self::History => "history",
@@ -169,6 +172,7 @@ impl Command {
             "memory-list" => Some(Self::MemoryList),
             "batch-search" => Some(Self::BatchSearch),
             "pack" => Some(Self::Pack),
+            "pool-trace" => Some(Self::PoolTrace),
             "get" => Some(Self::Get),
             "forget" => Some(Self::Forget),
             "history" => Some(Self::History),
@@ -279,6 +283,7 @@ mod tests {
             Command::MemoryList,
             Command::BatchSearch,
             Command::Pack,
+            Command::PoolTrace,
             Command::Get,
             Command::Forget,
             Command::History,

@@ -668,6 +668,76 @@ pub(crate) fn pack_result_json(report: &PackReport) -> String {
     format!("{{\"pack\":{}}}", pack_payload_json(report))
 }
 
+#[cfg(any(feature = "embed", test))]
+pub(crate) fn pool_trace_result_json(pool: &memkeeper_store::RerankPool) -> String {
+    let mut candidates = String::from("[");
+    for (candidate_index, candidate) in pool.observed.iter().enumerate() {
+        if candidate_index > 0 {
+            candidates.push(',');
+        }
+        let mut sources = String::from("[");
+        for (source_index, observation) in candidate.admissions.iter().enumerate() {
+            if source_index > 0 {
+                sources.push(',');
+            }
+            let source = match observation.source {
+                memkeeper_store::AdmissionSource::Ann => "ann",
+                memkeeper_store::AdmissionSource::Maxsim => "maxsim",
+                memkeeper_store::AdmissionSource::Bm25 => "bm25",
+                memkeeper_store::AdmissionSource::Thread => "thread",
+                memkeeper_store::AdmissionSource::Graph => "graph",
+            };
+            let activation = observation.activation.map_or_else(
+                || "null".to_string(),
+                |value| {
+                    if value.is_finite() {
+                        value.to_string()
+                    } else {
+                        "null".to_string()
+                    }
+                },
+            );
+            let _ = write!(
+                sources,
+                "{{\"source\":{},\"query_index\":{},\"source_rank\":{},\"seed_memory_id\":{},\"activation\":{}}}",
+                json_string(source),
+                observation.query_index,
+                observation.source_rank,
+                optional_string_json(observation.seed_memory_id.as_deref()),
+                activation,
+            );
+        }
+        sources.push(']');
+        let _ = write!(
+            candidates,
+            "{{\"memory_id\":{},\"merged_rank\":{},\"admitted\":{},\"dropped_at\":{},\"graph_allocation_rank\":{},\"sources\":{}}}",
+            json_string(&candidate.memory_id),
+            candidate.merged_rank,
+            candidate.admitted,
+            optional_string_json(candidate.dropped_at.as_deref()),
+            candidate.graph_allocation_rank.map_or_else(
+                || "null".to_string(),
+                |rank| rank.to_string(),
+            ),
+            sources,
+        );
+    }
+    candidates.push(']');
+    let cos_top = if pool.cos_top.is_finite() {
+        pool.cos_top.to_string()
+    } else {
+        "null".to_string()
+    };
+    format!(
+        "{{\"pool_trace\":{{\"pool_width\":{},\"cos_top\":{},\"candidate_count\":{},\"observed_count\":{},\"candidates\":{}}}}}",
+        pool.pool_width,
+        cos_top,
+        pool.candidates.len(),
+        pool.observed.len(),
+        candidates,
+    )
+}
+
 pub(crate) fn pack_payload_json(report: &PackReport) -> String {
     let scores = {
         let mut s = String::from("[");
@@ -1234,10 +1304,12 @@ pub(crate) fn metadata_field(metadata_json: Option<&str>, key: &str) -> Option<S
 }
 
 pub(crate) fn remember_result_json(report: &RememberReport) -> String {
-    format!(
+    let mut memory = report.memory.clone();
+    memory.retrieval_representation = None;
+    let mut output = format!(
         "{{\"memory\":{},\"event\":{{\"id\":{},\"type\":\"remember\"}},\"processing_status\":{},\"candidates\":{},\"candidates_truncated\":{},\"auto_superseded\":{},\"conflict_candidates\":{},\"supersede_suggestions\":{},\"dry_run\":{}}}",
         memory_json(
-            &report.memory,
+            &memory,
             GetOptions {
                 include_history: false,
                 include_links: true,
@@ -1252,6 +1324,35 @@ pub(crate) fn remember_result_json(report: &RememberReport) -> String {
         remember_conflict_candidates_json(&report.conflict_candidates),
         string_array_json(&report.supersede_suggestions),
         report.dry_run
+    );
+    if let Some(representation) = &report.representation {
+        output.pop();
+        output.push_str(",\"representation\":");
+        output.push_str(&representation_status_json(representation));
+        output.push('}');
+    }
+    output
+}
+
+fn representation_status_json(value: &RepresentationWriteStatus) -> String {
+    format!(
+        "{{\"kind\":{},\"text_sha256\":{},\"fts_indexed\":{},\"semantic_indexed\":{},\"status\":{}}}",
+        json_string(&value.kind),
+        json_string(&value.text_sha256),
+        value.fts_indexed,
+        value.semantic_indexed,
+        json_string(&value.status),
+    )
+}
+
+fn memory_representation_json(value: &MemoryRepresentationRecord) -> String {
+    format!(
+        "{{\"version_id\":{},\"kind\":{},\"text\":{},\"text_sha256\":{},\"created_at\":{}}}",
+        json_string(&value.version_id),
+        json_string(&value.kind),
+        json_string(&value.text),
+        json_string(&value.text_sha256),
+        json_string(&value.created_at),
     )
 }
 
@@ -1447,16 +1548,32 @@ pub(crate) fn dream_dedupe_json(report: &DreamDedupeReport) -> String {
 
 pub(crate) fn dream_graph_json(report: &DreamGraphReport) -> String {
     format!(
-        "{{\"attempted\":{},\"orphan_entities\":{},\"dangling_relationships\":{},\"inactive_evidence_relationships\":{},\"relationship_proposals\":{},\"truncated\":{},\"orphan_entity_ids\":{},\"dangling_relationship_ids\":{},\"inactive_evidence_relationship_ids\":{}}}",
+        "{{\"attempted\":{},\"orphan_entities\":{},\"dangling_relationships\":{},\"inactive_evidence_relationships\":{},\"missing_entity_projections\":{},\"relationship_proposals\":{},\"truncated\":{},\"orphan_entity_ids\":{},\"dangling_relationship_ids\":{},\"inactive_evidence_relationship_ids\":{}}}",
         report.attempted,
         report.orphan_entities,
         report.dangling_relationships,
         report.inactive_evidence_relationships,
+        dream_entity_projections_json(&report.missing_entity_projections),
         dream_relationship_proposals_json(&report.relationship_proposals),
         report.truncated,
         string_array_json(&report.orphan_entity_ids),
         string_array_json(&report.dangling_relationship_ids),
         string_array_json(&report.inactive_evidence_relationship_ids)
+    )
+}
+
+pub(crate) fn dream_entity_projections_json(projections: &[DreamEntityProjection]) -> String {
+    format!(
+        "[{}]",
+        projections
+            .iter()
+            .map(|projection| format!(
+                "{{\"space\":{},\"entity_key\":{}}}",
+                json_string(&projection.space),
+                json_string(&projection.entity_key)
+            ))
+            .collect::<Vec<_>>()
+            .join(",")
     )
 }
 
@@ -1559,6 +1676,10 @@ pub(crate) fn memory_json(memory: &MemoryRecord, options: GetOptions) -> String 
         output.push_str(",\"source\":");
         output.push_str(memory.source_ref_json.as_deref().unwrap_or("null"));
     }
+    if let Some(representation) = &memory.retrieval_representation {
+        output.push_str(",\"retrieval_representation\":");
+        output.push_str(&memory_representation_json(representation));
+    }
     if options.include_history {
         output.push_str(",\"versions\":");
         output.push_str(&versions_json(memory.versions.as_deref().unwrap_or(&[])));
@@ -1579,8 +1700,7 @@ pub(crate) fn versions_json(versions: &[MemoryVersionRecord]) -> String {
         if index > 0 {
             output.push(',');
         }
-        let _ = write!(
-            output,
+        let mut item = format!(
             "{{\"id\":{},\"version_num\":{},\"content\":{},\"summary\":{},\"content_sha256\":{},\"created_at\":{},\"source\":{}}}",
             json_string(&version.id),
             version.version_num,
@@ -1590,6 +1710,13 @@ pub(crate) fn versions_json(versions: &[MemoryVersionRecord]) -> String {
             json_string(&version.created_at),
             version.source_ref_json.as_deref().unwrap_or("null")
         );
+        if let Some(representation) = &version.retrieval_representation {
+            item.pop();
+            item.push_str(",\"retrieval_representation\":");
+            item.push_str(&memory_representation_json(representation));
+            item.push('}');
+        }
+        output.push_str(&item);
     }
     output.push(']');
     output
@@ -1664,13 +1791,14 @@ pub(crate) fn index_stats_json(stats: &IndexStats) -> String {
 
 pub(crate) fn health_stats_json(stats: &HealthStats) -> String {
     format!(
-        "{{\"active\":{},\"superseded\":{},\"conflicted\":{},\"tombstoned\":{},\"expired\":{},\"active_without_keys\":{},\"duplicate_key_groups\":{},\"short_term_active\":{},\"active_past_valid_to\":{},\"active_without_embedding\":{},\"last_embedding_at\":{},\"candidates\":{{\"pending\":{},\"approved\":{},\"rejected\":{}}}}}",
+        "{{\"active\":{},\"superseded\":{},\"conflicted\":{},\"tombstoned\":{},\"expired\":{},\"active_without_keys\":{},\"active_missing_entity_projection\":{},\"duplicate_key_groups\":{},\"short_term_active\":{},\"active_past_valid_to\":{},\"active_without_embedding\":{},\"last_embedding_at\":{},\"candidates\":{{\"pending\":{},\"approved\":{},\"rejected\":{}}}}}",
         stats.active,
         stats.superseded,
         stats.conflicted,
         stats.tombstoned,
         stats.expired,
         stats.active_without_keys,
+        stats.active_missing_entity_projection,
         stats.duplicate_key_groups,
         stats.short_term_active,
         stats.active_past_valid_to,

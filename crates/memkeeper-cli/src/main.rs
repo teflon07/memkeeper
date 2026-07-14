@@ -19,8 +19,6 @@ use std::{
 use memkeeper_protocol::{Command, ErrorCode, PROTOCOL_VERSION};
 // Only used by the embed-gated rerank path; gate the import so a lexical-only
 // (`--no-default-features`) build doesn't warn on an unused symbol.
-#[cfg(feature = "embed")]
-use memkeeper_store::build_hybrid_rerank_pool_with_expansion;
 use memkeeper_store::{
     approve_candidate, backup_store, batch_search_memories, build_pack, create_space,
     document_duplicates, dream_store, expanded_pack_queries, export_store, forget_memory,
@@ -37,25 +35,30 @@ use memkeeper_store::{
     DocumentChunk, DocumentDuplicatesReport, DocumentDuplicatesRequest, DocumentGetReport,
     DocumentGetRequest, DocumentPruneReport, DocumentPruneRequest, DocumentSearchReport,
     DocumentSearchRequest, DocumentSearchResult, DreamDedupeReport, DreamDuplicateProposal,
-    DreamExpireReport, DreamGraphReport, DreamPromoteReport, DreamReindexReport,
-    DreamRelationshipProposal, DreamReport, DreamRequest, DuplicateChunkCluster,
-    DuplicateChunkMember, EntityMergeReport, EntityMergeRequest, EntityRecord, EntitySearchReport,
-    EntitySearchRequest, EntitySearchResult, EntityUpsertReport, EntityUpsertRequest,
-    Error as StoreError, ExportReport, ExportRequest, ExportTableReport, ForgetReport,
-    ForgetRequest, GetOptions, GraphContextReport, GraphContextRequest, GraphEntityRecord,
-    GraphFullReport, GraphNeighborsReport, GraphNeighborsRequest, GraphRelationshipRecord,
-    HealthStats, HistoryOptions, HistoryReport, ImportReport, ImportRequest, IndexStats,
-    IngestReport, IngestRequest, InitReport, MarkExtractedReport, MarkExtractedRequest,
-    MemoryEventRecord, MemoryLinkRecord, MemoryListItem, MemoryListReport, MemoryListRequest,
-    MemoryRecord, MemoryVersionRecord, PackExpansionOptions, PackReport, PackRequest,
-    PromotionCandidate, PromotionCandidatesReport, PromotionCandidatesRequest, RecallEvent,
-    RecallLogReport, RecallLogRequest, RelationshipRecord, RelationshipUpsertReport,
-    RelationshipUpsertRequest, RememberCandidate, RememberConflictCandidate, RememberReport,
-    RememberRequest, SearchFilters, SearchReport, SearchRequest, SearchResult, SiloListReport,
-    SiloListRequest, SiloRecord, SpaceCreateReport, SpaceCreateRequest, SpaceListReport,
-    SpaceRecord, Stats, VerifyReport, VerifyRequest, DEFAULT_DREAM_MAX_MEMORIES,
+    DreamEntityProjection, DreamExpireReport, DreamGraphReport, DreamPromoteReport,
+    DreamReindexReport, DreamRelationshipProposal, DreamReport, DreamRequest,
+    DuplicateChunkCluster, DuplicateChunkMember, EntityMergeReport, EntityMergeRequest,
+    EntityRecord, EntitySearchReport, EntitySearchRequest, EntitySearchResult, EntityUpsertReport,
+    EntityUpsertRequest, Error as StoreError, ExportReport, ExportRequest, ExportTableReport,
+    ForgetReport, ForgetRequest, GetOptions, GraphContextReport, GraphContextRequest,
+    GraphEntityRecord, GraphFullReport, GraphNeighborsReport, GraphNeighborsRequest,
+    GraphRelationshipRecord, HealthStats, HistoryOptions, HistoryReport, ImportReport,
+    ImportRequest, IndexStats, IngestReport, IngestRequest, InitReport, MarkExtractedReport,
+    MarkExtractedRequest, MemoryEventRecord, MemoryLinkRecord, MemoryListItem, MemoryListReport,
+    MemoryListRequest, MemoryRecord, MemoryRepresentationRecord, MemoryVersionRecord,
+    PackExpansionOptions, PackReport, PackRequest, PromotionCandidate, PromotionCandidatesReport,
+    PromotionCandidatesRequest, RecallEvent, RecallLogReport, RecallLogRequest, RelationshipRecord,
+    RelationshipUpsertReport, RelationshipUpsertRequest, RememberCandidate,
+    RememberConflictCandidate, RememberReport, RememberRequest, RepresentationWriteStatus,
+    RetrievalRepresentationInput, SearchFilters, SearchReport, SearchRequest, SearchResult,
+    SiloListReport, SiloListRequest, SiloRecord, SpaceCreateReport, SpaceCreateRequest,
+    SpaceListReport, SpaceRecord, Stats, VerifyReport, VerifyRequest, DEFAULT_DREAM_MAX_MEMORIES,
     DEFAULT_PROMOTE_RANK_CAP, DEFAULT_PROMOTE_SCORE_FLOOR, DEFAULT_PROMOTE_THRESHOLD,
     PROJECT_STORE_RELATIVE_PATH, SCHEMA_VERSION, USER_STORE_PATH_HINT,
+};
+#[cfg(feature = "embed")]
+use memkeeper_store::{
+    build_hybrid_rerank_pool_trace_with_expansion, build_hybrid_rerank_pool_with_expansion,
 };
 #[cfg(feature = "embed")]
 use std::sync::Mutex;
@@ -275,6 +278,10 @@ fn main() {
         "pack" => {
             let args = args.collect::<Vec<_>>();
             run_pack(&args)
+        }
+        "pool-trace" => {
+            let args = args.collect::<Vec<_>>();
+            run_pool_trace(&args)
         }
         "rerank" => {
             let args = args.collect::<Vec<_>>();
@@ -672,6 +679,16 @@ impl SemanticModels {
         }
     }
 
+    #[cfg(test)]
+    fn with_colbert_for_test(model: Box<dyn memkeeper_embed::TokenEmbedder>) -> Self {
+        Self {
+            embed: None,
+            rerank: None,
+            colbert: Some(Mutex::new(model)),
+            rerank_shadow: None,
+        }
+    }
+
     /// Whether a shadow reranker is loaded and active.
     fn shadow_rerank_active(&self) -> bool {
         self.rerank_shadow.is_some()
@@ -730,6 +747,11 @@ impl SemanticModels {
     const fn shadow_rerank_active(&self) -> bool {
         false
     }
+
+    #[allow(clippy::unused_self)]
+    const fn rerank_active(&self) -> bool {
+        false
+    }
 }
 
 fn run_remember(args: &[String]) -> i32 {
@@ -738,11 +760,23 @@ fn run_remember(args: &[String]) -> i32 {
 }
 
 fn run_remember_with_models(args: &[String], semantic_models: &SemanticModels) -> i32 {
+    run_remember_with_models_and_requirement(args, semantic_models, serve::require_semantic_env())
+}
+
+fn run_remember_with_models_and_requirement(
+    args: &[String],
+    semantic_models: &SemanticModels,
+    require_semantic: bool,
+) -> i32 {
     let started = Instant::now();
     let command = Command::Remember;
     let result = parse_remember_args(args).and_then(|mut options| {
         maybe_embed_remember_request(&mut options.request, semantic_models);
-        maybe_colbert_embed_remember_request(&mut options.request, semantic_models);
+        maybe_colbert_embed_remember_request_with_requirement(
+            &mut options.request,
+            semantic_models,
+            require_semantic,
+        )?;
         remember_memory(&options.store, &options.request)
             .map(|report| (options.store, report))
             .map_err(Into::into)
@@ -805,6 +839,7 @@ fn execute_search(
     rerank_candidates: usize,
     semantic_models: &SemanticModels,
 ) -> Result<String, CliError> {
+    require_primary_reranker(rerank, semantic_models)?;
     if let Err(message) = maybe_embed_search_request(&mut request, semantic_models) {
         // Fail closed when the operator requires semantic retrieval: a runtime
         // embedding failure must not be served as a silent FTS-only success.
@@ -906,7 +941,7 @@ fn rerank_doc_chars() -> usize {
 
 /// Char-boundary-safe prefix of `content` for rerank scoring. `limit == 0`
 /// disables truncation.
-#[cfg(feature = "embed")]
+#[cfg(any(test, feature = "embed"))]
 fn rerank_doc(content: &str, limit: usize) -> &str {
     if limit == 0 {
         return content;
@@ -915,6 +950,28 @@ fn rerank_doc(content: &str, limit: usize) -> &str {
         Some((byte_index, _)) => &content[..byte_index],
         None => content,
     }
+}
+
+#[cfg(any(test, feature = "embed"))]
+fn rerank_pool_documents(
+    candidates: &[memkeeper_store::RerankPoolCandidate],
+    limit: usize,
+) -> (Vec<&str>, Vec<usize>) {
+    let mut documents = candidates
+        .iter()
+        .map(|candidate| rerank_doc(&candidate.content, limit))
+        .collect::<Vec<_>>();
+    let companion_indexes = candidates
+        .iter()
+        .enumerate()
+        .filter_map(|(index, candidate)| candidate.summary.as_ref().map(|_| index))
+        .collect::<Vec<_>>();
+    for &index in &companion_indexes {
+        if let Some(companion) = candidates[index].summary.as_deref() {
+            documents.push(rerank_doc(companion, limit));
+        }
+    }
+    (documents, companion_indexes)
 }
 
 /// Combine content scores with per-candidate summary scores by max.
@@ -1232,7 +1289,8 @@ fn run_pack(args: &[String]) -> i32 {
 fn run_pack_with_models(args: &[String], semantic_models: &SemanticModels) -> i32 {
     let started = Instant::now();
     let command = Command::Pack;
-    let result = parse_pack_args(args)
+    let result = require_primary_reranker(true, semantic_models)
+        .and_then(|()| parse_pack_args(args))
         .and_then(|mut options| {
             apply_associative_recall_gate(
                 &options.store,
@@ -1265,6 +1323,96 @@ fn run_pack_with_models(args: &[String], semantic_models: &SemanticModels) -> i3
             )
         });
     print_result(command, started, result)
+}
+
+/// Pure fail-closed decision for commands that request cross-encoder reranking.
+fn must_refuse_without_reranker(requested: bool, active: bool, required: bool) -> bool {
+    requested && required && !active
+}
+
+/// Apply `MEMKEEPER_REQUIRE_RERANK` to one-shot/shared request paths. Long-lived
+/// servers apply the same posture at startup in `serve.rs`.
+fn require_primary_reranker(
+    requested: bool,
+    semantic_models: &SemanticModels,
+) -> Result<(), CliError> {
+    if must_refuse_without_reranker(
+        requested,
+        semantic_models.rerank_active(),
+        serve::require_rerank_env(),
+    ) {
+        eprintln!(
+            "[memkeeper] ERROR: MEMKEEPER_REQUIRE_RERANK=1 but the primary reranker is not active; \
+             refusing to serve the request (set MEMKEEPER_RERANK_MODEL_DIR to a valid model dir)"
+        );
+        return Err(CliError::InvalidRequest(
+            "primary reranker required but unavailable".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn run_pool_trace(args: &[String]) -> i32 {
+    let semantic_models = SemanticModels::for_remember_or_search();
+    run_pool_trace_with_models(args, &semantic_models)
+}
+
+fn run_pool_trace_with_models(args: &[String], semantic_models: &SemanticModels) -> i32 {
+    let started = Instant::now();
+    let command = Command::PoolTrace;
+    let result = parse_pack_args(args)
+        .and_then(|options| {
+            execute_pool_trace(
+                &options.store,
+                options.request,
+                options.expansion,
+                semantic_models,
+            )
+            .map(|result_json| (options.store, result_json))
+        })
+        .map(|(path, result_json)| {
+            success_envelope(command, &path, SCHEMA_VERSION, &result_json, started)
+        });
+    print_result(command, started, result)
+}
+
+#[cfg(feature = "embed")]
+fn execute_pool_trace(
+    store: &Path,
+    mut request: PackRequest,
+    mut expansion: PackExpansionOptions,
+    semantic_models: &SemanticModels,
+) -> Result<String, CliError> {
+    apply_associative_recall_gate(store, &request, &mut expansion)?;
+    apply_pack_query_expansion(&mut request, &mut expansion);
+    if semantic_models.embed.is_none() {
+        return Err(CliError::SemanticUnavailable(
+            "pool-trace requires an active semantic embedder".to_string(),
+        ));
+    }
+    maybe_embed_pack_request(&mut request, semantic_models);
+    if request.query_embeddings.is_none() {
+        return Err(CliError::SemanticUnavailable(
+            "pool-trace could not embed the requested queries".to_string(),
+        ));
+    }
+    maybe_colbert_embed_pack_request(&mut request, semantic_models);
+    let pool_width = request.rerank_candidates.max(request.max_memories);
+    let pool =
+        build_hybrid_rerank_pool_trace_with_expansion(store, &request, pool_width, expansion)?;
+    Ok(pool_trace_result_json(&pool))
+}
+
+#[cfg(not(feature = "embed"))]
+fn execute_pool_trace(
+    _store: &Path,
+    _request: PackRequest,
+    _expansion: PackExpansionOptions,
+    _semantic_models: &SemanticModels,
+) -> Result<String, CliError> {
+    Err(CliError::SemanticUnavailable(
+        "pool-trace requires a semantic build with an active embedder".to_string(),
+    ))
 }
 
 fn apply_pack_query_expansion(request: &mut PackRequest, expansion: &mut PackExpansionOptions) {
@@ -1353,41 +1501,102 @@ fn maybe_embed_document_search_request(
 ) {
 }
 
+#[cfg(any(test, feature = "embed"))]
+fn remember_token_document(request: &RememberRequest) -> String {
+    let companion = memkeeper_store::retrieval_companion(
+        request.summary.as_deref(),
+        request.retrieval_representation.as_ref(),
+    );
+    memkeeper_store::representation_document(&request.content, companion)
+}
+
 #[cfg(feature = "embed")]
 fn maybe_colbert_embed_remember_request(
     request: &mut RememberRequest,
     semantic_models: &SemanticModels,
-) {
+) -> Result<(), CliError> {
+    maybe_colbert_embed_remember_request_with_requirement(
+        request,
+        semantic_models,
+        serve::require_semantic_env(),
+    )
+}
+
+#[cfg(feature = "embed")]
+fn maybe_colbert_embed_remember_request_with_requirement(
+    request: &mut RememberRequest,
+    semantic_models: &SemanticModels,
+    require_semantic: bool,
+) -> Result<(), CliError> {
     if request.token_embedding.is_some() {
-        return;
+        return Ok(());
     }
     let Some(model) = semantic_models.colbert.as_ref() else {
-        return;
+        if request.retrieval_representation.is_some() && require_semantic {
+            return Err(CliError::SemanticUnavailable(
+                "retrieval representation token encoder is unavailable".to_string(),
+            ));
+        }
+        return Ok(());
     };
-    // Doc text convention (eval-validated): summary + "\n\n" + content.
-    let text = match request.summary.as_deref() {
-        Some(summary) if !summary.is_empty() => format!("{summary}\n\n{}", request.content),
-        _ => request.content.clone(),
-    };
+    let text = remember_token_document(request);
     match model.lock() {
         Ok(mut model) => match model.encode_docs(&[&text]) {
             Ok(mut vecs) => {
                 request.token_embedding = vecs.pop().filter(|tokens| !tokens.is_empty());
                 if request.token_embedding.is_some() {
                     request.token_embedding_model_id = Some(model.model_id().to_string());
+                    return Ok(());
                 }
+                let message = "retrieval representation token encoding returned no tokens";
+                if request.retrieval_representation.is_some() && require_semantic {
+                    return Err(CliError::SemanticUnavailable(message.to_string()));
+                }
+                eprintln!("[memkeeper] {message}");
             }
-            Err(error) => eprintln!("[memkeeper] colbert embedding failed: {error}"),
+            Err(error) => {
+                let message = format!("retrieval representation token encoding failed: {error}");
+                if request.retrieval_representation.is_some() && require_semantic {
+                    return Err(CliError::SemanticUnavailable(message));
+                }
+                eprintln!("[memkeeper] colbert embedding failed: {error}");
+            }
         },
-        Err(error) => eprintln!("[memkeeper] colbert model lock failed: {error}"),
+        Err(error) => {
+            let message = format!("retrieval representation token encoder lock failed: {error}");
+            if request.retrieval_representation.is_some() && require_semantic {
+                return Err(CliError::SemanticUnavailable(message));
+            }
+            eprintln!("[memkeeper] colbert model lock failed: {error}");
+        }
     }
+    Ok(())
 }
 
 #[cfg(not(feature = "embed"))]
 fn maybe_colbert_embed_remember_request(
-    _request: &mut RememberRequest,
+    request: &mut RememberRequest,
+    semantic_models: &SemanticModels,
+) -> Result<(), CliError> {
+    maybe_colbert_embed_remember_request_with_requirement(
+        request,
+        semantic_models,
+        serve::require_semantic_env(),
+    )
+}
+
+#[cfg(not(feature = "embed"))]
+fn maybe_colbert_embed_remember_request_with_requirement(
+    request: &mut RememberRequest,
     _semantic_models: &SemanticModels,
-) {
+    require_semantic: bool,
+) -> Result<(), CliError> {
+    if request.retrieval_representation.is_some() && require_semantic {
+        return Err(CliError::SemanticUnavailable(
+            "retrieval representation token encoder is unavailable in this build".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(feature = "embed")]
@@ -1686,22 +1895,7 @@ fn maybe_rerank_pack_report(
     let doc_limit = rerank_doc_chars();
     // Content is always scored; late-interaction candidates with a summary get
     // a second pass in the same rerank batch and keep the better score.
-    let mut doc_refs: Vec<&str> = pool
-        .candidates
-        .iter()
-        .map(|candidate| rerank_doc(&candidate.content, doc_limit))
-        .collect();
-    let summary_idx: Vec<usize> = pool
-        .candidates
-        .iter()
-        .enumerate()
-        .filter_map(|(index, candidate)| candidate.summary.as_ref().map(|_| index))
-        .collect();
-    for &index in &summary_idx {
-        if let Some(summary) = pool.candidates[index].summary.as_deref() {
-            doc_refs.push(rerank_doc(summary, doc_limit));
-        }
-    }
+    let (doc_refs, summary_idx) = rerank_pool_documents(&pool.candidates, doc_limit);
     let (prod_model_id, scores) = match reranker.lock() {
         Ok(mut reranker) => match reranker.rerank(query, &doc_refs) {
             Ok(scores) => (reranker.model_id().to_string(), scores),
@@ -1846,22 +2040,6 @@ fn run_rerank(args: &[String]) -> i32 {
     print_result(command, started, result)
 }
 
-/// Identify the active reranker by the basename of its model directory
-/// (e.g. `mxbai-rerank-base`). `RerankerModel` exposes no id accessor, and the
-/// daemon always sets `MEMKEEPER_RERANK_MODEL_DIR`, so the dir name is the stable
-/// label callers persist alongside scores.
-#[cfg(feature = "semantic")]
-fn rerank_model_id() -> String {
-    std::env::var("MEMKEEPER_RERANK_MODEL_DIR")
-        .ok()
-        .and_then(|dir| {
-            std::path::Path::new(&dir)
-                .file_name()
-                .map(|name| name.to_string_lossy().into_owned())
-        })
-        .unwrap_or_else(|| "rerank".to_string())
-}
-
 #[cfg(feature = "semantic")]
 fn run_rerank_payload(
     request: &RerankRequest,
@@ -1876,10 +2054,10 @@ fn run_rerank_payload(
         return Ok("{\"model_id\":null,\"scores\":[]}".to_string());
     }
     let docs: Vec<&str> = request.documents.iter().map(String::as_str).collect();
-    let model_id = rerank_model_id();
     let mut reranker = reranker
         .lock()
         .map_err(|e| CliError::InvalidRequest(format!("rerank model lock failed: {e}")))?;
+    let model_id = reranker.model_id().to_string();
     let scores = reranker
         .rerank(&request.query, &docs)
         .map_err(|e| CliError::InvalidRequest(format!("rerank failed: {e}")))?;
@@ -4430,6 +4608,7 @@ fn print_help() {
            candidate-approve --store <path> --json '{{}}' Approve a candidate, promoting it to a memory.\n\
            candidate-reject --store <path> --json '{{}}' Reject a candidate memory.\n\
            pack --store <path> --json '{{\"title\":<str>,\"queries\":[<str>,...]}}' Build a compact memory pack. Optional: max_memories, max_chars, min_score, filters, format.\n\
+           pool-trace --store <path> --json '{{\"title\":<str>,\"queries\":[<str>,...]}}' Diagnose the ID-only pre-rerank pool (requires semantic embedder).\n\
            get --store <path> --id <id> --json    Fetch one memory.\n\
            forget --store <path> --id <id> --json Tombstone one memory.\n\
            history --store <path> --id <id> --json Show memory versions/events.\n\

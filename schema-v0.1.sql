@@ -153,6 +153,17 @@ CREATE INDEX IF NOT EXISTS idx_memory_versions_memory
 CREATE INDEX IF NOT EXISTS idx_memory_versions_hash
   ON memory_versions(content_sha256);
 
+-- Optional immutable retrieval representations owned by memory versions.
+CREATE TABLE IF NOT EXISTS memory_representations (
+  version_id TEXT PRIMARY KEY,
+  kind TEXT NOT NULL
+    CHECK (kind IN ('contextual-card-v1')),
+  text TEXT NOT NULL,
+  text_sha256 TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  FOREIGN KEY (version_id) REFERENCES memory_versions(id) ON DELETE CASCADE
+);
+
 -- Append-only-ish event log. Corrections should add events rather than mutate history.
 CREATE TABLE IF NOT EXISTS memory_events (
   id TEXT PRIMARY KEY,

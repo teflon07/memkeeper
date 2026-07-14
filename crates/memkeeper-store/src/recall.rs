@@ -3,56 +3,13 @@
 
 use std::path::Path;
 
-use rusqlite::{params, Transaction};
+use rusqlite::params;
 
 use crate::{
-    limit_i64, now_timestamp, open_initialized_write, Error, RecallLogReport, RecallLogRequest,
-    Result, ShadowRerankBatch, MAX_METADATA_VALUE_CHARS, MAX_RECALL_EVENTS, MAX_SEARCH_QUERY_CHARS,
+    ensure_recall_events, ensure_reranker_shadow_events, limit_i64, now_timestamp,
+    open_initialized_write, Error, RecallLogReport, RecallLogRequest, Result, ShadowRerankBatch,
+    MAX_METADATA_VALUE_CHARS, MAX_RECALL_EVENTS, MAX_SEARCH_QUERY_CHARS,
 };
-
-/// `recall_events` is engine-owned telemetry. It is created lazily (not part
-/// of schema validation) so pre-existing stores need no migration, and it is
-/// intentionally excluded from export/import: recall history is local
-/// operational data, not memory content.
-pub(crate) const RECALL_EVENTS_DDL: &str = "
-CREATE TABLE IF NOT EXISTS recall_events (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  memory_id TEXT NOT NULL,
-  ts TEXT NOT NULL,
-  kind TEXT NOT NULL,
-  source TEXT,
-  query TEXT,
-  rank INTEGER,
-  score REAL,
-  session_id TEXT,
-  batch_id TEXT,
-  latency_ms REAL,
-  latency_source TEXT
-);
-CREATE INDEX IF NOT EXISTS idx_recall_events_memory ON recall_events(memory_id);
-CREATE INDEX IF NOT EXISTS idx_recall_events_ts ON recall_events(ts);
-";
-
-/// `reranker_shadow_events` records production-vs-shadow reranker comparisons.
-/// Like `recall_events` it is engine-owned telemetry: created lazily and
-/// excluded from export/import (local operational data, not memory content).
-pub(crate) const RERANKER_SHADOW_DDL: &str = "
-CREATE TABLE IF NOT EXISTS reranker_shadow_events (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  batch INTEGER NOT NULL,
-  ts TEXT NOT NULL,
-  query TEXT,
-  prod_model_id TEXT,
-  shadow_model_id TEXT,
-  memory_id TEXT NOT NULL,
-  prod_rank INTEGER,
-  prod_score REAL,
-  shadow_rank INTEGER,
-  shadow_score REAL
-);
-CREATE INDEX IF NOT EXISTS idx_reranker_shadow_batch ON reranker_shadow_events(batch);
-CREATE INDEX IF NOT EXISTS idx_reranker_shadow_ts ON reranker_shadow_events(ts);
-";
 
 /// Record one pack's production-vs-shadow reranker comparison. Every row shares a
 /// monotonic `batch` id so offline analysis can group a single pack's candidates.
@@ -69,7 +26,7 @@ pub fn record_reranker_shadow(path: impl AsRef<Path>, batch: &ShadowRerankBatch)
     }
     let mut connection = open_initialized_write(path.as_ref())?;
     let transaction = connection.transaction()?;
-    transaction.execute_batch(RERANKER_SHADOW_DDL)?;
+    ensure_reranker_shadow_events(&transaction)?;
     let now = now_timestamp(&transaction)?;
     // Next batch id under the write lock: unique and monotonic without an external
     // dependency, so all rows from this call group cleanly for offline analysis.
@@ -106,32 +63,6 @@ pub fn record_reranker_shadow(path: impl AsRef<Path>, batch: &ShadowRerankBatch)
     Ok(recorded)
 }
 
-fn ensure_recall_events_column(
-    transaction: &Transaction<'_>,
-    name: &str,
-    sql_type: &str,
-) -> Result<()> {
-    let sql = format!("ALTER TABLE recall_events ADD COLUMN {name} {sql_type}");
-    match transaction.execute(&sql, []) {
-        Ok(_) => Ok(()),
-        Err(rusqlite::Error::SqliteFailure(_, Some(msg)))
-            if msg.contains("duplicate column name") =>
-        {
-            Ok(())
-        }
-        Err(error) => Err(Error::Database(error)),
-    }
-}
-
-/// Add optional telemetry columns to pre-existing `recall_events` tables.
-/// Idempotent: duplicate-column errors mean a migration already ran.
-pub(crate) fn ensure_recall_events_optional_columns(transaction: &Transaction<'_>) -> Result<()> {
-    ensure_recall_events_column(transaction, "session_id", "TEXT")?;
-    ensure_recall_events_column(transaction, "batch_id", "TEXT")?;
-    ensure_recall_events_column(transaction, "latency_ms", "REAL")?;
-    ensure_recall_events_column(transaction, "latency_source", "TEXT")
-}
-
 /// Record recall telemetry events and optionally touch `accessed_at` for
 /// retrieved memories. Events may reference memories that no longer exist.
 ///
@@ -147,8 +78,7 @@ pub fn record_recall(
     validate_recall_log_request(request)?;
     let mut connection = open_initialized_write(path.as_ref())?;
     let transaction = connection.transaction()?;
-    transaction.execute_batch(RECALL_EVENTS_DDL)?;
-    ensure_recall_events_optional_columns(&transaction)?;
+    ensure_recall_events(&transaction)?;
     let now = now_timestamp(&transaction)?;
     let mut recorded = 0_usize;
     let mut touched = 0_usize;

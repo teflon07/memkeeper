@@ -138,6 +138,45 @@ pub struct SiloRecord {
     pub is_default: bool,
 }
 
+/// Optional immutable retrieval companion supplied by a source-aware adapter.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RetrievalRepresentationInput {
+    /// Versioned representation kind.
+    pub kind: String,
+    /// Bounded retrieval text.
+    pub text: String,
+}
+
+/// Stored retrieval companion owned by one immutable memory version.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MemoryRepresentationRecord {
+    /// Memory version that owns this representation.
+    pub version_id: String,
+    /// Versioned representation kind.
+    pub kind: String,
+    /// Full retrieval text, exposed only on explicit audit reads.
+    pub text: String,
+    /// SHA-256 digest of `text`.
+    pub text_sha256: String,
+    /// Storage timestamp.
+    pub created_at: String,
+}
+
+/// Bounded projection status returned only for representation-bearing writes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RepresentationWriteStatus {
+    /// Versioned representation kind.
+    pub kind: String,
+    /// SHA-256 digest of the stored retrieval text.
+    pub text_sha256: String,
+    /// Whether the lexical projection was written.
+    pub fts_indexed: bool,
+    /// Whether the semantic token projection was written.
+    pub semantic_indexed: bool,
+    /// `indexed` or `lexical_only`.
+    pub status: String,
+}
+
 /// Request to store one explicit memory.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RememberRequest {
@@ -155,6 +194,8 @@ pub struct RememberRequest {
     pub content: String,
     /// Optional shorter summary.
     pub summary: Option<String>,
+    /// Optional source-aware retrieval companion.
+    pub retrieval_representation: Option<RetrievalRepresentationInput>,
     /// Tags to attach to the memory.
     pub tags: Vec<String>,
     /// Optional stable entity key.
@@ -207,6 +248,8 @@ pub struct RememberReport {
     pub event_id: String,
     /// Processing status for this deterministic MVP path.
     pub processing_status: String,
+    /// Bounded representation projection status when one was supplied.
+    pub representation: Option<RepresentationWriteStatus>,
     /// Duplicate/update candidates detected before insertion.
     pub candidates: Vec<RememberCandidate>,
     /// True when more candidates existed beyond the output cap.
@@ -387,6 +430,8 @@ pub struct MemoryRecord {
     pub content: String,
     /// Optional summary.
     pub summary: Option<String>,
+    /// Optional retrieval representation for the active immutable version.
+    pub retrieval_representation: Option<MemoryRepresentationRecord>,
     /// Content SHA-256 hex digest.
     pub content_sha256: String,
     /// Tags.
@@ -430,6 +475,8 @@ pub struct MemoryVersionRecord {
     pub content: String,
     /// Optional version summary.
     pub summary: Option<String>,
+    /// Optional retrieval representation owned by this version.
+    pub retrieval_representation: Option<MemoryRepresentationRecord>,
     /// Version content SHA-256 hex digest.
     pub content_sha256: String,
     /// Version creation timestamp.
@@ -1095,6 +1142,15 @@ pub struct PackRequest {
     pub token_model_id: Option<String>,
 }
 
+/// Within-entity memory-selection policy for graph expansion.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GraphWithinEntitySelection {
+    /// Existing pinned/recency order.
+    Recency,
+    /// First-query late-interaction `MaxSim` order.
+    Maxsim,
+}
+
 /// Optional retrieval-expansion behavior for pack construction.
 ///
 /// `PartialEq` only (not `Eq`): `graph_decay` is an `f64` knob, so the struct
@@ -1112,6 +1168,8 @@ pub struct PackExpansionOptions {
     /// raw ANN pool, so graph-pulled items never influence the cosine gate. The
     /// cross-encoder still gates what lands in the pack. Strategy: `hybrid_assoc_v0`.
     pub graph_expansion: bool,
+    /// Within-entity memory-selection policy for graph expansion.
+    pub graph_within_entity_selection: GraphWithinEntitySelection,
     /// Maximum total query variants after deterministic expansion.
     pub max_query_variants: usize,
     /// Maximum anchor memories used for same-thread expansion.
@@ -1143,6 +1201,7 @@ impl Default for PackExpansionOptions {
             query_expansion: false,
             thread_expansion: false,
             graph_expansion: false,
+            graph_within_entity_selection: GraphWithinEntitySelection::Recency,
             max_query_variants: MAX_BATCH_QUERIES,
             max_thread_seeds: 3,
             max_thread_neighbors: 3,
@@ -1425,6 +1484,8 @@ pub struct DreamGraphReport {
     pub dangling_relationships: usize,
     /// Relationship rows with missing, inactive, or cross-space evidence memory ids.
     pub inactive_evidence_relationships: usize,
+    /// Keyed active memory subjects lacking any matching entity projection row.
+    pub missing_entity_projections: Vec<DreamEntityProjection>,
     /// Proposed relationship candidates derived from explicit memory links.
     pub relationship_proposals: Vec<DreamRelationshipProposal>,
     /// True when any diagnostic/proposal list was bounded by `max_memories`.
@@ -1435,6 +1496,15 @@ pub struct DreamGraphReport {
     pub dangling_relationship_ids: Vec<String>,
     /// Bounded inactive evidence relationship ids.
     pub inactive_evidence_relationship_ids: Vec<String>,
+}
+
+/// One missing graph entity projection derived from canonical memory identity.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DreamEntityProjection {
+    /// Space containing the keyed active memory.
+    pub space: String,
+    /// Canonical memory entity key that should have an active entity row.
+    pub entity_key: String,
 }
 
 /// One relationship proposal derived from an explicit memory link.
@@ -1551,6 +1621,9 @@ pub struct HealthStats {
     /// Active memories missing an `entity_key` and/or `claim_key`, so they do
     /// not participate in entity/claim grouping or auto-supersession.
     pub active_without_keys: i64,
+    /// Active keyed memories without any matching entity row, excluding
+    /// deliberately merged or tombstoned projections.
+    pub active_missing_entity_projection: i64,
     /// Active `(entity_key, claim_key)` groups with more than one member, i.e.
     /// duplicates that should have collapsed via supersession (expect ~0).
     pub duplicate_key_groups: i64,

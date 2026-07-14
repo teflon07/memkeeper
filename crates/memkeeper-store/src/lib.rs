@@ -28,9 +28,6 @@ use rusqlite::{
     Connection, OpenFlags, OptionalExtension, Row, Transaction,
 };
 
-#[cfg(feature = "semantic")]
-use rusqlite::auto_extension::{register_auto_extension, RawAutoExtension};
-
 mod spaces;
 pub(crate) use spaces::{
     cleanup_vestigial_long_term_silo, default_silo, ensure_silo_exists, ensure_space_exists,
@@ -48,76 +45,46 @@ pub(crate) use common::{
 mod archive_spec;
 pub(crate) use archive_spec::{ExportTableSpec, EXPORT_TABLES};
 
+mod representation;
+pub(crate) use representation::{
+    insert_representation, load_representation, validate_retrieval_representation,
+};
+pub use representation::{representation_document, retrieval_companion};
+
 mod recall;
-pub(crate) use recall::{ensure_recall_events_optional_columns, RECALL_EVENTS_DDL};
 pub use recall::{record_recall, record_reranker_shadow};
 
 mod stats;
 pub(crate) use stats::space_names;
 pub use stats::{inspect_store_stats, last_synthesis_run, store_stats, store_stats_with_health};
 
+mod schema;
+#[cfg(test)]
+pub(crate) use schema::SCHEMA_SQL;
+#[cfg(all(test, feature = "semantic"))]
+pub(crate) use schema::SEMANTIC_TABLE_SQL;
+pub(crate) use schema::{
+    apply_schema, ensure_memory_candidates, ensure_recall_events, ensure_reranker_shadow_events,
+    ensure_source_episode_recall_events, normalize_imported_schema_metadata,
+    older_schema_is_memkeeper, required_config_value, table_exists, validate_initialized,
+};
 #[cfg(feature = "semantic")]
-static SQLITE_VEC_EXTENSION_REGISTERED: std::sync::OnceLock<std::result::Result<(), String>> =
-    std::sync::OnceLock::new();
+pub(crate) use schema::{
+    drop_all_vector_tables, ensure_memory_vector_table, ensure_source_episode_vector_table,
+    semantic_table_for_dims, source_episode_vector_table,
+};
+pub use schema::{
+    schema_mentions_required_objects, REQUIRED_FTS_TABLES, REQUIRED_TABLES, SCHEMA_VERSION,
+};
 
-/// Current `SQLite` schema version expected by the store/migration layer.
-pub const SCHEMA_VERSION: i32 = 5;
-
-/// `SQLite` schema draft used for v0.1 store initialization.
-pub(crate) const SCHEMA_SQL: &str = include_str!("../../../schema-v0.1.sql");
-
-#[cfg(feature = "semantic")]
-const SCHEMA_UPGRADE_SQL: &str = "
-INSERT OR IGNORE INTO schema_migrations (version, name, applied_at, checksum_sha256)
-VALUES (2, 'schema-v0.2', CURRENT_TIMESTAMP, NULL);
-INSERT OR IGNORE INTO schema_migrations (version, name, applied_at, checksum_sha256)
-VALUES (3, 'schema-v0.3-semantic-1536', CURRENT_TIMESTAMP, NULL);
-INSERT OR IGNORE INTO schema_migrations (version, name, applied_at, checksum_sha256)
-VALUES (4, 'schema-v0.4-semantic-1024', CURRENT_TIMESTAMP, NULL);
-DROP TABLE IF EXISTS memory_vec_1536;
-INSERT OR IGNORE INTO schema_migrations (version, name, applied_at, checksum_sha256)
-VALUES (5, 'schema-v0.5-token-embeddings', CURRENT_TIMESTAMP, NULL);
-CREATE TABLE IF NOT EXISTS memory_token_embeddings (
-  memory_id TEXT PRIMARY KEY,
-  embedding_model TEXT NOT NULL,
-  dims INTEGER NOT NULL,
-  n_tokens INTEGER NOT NULL,
-  vector_blob BLOB NOT NULL,
-  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-);
-UPDATE config_kv SET value = '5', updated_at = CURRENT_TIMESTAMP WHERE key = 'schema_version' AND value != '5';
-PRAGMA user_version = 5;
-";
-
-#[cfg(feature = "semantic")]
-const SEMANTIC_TABLE_SQL: &str = "
-CREATE VIRTUAL TABLE IF NOT EXISTS memory_vec_1024 USING vec0(
-  memory_id TEXT NOT NULL,
-  embedding FLOAT[1024]
-);
-";
-
-#[cfg(not(feature = "semantic"))]
-const SCHEMA_UPGRADE_SQL: &str = "
-INSERT OR IGNORE INTO schema_migrations (version, name, applied_at, checksum_sha256)
-VALUES (2, 'schema-v0.2', CURRENT_TIMESTAMP, NULL);
-INSERT OR IGNORE INTO schema_migrations (version, name, applied_at, checksum_sha256)
-VALUES (3, 'schema-v0.3', CURRENT_TIMESTAMP, NULL);
-INSERT OR IGNORE INTO schema_migrations (version, name, applied_at, checksum_sha256)
-VALUES (4, 'schema-v0.4', CURRENT_TIMESTAMP, NULL);
-INSERT OR IGNORE INTO schema_migrations (version, name, applied_at, checksum_sha256)
-VALUES (5, 'schema-v0.5-token-embeddings', CURRENT_TIMESTAMP, NULL);
-CREATE TABLE IF NOT EXISTS memory_token_embeddings (
-  memory_id TEXT PRIMARY KEY,
-  embedding_model TEXT NOT NULL,
-  dims INTEGER NOT NULL,
-  n_tokens INTEGER NOT NULL,
-  vector_blob BLOB NOT NULL,
-  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-);
-UPDATE config_kv SET value = '5', updated_at = CURRENT_TIMESTAMP WHERE key = 'schema_version' AND value != '5';
-PRAGMA user_version = 5;
-";
+mod connection;
+pub use connection::init_store;
+pub(crate) use connection::{
+    cleanup_inspection_copy, configure_connection, enable_wal, inspect_on_copy,
+    inspection_copy_path, journal_mode, open_initialized_read_fast, open_initialized_write,
+    register_sqlite_vec_extension, reject_sqlite_sidecar_symlinks, sidecar_path, sqlite_version,
+    user_version, validate_store_path,
+};
 
 /// Suggested user-scoped store path for hosts that intentionally choose a user-global store.
 pub const USER_STORE_PATH_HINT: &str = "<user-data-dir>/memkeeper/store.sqlite";
@@ -205,6 +172,9 @@ pub const MAX_BATCH_QUERY_LIMIT: usize = 20;
 /// Maximum memories included in one deterministic prompt pack.
 pub const MAX_PACK_MEMORIES: usize = 50;
 
+/// Maximum graph-allocation candidates emitted by one diagnostic pool trace.
+const MAX_POOL_TRACE_GRAPH_OBSERVATIONS: usize = 1_000;
+
 /// Maximum emitted prompt pack size in Unicode scalar values.
 pub const MAX_PACK_CHARS: usize = 10_000;
 
@@ -288,31 +258,6 @@ const MAX_REMEMBER_CONFLICT_CANDIDATES: usize = 5;
 
 /// Minimum token Jaccard overlap for lexical remember candidate detection.
 const REMEMBER_LEXICAL_THRESHOLD: f64 = 0.35;
-
-/// Required table names that should exist in the v0.1 schema.
-pub const REQUIRED_TABLES: &[&str] = &[
-    "schema_migrations",
-    "config_kv",
-    "spaces",
-    "silos",
-    "source_episodes",
-    "memories",
-    "memory_versions",
-    "memory_events",
-    "memory_tags",
-    "memory_links",
-    "conflicts",
-    "entities",
-    "entity_aliases",
-    "relationships",
-    "processing_jobs",
-    "embeddings",
-    "dream_runs",
-    "probe_runs",
-];
-
-/// Required FTS virtual table names.
-pub const REQUIRED_FTS_TABLES: &[&str] = &["memory_fts", "memory_fts_public", "source_episode_fts"];
 
 /// Result type for store operations.
 pub type Result<T> = std::result::Result<T, Error>;
@@ -459,86 +404,6 @@ impl From<rusqlite::Error> for Error {
 
 mod types;
 pub use types::*;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ExistingStoreInspection {
-    Compatible,
-    OlderSchema(i32),
-    Unrecognized,
-    FutureSchema(i32),
-}
-
-/// Return true if the embedded schema text contains the objects expected by the scaffold.
-#[must_use]
-pub fn schema_mentions_required_objects() -> bool {
-    let base_schema_mentions_required_objects =
-        REQUIRED_TABLES.iter().all(|name| SCHEMA_SQL.contains(name))
-            && REQUIRED_FTS_TABLES
-                .iter()
-                .all(|name| SCHEMA_SQL.contains(name))
-            && SCHEMA_SQL.contains(DEFAULT_SPACE)
-            && SCHEMA_SQL.contains("PRAGMA user_version = 1");
-    #[cfg(feature = "semantic")]
-    {
-        base_schema_mentions_required_objects
-            && SEMANTIC_TABLE_SQL.contains("memory_vec_1024")
-            && SCHEMA_UPGRADE_SQL.contains(&format!("PRAGMA user_version = {SCHEMA_VERSION}"))
-    }
-    #[cfg(not(feature = "semantic"))]
-    {
-        base_schema_mentions_required_objects
-            && SCHEMA_UPGRADE_SQL.contains(&format!("PRAGMA user_version = {SCHEMA_VERSION}"))
-    }
-}
-
-/// Initialize a local memkeeper store at `path`.
-///
-/// The operation creates parent directories, applies the v0.1 schema
-/// idempotently, seeds the default workspace space/silos, and validates the
-/// resulting schema version.
-///
-/// # Errors
-///
-/// Returns an error when the path is not durable, the parent directory cannot
-/// be created, an existing non-memkeeper database would be mutated, the existing
-/// schema is newer than this binary supports, WAL cannot be enabled, or
-/// `SQLite` rejects the schema batch.
-pub fn init_store(path: impl AsRef<Path>) -> Result<InitReport> {
-    let path = path.as_ref();
-    validate_store_path(path)?;
-    create_parent_dirs(path)?;
-    let created = claim_or_preflight_init_path(path)?;
-
-    reject_sqlite_sidecar_symlinks(path)?;
-    register_sqlite_vec_extension()?;
-    let connection = Connection::open_with_flags(
-        path,
-        OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_CREATE,
-    )?;
-    configure_connection(&connection)?;
-    let enabled_journal_mode = enable_wal(&connection)?;
-    if enabled_journal_mode != "wal" {
-        return Err(Error::WalUnavailable {
-            path: path.to_path_buf(),
-            journal_mode: enabled_journal_mode,
-        });
-    }
-
-    apply_schema(&connection)?;
-    validate_initialized(path, &connection)?;
-    cleanup_vestigial_long_term_silo(&connection)?;
-
-    Ok(InitReport {
-        created,
-        initialized: true,
-        schema_version: user_version(&connection)?,
-        protocol_version: required_config_value(path, &connection, "protocol_version")?,
-        sqlite_version: sqlite_version(&connection)?,
-        journal_mode: journal_mode(&connection)?,
-        spaces: space_names(&connection)?,
-        default_space: required_config_value(path, &connection, "default_space")?,
-    })
-}
 
 /// Store one explicit memory and update deterministic indexes atomically.
 ///
@@ -719,35 +584,6 @@ const DEFAULT_CANDIDATE_SENSITIVITY: &str = "normal";
 
 /// Default and maximum rows returned by one `candidate-list` call.
 const DEFAULT_CANDIDATE_LIST_LIMIT: usize = 50;
-
-const CANDIDATES_DDL: &str = "
-CREATE TABLE IF NOT EXISTS memory_candidates (
-  id TEXT PRIMARY KEY,
-  status TEXT NOT NULL DEFAULT 'pending',
-  space TEXT,
-  silo TEXT,
-  scope TEXT,
-  project TEXT,
-  kind TEXT,
-  content TEXT NOT NULL,
-  summary TEXT,
-  rationale TEXT,
-  tags_json TEXT,
-  entity_key TEXT,
-  claim_key TEXT,
-  confidence REAL NOT NULL DEFAULT 1.0,
-  source_type TEXT NOT NULL DEFAULT 'assistant-inference',
-  source_json TEXT,
-  sensitivity TEXT NOT NULL DEFAULT 'normal',
-  supersedes_json TEXT,
-  created_at TEXT NOT NULL,
-  decided_at TEXT,
-  decided_reason TEXT,
-  resulting_memory_id TEXT
-);
-CREATE INDEX IF NOT EXISTS idx_memory_candidates_status ON memory_candidates(status);
-CREATE INDEX IF NOT EXISTS idx_memory_candidates_created ON memory_candidates(created_at);
-";
 
 // Candidate memories: a review queue for not-yet-trusted writes.
 //
@@ -1204,7 +1040,7 @@ pub fn submit_candidate(
     validate_candidate_submit_request(request)?;
     let mut connection = open_initialized_write(path.as_ref())?;
     let transaction = connection.transaction()?;
-    transaction.execute_batch(CANDIDATES_DDL)?;
+    ensure_memory_candidates(&transaction)?;
     let now = now_timestamp(&transaction)?;
     let id = next_id("cand");
     let tags = normalized_tags(&request.tags)?;
@@ -1280,7 +1116,7 @@ pub fn list_candidates(
     let limit = request.limit.clamp(1, DEFAULT_CANDIDATE_LIST_LIMIT * 2);
     let mut connection = open_initialized_write(path.as_ref())?;
     let transaction = connection.transaction()?;
-    transaction.execute_batch(CANDIDATES_DDL)?;
+    ensure_memory_candidates(&transaction)?;
 
     // Build a WHERE clause from the optional status/space filters.
     let mut clauses: Vec<&str> = Vec::new();
@@ -1364,6 +1200,8 @@ fn remember_request_from_candidate(
     embedding: Option<Vec<f32>>,
     embedding_model_id: Option<String>,
 ) -> RememberRequest {
+    let (derived_entity_key, derived_claim_key) =
+        memkeeper_core::derive::keys(&candidate.content, candidate.summary.as_deref());
     let metadata_json = candidate
         .rationale
         .as_deref()
@@ -1376,9 +1214,10 @@ fn remember_request_from_candidate(
         kind: candidate.kind.clone(),
         content: candidate.content.clone(),
         summary: candidate.summary.clone(),
+        retrieval_representation: None,
         tags: candidate.tags.clone(),
-        entity_key: candidate.entity_key.clone(),
-        claim_key: candidate.claim_key.clone(),
+        entity_key: candidate.entity_key.clone().or(derived_entity_key),
+        claim_key: candidate.claim_key.clone().or(derived_claim_key),
         confidence: candidate.confidence,
         observed_at: None,
         valid_from: None,
@@ -1423,7 +1262,7 @@ pub fn approve_candidate(
     }
     let mut connection = open_initialized_write(path.as_ref())?;
     let transaction = connection.transaction()?;
-    transaction.execute_batch(CANDIDATES_DDL)?;
+    ensure_memory_candidates(&transaction)?;
     let candidate =
         load_candidate(&transaction, &request.id)?.ok_or_else(|| Error::InvalidRequest {
             message: format!("candidate not found: {}", request.id),
@@ -1480,7 +1319,7 @@ pub fn reject_candidate(
     }
     let mut connection = open_initialized_write(path.as_ref())?;
     let transaction = connection.transaction()?;
-    transaction.execute_batch(CANDIDATES_DDL)?;
+    ensure_memory_candidates(&transaction)?;
     let candidate =
         load_candidate(&transaction, &request.id)?.ok_or_else(|| Error::InvalidRequest {
             message: format!("candidate not found: {}", request.id),
@@ -1892,12 +1731,75 @@ pub fn build_pack(path: impl AsRef<Path>, request: &PackRequest) -> Result<PackR
 }
 
 /// One scored candidate from the pack retrieval pool (pre-rerank).
+/// Retrieval route that observed a candidate before cross-encoder reranking.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum AdmissionSource {
+    /// Semantic approximate-nearest-neighbor retrieval.
+    Ann,
+    /// Exhaustive late-interaction `MaxSim` retrieval replacing the ANN leg.
+    Maxsim,
+    /// Lexical BM25 retrieval.
+    Bm25,
+    /// Same-entity or same-claim expansion from a seed candidate.
+    Thread,
+    /// Relationship-graph expansion from a seed candidate.
+    Graph,
+}
+
+/// One route-specific observation of a candidate before pool truncation.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AdmissionObservation {
+    /// Retrieval route.
+    pub source: AdmissionSource,
+    /// Zero-based query or deterministic variant index.
+    pub query_index: usize,
+    /// One-based rank within the route-local result list.
+    pub source_rank: usize,
+    /// Expansion seed for thread or graph observations.
+    pub seed_memory_id: Option<String>,
+    /// Graph activation when the route is [`AdmissionSource::Graph`].
+    pub activation: Option<f64>,
+}
+
+/// One scored candidate from the pack retrieval pool before reranking.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PackPoolItem {
     /// Candidate memory id.
     pub memory_id: String,
     /// Retrieval score: cosine similarity on the ANN/embed path, BM25 otherwise.
     pub score: f64,
+    /// Every retrieval route that observed this memory before reranking.
+    pub admissions: Vec<AdmissionObservation>,
+}
+
+impl PackPoolItem {
+    fn direct_candidate(
+        memory_id: String,
+        score: f64,
+        source: AdmissionSource,
+        query_index: usize,
+        source_rank: usize,
+    ) -> Self {
+        Self {
+            memory_id,
+            score,
+            admissions: vec![AdmissionObservation {
+                source,
+                query_index,
+                source_rank,
+                seed_memory_id: None,
+                activation: None,
+            }],
+        }
+    }
+
+    fn merge_admissions_from(&mut self, other: &Self) {
+        for observation in &other.admissions {
+            if !self.admissions.contains(observation) {
+                self.admissions.push(observation.clone());
+            }
+        }
+    }
 }
 
 /// One pack candidate after cross-encoder reranking: its memory id, full
@@ -2326,7 +2228,6 @@ fn build_pack_pool_basic_on_connection(
 
     // Dedupe by memory id, preserving the interleaved retrieval order, with no
     // precision floor: gating is the caller's responsibility on this path.
-    let mut seen = BTreeSet::new();
     let mut pool = Vec::new();
     let max_result_len = query_reports
         .iter()
@@ -2334,16 +2235,38 @@ fn build_pack_pool_basic_on_connection(
         .max()
         .unwrap_or(0);
     for result_index in 0..max_result_len {
-        for report in &query_reports {
+        for (query_index, report) in query_reports.iter().enumerate() {
             if let Some(result) = report.results.get(result_index) {
-                if seen.insert(result.memory_id.clone()) {
-                    pool.push(PackPoolItem {
-                        memory_id: result.memory_id.clone(),
-                        score: result.score,
-                    });
-                    if pool.len() >= request.max_memories {
-                        return Ok(pool);
-                    }
+                let source = if request
+                    .query_embeddings
+                    .as_ref()
+                    .and_then(|embeddings| embeddings.get(query_index))
+                    .is_some()
+                {
+                    AdmissionSource::Ann
+                } else {
+                    AdmissionSource::Bm25
+                };
+                let candidate = PackPoolItem::direct_candidate(
+                    result.memory_id.clone(),
+                    result.score,
+                    source,
+                    query_index,
+                    result_index + 1,
+                );
+                if let Some(existing) = pool
+                    .iter_mut()
+                    .find(|existing: &&mut PackPoolItem| existing.memory_id == result.memory_id)
+                {
+                    existing.merge_admissions_from(&candidate);
+                } else if pool.len() < request.max_memories {
+                    pool.push(PackPoolItem::direct_candidate(
+                        result.memory_id.clone(),
+                        result.score,
+                        source,
+                        query_index,
+                        result_index + 1,
+                    ));
                 }
             }
         }
@@ -2453,10 +2376,19 @@ fn expand_pack_pool_threads(
 ) -> Result<Vec<PackPoolItem>> {
     let mut seen: BTreeSet<String> = pool.iter().map(|item| item.memory_id.clone()).collect();
     let mut expanded = Vec::with_capacity(request.max_memories);
+    let mut pending_admissions: BTreeMap<String, Vec<AdmissionObservation>> = BTreeMap::new();
     let mut seed_count = 0usize;
     for item in pool {
         if expanded.len() >= request.max_memories {
             break;
+        }
+        let mut item = item.clone();
+        if let Some(admissions) = pending_admissions.remove(&item.memory_id) {
+            for admission in admissions {
+                if !item.admissions.contains(&admission) {
+                    item.admissions.push(admission);
+                }
+            }
         }
         expanded.push(item.clone());
         if expanded.len() >= request.max_memories {
@@ -2467,13 +2399,23 @@ fn expand_pack_pool_threads(
         }
         seed_count += 1;
         let neighbors =
-            thread_neighbor_pool_items(connection, request, item, expansion.max_thread_neighbors)?;
+            thread_neighbor_pool_items(connection, request, &item, expansion.max_thread_neighbors)?;
         for neighbor in neighbors {
             if seen.insert(neighbor.memory_id.clone()) {
                 expanded.push(neighbor);
                 if expanded.len() >= request.max_memories {
                     break;
                 }
+            } else if let Some(existing) = expanded
+                .iter_mut()
+                .find(|existing| existing.memory_id == neighbor.memory_id)
+            {
+                existing.merge_admissions_from(&neighbor);
+            } else {
+                pending_admissions
+                    .entry(neighbor.memory_id.clone())
+                    .or_default()
+                    .extend(neighbor.admissions);
             }
         }
     }
@@ -2547,6 +2489,13 @@ fn thread_neighbor_pool_items(
             memory_id,
             score: seed.score
                 - 0.000_001_f64 * u32::try_from(index + 1).map_or(f64::from(u32::MAX), f64::from),
+            admissions: vec![AdmissionObservation {
+                source: AdmissionSource::Thread,
+                query_index: 0,
+                source_rank: index + 1,
+                seed_memory_id: Some(seed.memory_id.clone()),
+                activation: None,
+            }],
         })
         .collect())
 }
@@ -2642,32 +2591,214 @@ fn graph_recall_readiness_on_connection(
 /// the unexpanded pool, byte-identical to flag-off. An empty graph is legitimate
 /// for a tiny new store, so this warns rather than errors; the caller's
 /// `MEMKEEPER_ASSOCIATIVE_RECALL_REQUIRE` hatch turns it into a refusal.
-type GraphExpandedPool = (Vec<PackPoolItem>, BTreeMap<String, f64>);
+type GraphExpandedPool = (
+    Vec<PackPoolItem>,
+    BTreeMap<String, f64>,
+    BTreeMap<String, usize>,
+);
+type GraphNeighborSelection = (Vec<(String, f64)>, BTreeMap<String, usize>);
+type GraphWithinEntityMaxsimContext<'a> = Option<(&'a [Vec<f32>], std::sync::Arc<TokenMatrixRows>)>;
+
+/// Allocate the bounded set of new graph memories in two deterministic passes:
+/// first admit the strongest memory from each neighbor entity, then fill any
+/// remaining slots in the original global activation order. This prevents one
+/// high-activation entity from consuming the entire graph budget while
+/// preserving the existing ordering whenever entity diversity is exhausted.
+fn diversify_graph_neighbors(
+    mut candidates: Vec<(String, String, String, f64)>,
+    limit: usize,
+) -> Vec<(String, f64)> {
+    if limit == 0 {
+        return Vec::new();
+    }
+    candidates.sort_by(|left, right| {
+        right
+            .3
+            .partial_cmp(&left.3)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| left.0.cmp(&right.0))
+    });
+    let mut selected_entities: BTreeSet<(String, String)> = BTreeSet::new();
+    let mut selected_memories: BTreeSet<String> = BTreeSet::new();
+    let mut selected = Vec::new();
+    for (memory_id, space_name, entity_key, activation) in &candidates {
+        if selected_entities.insert((space_name.clone(), entity_key.clone())) {
+            selected_memories.insert(memory_id.clone());
+            selected.push((memory_id.clone(), *activation));
+            if selected.len() == limit {
+                return selected;
+            }
+        }
+    }
+    for (memory_id, _, _, activation) in candidates {
+        if selected_memories.insert(memory_id.clone()) {
+            selected.push((memory_id, activation));
+            if selected.len() == limit {
+                break;
+            }
+        }
+    }
+    selected
+}
+
+fn select_graph_neighbors(
+    candidates: Vec<(String, String, String, f64)>,
+    limit: usize,
+    trace_graph_allocation: bool,
+) -> Result<GraphNeighborSelection> {
+    if !trace_graph_allocation {
+        return Ok((
+            diversify_graph_neighbors(candidates, limit),
+            BTreeMap::new(),
+        ));
+    }
+    if candidates.len() > MAX_POOL_TRACE_GRAPH_OBSERVATIONS {
+        return Err(Error::InvalidRequest {
+            message: format!(
+                "pool-trace graph allocation observed {} candidates; maximum is {}",
+                candidates.len(),
+                MAX_POOL_TRACE_GRAPH_OBSERVATIONS
+            ),
+        });
+    }
+    let allocation_order = diversify_graph_neighbors(candidates, usize::MAX);
+    let ranks = allocation_order
+        .iter()
+        .enumerate()
+        .map(|(index, (memory_id, _))| (memory_id.clone(), index + 1))
+        .collect();
+    Ok((allocation_order.into_iter().take(limit).collect(), ranks))
+}
+
+fn select_graph_entity_memory(
+    mut memory_ids: Vec<String>,
+    scores: &BTreeMap<String, f64>,
+) -> Result<Vec<String>> {
+    for memory_id in &memory_ids {
+        if !scores.contains_key(memory_id) {
+            return Err(Error::InvalidRequest {
+                message: format!(
+                    "graph_within_entity_maxsim missing token embedding for memory {memory_id}"
+                ),
+            });
+        }
+    }
+    memory_ids.sort_by(|left, right| {
+        scores[right]
+            .partial_cmp(&scores[left])
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    memory_ids.truncate(1);
+    Ok(memory_ids)
+}
+
+fn score_graph_entity_memories(
+    memory_ids: &[String],
+    query_tokens: &[Vec<f32>],
+    docs: &[(String, Vec<Vec<f32>>)],
+) -> Result<BTreeMap<String, f64>> {
+    let considered: BTreeSet<&str> = memory_ids.iter().map(String::as_str).collect();
+    let scores: BTreeMap<String, f64> = docs
+        .iter()
+        .filter(|(memory_id, _)| considered.contains(memory_id.as_str()))
+        .map(|(memory_id, tokens)| (memory_id.clone(), maxsim_score(query_tokens, tokens)))
+        .collect();
+    for memory_id in memory_ids {
+        if !scores.contains_key(memory_id) {
+            return Err(Error::InvalidRequest {
+                message: format!(
+                    "graph_within_entity_maxsim missing token embedding for memory {memory_id}"
+                ),
+            });
+        }
+    }
+    Ok(scores)
+}
+
+fn validate_graph_within_entity_maxsim(
+    request: &PackRequest,
+    expansion: PackExpansionOptions,
+) -> Result<()> {
+    if expansion.graph_within_entity_selection != GraphWithinEntitySelection::Maxsim {
+        return Ok(());
+    }
+    if !expansion.graph_expansion {
+        return Err(Error::InvalidRequest {
+            message: "graph_within_entity_maxsim requires graph_expansion=true".to_string(),
+        });
+    }
+    let has_query_tokens = request
+        .query_token_embeddings
+        .as_ref()
+        .and_then(|queries| queries.first())
+        .is_some_and(|tokens| !tokens.is_empty());
+    if !has_query_tokens || request.token_model_id.as_deref().is_none() {
+        return Err(Error::InvalidRequest {
+            message: "graph_within_entity_maxsim requires first-query late-interaction tokens and token_model_id"
+                .to_string(),
+        });
+    }
+    Ok(())
+}
+
+fn graph_expansion_filters(request: &PackRequest) -> Result<SearchFilters> {
+    let mut filters = request.filters.clone();
+    filters.spaces = resolve_space_filter(&filters.spaces);
+    if filters.statuses.is_empty() {
+        filters.statuses.push(status::ACTIVE.to_string());
+    }
+    let filters = normalize_search_filters(filters)?;
+    validate_search_filters(&filters)?;
+    Ok(filters)
+}
+
+fn graph_within_entity_maxsim_context<'a>(
+    connection: &Connection,
+    request: &'a PackRequest,
+    expansion: PackExpansionOptions,
+) -> Result<GraphWithinEntityMaxsimContext<'a>> {
+    if expansion.graph_within_entity_selection != GraphWithinEntitySelection::Maxsim {
+        return Ok(None);
+    }
+    let query_tokens = request
+        .query_token_embeddings
+        .as_ref()
+        .and_then(|queries| queries.first())
+        .ok_or_else(|| Error::InvalidRequest {
+            message: "graph_within_entity_maxsim requires first-query tokens".to_string(),
+        })?;
+    let model_id = request
+        .token_model_id
+        .as_deref()
+        .ok_or_else(|| Error::InvalidRequest {
+            message: "graph_within_entity_maxsim requires token_model_id".to_string(),
+        })?;
+    Ok(Some((
+        query_tokens,
+        load_token_embeddings_cached(connection, model_id)?,
+    )))
+}
 
 fn graph_expand_pool(
     connection: &Connection,
     request: &PackRequest,
     pool: &[PackPoolItem],
     expansion: PackExpansionOptions,
+    trace_graph_allocation: bool,
 ) -> Result<GraphExpandedPool> {
     if !expansion.graph_expansion
         || expansion.max_graph_seeds == 0
         || expansion.max_graph_neighbors == 0
         || pool.is_empty()
     {
-        return Ok((pool.to_vec(), BTreeMap::new()));
+        return Ok((pool.to_vec(), BTreeMap::new(), BTreeMap::new()));
     }
 
     // Normalize filters once (default space/status), exactly as thread expansion
     // does, so graph-pulled ids pass space/status/kind/project/silo/scope before
     // they are unioned into the candidate set.
-    let mut filters = request.filters.clone();
-    filters.spaces = resolve_space_filter(&filters.spaces);
-    if filters.statuses.is_empty() {
-        filters.statuses.push(status::ACTIVE.to_string());
-    }
-    filters = normalize_search_filters(filters)?;
-    validate_search_filters(&filters)?;
+    let filters = graph_expansion_filters(request)?;
+    let within_entity_maxsim = graph_within_entity_maxsim_context(connection, request, expansion)?;
 
     let pool_ids: BTreeSet<String> = pool.iter().map(|item| item.memory_id.clone()).collect();
     // memory_id -> MAX activation across all seeds/paths. Tag EVERY graph-reachable
@@ -2683,6 +2814,7 @@ fn graph_expand_pool(
     // collapsing every seed onto the default space. Readiness is checked and warned
     // once per distinct space; an unusable space degrades that seed to ANN/BM25.
     let mut activations: BTreeMap<String, f64> = BTreeMap::new();
+    let mut activation_entities: BTreeMap<String, (String, String)> = BTreeMap::new();
     let mut readiness_usable: BTreeMap<String, bool> = BTreeMap::new();
     for seed in pool.iter().take(expansion.max_graph_seeds) {
         let Some(seed_space) = memory_space_on_connection(connection, &seed.memory_id)? else {
@@ -2709,9 +2841,17 @@ fn graph_expand_pool(
         if !usable {
             continue;
         }
-        for (memory_id, activation) in
-            graph_seed_neighbor_activations(connection, &filters, &seed_space, seed, expansion)?
-        {
+        for (memory_id, space_name, entity_key, activation) in graph_seed_neighbor_activations(
+            connection,
+            &filters,
+            &seed_space,
+            seed,
+            expansion,
+            within_entity_maxsim
+                .as_ref()
+                .map(|(query_tokens, docs)| (*query_tokens, docs.as_ref())),
+        )? {
+            activation_entities.insert(memory_id.clone(), (space_name, entity_key));
             activations
                 .entry(memory_id)
                 .and_modify(|existing| {
@@ -2727,32 +2867,47 @@ fn graph_expand_pool(
     // (below-pool) graph-reachable memories, highest activation first, bounded by
     // `max_graph_neighbors`. In-pool graph-reachable memories are not re-unioned
     // (already candidates) but keep their activation tag for the reserved slot.
-    let mut new_neighbors: Vec<(String, f64)> = activations
+    let new_neighbor_candidates: Vec<(String, String, String, f64)> = activations
         .iter()
         .filter(|(memory_id, _)| !pool_ids.contains(memory_id.as_str()))
-        .map(|(memory_id, activation)| (memory_id.clone(), *activation))
+        .filter_map(|(memory_id, activation)| {
+            activation_entities
+                .get(memory_id)
+                .map(|(space_name, entity_key)| {
+                    (
+                        memory_id.clone(),
+                        space_name.clone(),
+                        entity_key.clone(),
+                        *activation,
+                    )
+                })
+        })
         .collect();
-    new_neighbors.sort_by(|left, right| {
-        right
-            .1
-            .partial_cmp(&left.1)
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then_with(|| left.0.cmp(&right.0))
-    });
-    new_neighbors.truncate(expansion.max_graph_neighbors);
+    let (new_neighbors, graph_allocation_ranks) = select_graph_neighbors(
+        new_neighbor_candidates,
+        expansion.max_graph_neighbors,
+        trace_graph_allocation,
+    )?;
 
     let mut expanded = pool.to_vec();
     for (memory_id, activation) in new_neighbors {
         expanded.push(PackPoolItem {
             memory_id,
             score: activation,
+            admissions: vec![AdmissionObservation {
+                source: AdmissionSource::Graph,
+                query_index: 0,
+                source_rank: expanded.len() + 1,
+                seed_memory_id: None,
+                activation: Some(activation),
+            }],
         });
     }
-    Ok((expanded, activations))
+    Ok((expanded, activations, graph_allocation_ranks))
 }
 
 /// Traverse one hop from a single pack-pool seed and return the
-/// `(memory_id, activation)` pairs of its graph-reachable neighbor memories
+/// `(memory_id, space_name, entity_key, activation)` tuples for graph-reachable neighbor memories
 /// (filter-preserving). A keyless seed, or a seed whose entity is not yet a graph
 /// node, yields no neighbors. See [`graph_expand_pool`] for the activation model.
 fn graph_seed_neighbor_activations(
@@ -2761,7 +2916,8 @@ fn graph_seed_neighbor_activations(
     space: &str,
     seed: &PackPoolItem,
     expansion: PackExpansionOptions,
-) -> Result<Vec<(String, f64)>> {
+    within_entity_maxsim: Option<(&[Vec<f32>], &TokenMatrixRows)>,
+) -> Result<Vec<(String, String, String, f64)>> {
     // Anchor on the seed memory's entity_key; a keyless seed has no graph foothold
     // (it still occupies one of the top-K slots in the caller's bound).
     let entity_key: Option<String> = connection
@@ -2820,13 +2976,26 @@ fn graph_seed_neighbor_activations(
         let Some(neighbor_key) = key_for.get(neighbor_entity_id) else {
             continue;
         };
-        for memory_id in entity_memory_ids_with_filters(
-            connection,
-            filters,
-            neighbor_key,
-            expansion.max_graph_neighbors,
-        )? {
-            activations.push((memory_id, activation));
+        let memory_limit = if within_entity_maxsim.is_some() {
+            MAX_PACK_MEMORIES
+        } else {
+            expansion.max_graph_neighbors
+        };
+        let memory_ids =
+            entity_memory_ids_with_filters(connection, filters, neighbor_key, memory_limit)?;
+        let memory_ids = if let Some((query_tokens, docs)) = within_entity_maxsim {
+            let scores = score_graph_entity_memories(&memory_ids, query_tokens, docs)?;
+            select_graph_entity_memory(memory_ids, &scores)?
+        } else {
+            memory_ids
+        };
+        for memory_id in memory_ids {
+            activations.push((
+                memory_id,
+                space.to_string(),
+                (*neighbor_key).to_string(),
+                activation,
+            ));
         }
     }
     Ok(activations)
@@ -2871,10 +3040,10 @@ pub struct RerankPoolCandidate {
     pub memory_id: String,
     /// Full active-version content.
     pub content: String,
-    /// Late-interaction only: the memory summary as a SEPARATE alternate
-    /// rerank text. Scored independently and max-combined with the content
-    /// score; never concatenated (prefix-duplicate summaries corrupt
-    /// cross-encoder ordering — 2026-06-12 adversarial diagnosis).
+    /// Late-interaction only: the selected retrieval companion as a SEPARATE
+    /// alternate rerank text. This is the representation when present and the
+    /// persisted summary otherwise. It is scored independently and
+    /// max-combined with the content score; never concatenated.
     pub summary: Option<String>,
     /// Graph-expansion activation when this candidate was pulled through a
     /// relationship hop (`None` for ordinary ANN/BM25 candidates). Carried to
@@ -2884,6 +3053,8 @@ pub struct RerankPoolCandidate {
     /// graph hop. Carried to [`RerankCandidate::graph_pulled`] so the assembler can
     /// quarantine them to reserved slots. See that field for the full rationale.
     pub graph_pulled: bool,
+    /// Every retrieval or expansion route that observed this candidate.
+    pub admissions: Vec<AdmissionObservation>,
 }
 
 /// Hybrid pre-rerank retrieval pool: ANN-primary with a BM25 safety net,
@@ -2895,6 +3066,30 @@ pub struct RerankPool {
     pub cos_top: f64,
     /// Deduplicated candidates in interleaved retrieval order.
     pub candidates: Vec<RerankPoolCandidate>,
+    /// Every candidate observed by ANN/BM25 before the final hybrid cutoff,
+    /// plus admitted structural-expansion candidates.
+    pub observed: Vec<RerankPoolObservedCandidate>,
+    /// Requested final hybrid width before structural additions.
+    pub pool_width: usize,
+}
+
+/// ID-only diagnostic record for one candidate observed during pool assembly.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RerankPoolObservedCandidate {
+    /// Candidate memory id.
+    pub memory_id: String,
+    /// One-based position in the unbounded ANN/BM25 interleave.
+    pub merged_rank: usize,
+    /// Whether this candidate reached the exact reranker input pool.
+    pub admitted: bool,
+    /// Stage that excluded the candidate, or `None` when admitted.
+    pub dropped_at: Option<String>,
+    /// One-based position in the exact diversified graph-allocation order.
+    /// `None` means the memory already belonged to the pre-expansion pool and
+    /// therefore did not consume a graph allocation slot.
+    pub graph_allocation_rank: Option<usize>,
+    /// Every route that observed the candidate.
+    pub admissions: Vec<AdmissionObservation>,
 }
 
 /// Build the hybrid pre-rerank candidate pool for a pack request: a scored ANN
@@ -2936,10 +3131,47 @@ pub fn build_hybrid_rerank_pool_with_expansion(
     expansion: PackExpansionOptions,
 ) -> Result<RerankPool> {
     validate_pack_request(request)?;
+    validate_graph_within_entity_maxsim(request, expansion)?;
     let connection = open_initialized_read_fast(path.as_ref())?;
     with_read_snapshot(&connection, |connection| {
         build_hybrid_rerank_pool_with_expansion_on_connection(
-            connection, request, pool_width, expansion,
+            connection, request, pool_width, expansion, false,
+        )
+    })
+}
+
+/// Build the hybrid pre-rerank pool with full admission observations for a
+/// diagnostic trace. Unlike the production builder, this includes candidates
+/// excluded by the graph-neighbor cap in `RerankPool::observed`.
+///
+/// Admitted candidate membership and ordering are identical to
+/// [`build_hybrid_rerank_pool_with_expansion`].
+///
+/// # Errors
+///
+/// Returns an error when the store is missing/incompatible, the request is
+/// invalid, or retrieval fails.
+pub fn build_hybrid_rerank_pool_trace_with_expansion(
+    path: impl AsRef<Path>,
+    request: &PackRequest,
+    pool_width: usize,
+    expansion: PackExpansionOptions,
+) -> Result<RerankPool> {
+    validate_pack_request(request)?;
+    validate_graph_within_entity_maxsim(request, expansion)?;
+    if expansion.max_graph_seeds > MAX_PACK_MEMORIES
+        || expansion.max_graph_neighbors > MAX_PACK_MEMORIES
+    {
+        return Err(Error::InvalidRequest {
+            message: format!(
+                "pool-trace max_graph_seeds and max_graph_neighbors must not exceed {MAX_PACK_MEMORIES}"
+            ),
+        });
+    }
+    let connection = open_initialized_read_fast(path.as_ref())?;
+    with_read_snapshot(&connection, |connection| {
+        build_hybrid_rerank_pool_with_expansion_on_connection(
+            connection, request, pool_width, expansion, true,
         )
     })
 }
@@ -2954,6 +3186,7 @@ fn build_hybrid_rerank_pool_on_connection(
         request,
         pool_width,
         PackExpansionOptions::default(),
+        false,
     )
 }
 
@@ -2962,6 +3195,7 @@ fn build_hybrid_rerank_pool_with_expansion_on_connection(
     request: &PackRequest,
     pool_width: usize,
     expansion: PackExpansionOptions,
+    include_graph_cap_observations: bool,
 ) -> Result<RerankPool> {
     let mut pool_request = request.clone();
     pool_request.max_memories = pool_width;
@@ -2988,27 +3222,32 @@ fn build_hybrid_rerank_pool_with_expansion_on_connection(
         .iter()
         .map(|item| item.score)
         .fold(f64::MIN, f64::max);
-    // Late-interaction: MaxSim over the whole store replaces the ANN leg for
-    // candidate SELECTION only; the BM25 safety net stays merged in.
+    // Late-interaction: MaxSim over the filtered recall scope replaces the ANN
+    // leg for candidate SELECTION only; the BM25 safety net stays merged in.
     let primary_pool = match (
         pool_request.query_token_embeddings.as_ref(),
         pool_request.token_model_id.as_deref(),
     ) {
         (Some(token_queries), Some(token_model)) if !token_queries.is_empty() => {
+            let filters = prepare_recall_filters(&pool_request.filters)?;
+            let eligible_ids = memory_ids_matching_filters(connection, &filters)?;
             let mut per_query = Vec::with_capacity(token_queries.len());
-            for tokens in token_queries {
+            for (query_index, tokens) in token_queries.iter().enumerate() {
                 per_query.push(maxsim_candidates(
                     connection,
                     tokens,
                     token_model,
+                    &eligible_ids,
                     pool_width,
+                    query_index,
                 )?);
             }
             interleave_pools(&per_query, pool_width)
         }
         _ => ann_pool,
     };
-    let merged = merge_rerank_pools(&primary_pool, &bm25_pool, pool_width);
+    let (merged, mut observed) =
+        merge_rerank_pools_with_trace(&primary_pool, &bm25_pool, pool_width);
 
     // v0.3 associative recall: graph-expand the MERGED rerank candidate pool here,
     // strictly AFTER `cos_top` is computed from the raw ANN pool above, so a
@@ -3020,19 +3259,33 @@ fn build_hybrid_rerank_pool_with_expansion_on_connection(
     // merely also happens to be graph-reachable (competes normally, no churn).
     let pre_expansion_ids: BTreeSet<String> =
         merged.iter().map(|item| item.memory_id.clone()).collect();
-    let (merged, graph_activations) = if expansion.graph_expansion {
-        graph_expand_pool(connection, &pool_request, &merged, expansion)?
+    let (mut merged, graph_activations, graph_allocation_ranks) = if expansion.graph_expansion {
+        graph_expand_pool(
+            connection,
+            &pool_request,
+            &merged,
+            expansion,
+            include_graph_cap_observations,
+        )?
     } else {
-        (merged, BTreeMap::new())
+        (merged, BTreeMap::new(), BTreeMap::new())
     };
+    apply_graph_admission_observations(
+        &mut merged,
+        &graph_activations,
+        &graph_allocation_ranks,
+        &mut observed,
+    );
 
-    // Late-interaction mode carries the summary as a separate alternate rerank
-    // text (scored independently, max-combined by the caller). The legacy path
-    // stays content-only so flag-off behavior is byte-identical.
+    // Late-interaction mode carries the selected retrieval companion as a
+    // separate alternate rerank text (scored independently, max-combined by
+    // the caller). The legacy path stays content-only so flag-off behavior is
+    // byte-identical.
     let late_interaction = pool_request.query_token_embeddings.is_some();
     let mut statement = connection.prepare_cached(
-        "SELECT COALESCE(v.summary, ''), v.content FROM memories m \
+        "SELECT COALESCE(r.text, v.summary, ''), v.content FROM memories m \
          JOIN memory_versions v ON v.id = m.active_version_id \
+         LEFT JOIN memory_representations r ON r.version_id = v.id \
          WHERE m.id = ?1",
     )?;
     let mut candidates = Vec::with_capacity(merged.len());
@@ -3056,13 +3309,105 @@ fn build_hybrid_rerank_pool_with_expansion_on_connection(
                 summary,
                 activation,
                 graph_pulled,
+                admissions: item.admissions,
             });
         }
     }
     Ok(RerankPool {
         cos_top,
         candidates,
+        observed,
+        pool_width,
     })
+}
+
+fn apply_graph_admission_observations(
+    merged: &mut [PackPoolItem],
+    graph_activations: &BTreeMap<String, f64>,
+    graph_allocation_ranks: &BTreeMap<String, usize>,
+    observed: &mut Vec<RerankPoolObservedCandidate>,
+) {
+    let mut activation_order: Vec<(&String, &f64)> = graph_activations.iter().collect();
+    activation_order.sort_by(|left, right| {
+        right
+            .1
+            .partial_cmp(left.1)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| left.0.cmp(right.0))
+    });
+    let graph_ranks: BTreeMap<&str, usize> = activation_order
+        .iter()
+        .enumerate()
+        .map(|(index, (memory_id, _))| (memory_id.as_str(), index + 1))
+        .collect();
+    let graph_observation = |memory_id: &str, activation: f64| AdmissionObservation {
+        source: AdmissionSource::Graph,
+        query_index: 0,
+        source_rank: graph_ranks.get(memory_id).copied().unwrap_or(1),
+        seed_memory_id: None,
+        activation: Some(activation),
+    };
+    for item in merged.iter_mut() {
+        if let Some(activation) = graph_activations.get(&item.memory_id) {
+            let observation = graph_observation(&item.memory_id, *activation);
+            item.admissions
+                .retain(|source| source.source != AdmissionSource::Graph);
+            item.admissions.push(observation);
+        }
+    }
+    let admitted_ids: BTreeSet<&str> = merged.iter().map(|item| item.memory_id.as_str()).collect();
+    for record in observed.iter_mut() {
+        record.admitted = admitted_ids.contains(record.memory_id.as_str());
+        record.dropped_at = (!record.admitted).then(|| "hybrid_cap".to_string());
+        record.graph_allocation_rank = graph_allocation_ranks.get(&record.memory_id).copied();
+        if let Some(item) = merged
+            .iter()
+            .find(|item| item.memory_id == record.memory_id)
+        {
+            record.admissions = item.admissions.clone();
+        } else if let Some(activation) = graph_activations.get(&record.memory_id) {
+            let observation = graph_observation(&record.memory_id, *activation);
+            record
+                .admissions
+                .retain(|source| source.source != AdmissionSource::Graph);
+            record.admissions.push(observation);
+        }
+    }
+    for item in merged.iter() {
+        if !observed
+            .iter()
+            .any(|record| record.memory_id == item.memory_id)
+        {
+            observed.push(RerankPoolObservedCandidate {
+                memory_id: item.memory_id.clone(),
+                merged_rank: observed.len() + 1,
+                admitted: true,
+                dropped_at: None,
+                graph_allocation_rank: graph_allocation_ranks.get(&item.memory_id).copied(),
+                admissions: item.admissions.clone(),
+            });
+        }
+    }
+    let mut graph_allocation_order: Vec<(&String, &usize)> =
+        graph_allocation_ranks.iter().collect();
+    graph_allocation_order.sort_by_key(|(_, rank)| **rank);
+    for (memory_id, allocation_rank) in graph_allocation_order {
+        if observed.iter().any(|record| record.memory_id == *memory_id) {
+            continue;
+        }
+        let activation = graph_activations
+            .get(memory_id)
+            .copied()
+            .unwrap_or_default();
+        observed.push(RerankPoolObservedCandidate {
+            memory_id: memory_id.clone(),
+            merged_rank: observed.len() + 1,
+            admitted: false,
+            dropped_at: Some("graph_cap".to_string()),
+            graph_allocation_rank: Some(*allocation_rank),
+            admissions: vec![graph_observation(memory_id, activation)],
+        });
+    }
 }
 
 /// `MaxSim`: sum over query tokens of the max dot-product against doc tokens.
@@ -3085,8 +3430,9 @@ fn maxsim_score(query: &[Vec<f32>], doc: &[Vec<f32>]) -> f64 {
         .sum()
 }
 
-/// Exhaustive late-interaction candidate generation: MaxSim-score ALL active
-/// memories' token embeddings against the query tokens, return the top `limit`.
+/// Exhaustive late-interaction candidate generation: MaxSim-score every
+/// eligible active memory's token embeddings against the query tokens, then
+/// return the top `limit`.
 ///
 /// # Errors
 ///
@@ -3095,15 +3441,24 @@ fn maxsim_candidates(
     connection: &Connection,
     query_tokens: &[Vec<f32>],
     model_id: &str,
+    eligible_ids: &BTreeSet<String>,
     limit: usize,
+    query_index: usize,
 ) -> Result<Vec<PackPoolItem>> {
     let docs = load_token_embeddings_cached(connection, model_id)?;
     let mut scored: Vec<PackPoolItem> = docs
         .iter()
-        .filter(|(_, matrix)| !matrix.is_empty())
+        .filter(|(memory_id, matrix)| eligible_ids.contains(memory_id) && !matrix.is_empty())
         .map(|(memory_id, matrix)| PackPoolItem {
             memory_id: memory_id.clone(),
             score: maxsim_score(query_tokens, matrix),
+            admissions: vec![AdmissionObservation {
+                source: AdmissionSource::Maxsim,
+                query_index,
+                source_rank: 0,
+                seed_memory_id: None,
+                activation: None,
+            }],
         })
         .collect();
     scored.sort_by(|a, b| {
@@ -3112,23 +3467,27 @@ fn maxsim_candidates(
             .unwrap_or(std::cmp::Ordering::Equal)
     });
     scored.truncate(limit);
+    for (index, candidate) in scored.iter_mut().enumerate() {
+        candidate.admissions[0].source_rank = index + 1;
+    }
     Ok(scored)
 }
 
 /// Interleave per-query candidate pools rank-by-rank, deduplicating by memory
 /// id (multi-query analog of the dedupe in pack-pool construction).
 fn interleave_pools(pools: &[Vec<PackPoolItem>], cap: usize) -> Vec<PackPoolItem> {
-    let mut seen = BTreeSet::new();
     let mut merged = Vec::new();
     let max_len = pools.iter().map(Vec::len).max().unwrap_or(0);
     for index in 0..max_len {
         for pool in pools {
             if let Some(item) = pool.get(index) {
-                if seen.insert(item.memory_id.clone()) {
+                if let Some(existing) = merged
+                    .iter_mut()
+                    .find(|existing: &&mut PackPoolItem| existing.memory_id == item.memory_id)
+                {
+                    existing.merge_admissions_from(item);
+                } else if merged.len() < cap {
                     merged.push(item.clone());
-                    if merged.len() >= cap {
-                        return merged;
-                    }
                 }
             }
         }
@@ -3183,7 +3542,6 @@ fn merge_rerank_pools(
     bm25_pool: &[PackPoolItem],
     max_candidates: usize,
 ) -> Vec<PackPoolItem> {
-    let mut seen = BTreeSet::new();
     let mut merged = Vec::new();
     let max_len = ann_pool.len().max(bm25_pool.len());
     for index in 0..max_len {
@@ -3191,15 +3549,49 @@ fn merge_rerank_pools(
             let Some(item) = pool.get(index) else {
                 continue;
             };
-            if seen.insert(item.memory_id.clone()) {
+            if let Some(existing) = merged
+                .iter_mut()
+                .find(|existing: &&mut PackPoolItem| existing.memory_id == item.memory_id)
+            {
+                existing.merge_admissions_from(item);
+            } else if merged.len() < max_candidates {
                 merged.push(item.clone());
-                if merged.len() >= max_candidates {
-                    return merged;
-                }
             }
+        }
+        if merged.len() >= max_candidates {
+            break;
         }
     }
     merged
+}
+
+fn merge_rerank_pools_with_trace(
+    ann_pool: &[PackPoolItem],
+    bm25_pool: &[PackPoolItem],
+    max_candidates: usize,
+) -> (Vec<PackPoolItem>, Vec<RerankPoolObservedCandidate>) {
+    let all = merge_rerank_pools(
+        ann_pool,
+        bm25_pool,
+        ann_pool.len().saturating_add(bm25_pool.len()),
+    );
+    let admitted = all.iter().take(max_candidates).cloned().collect::<Vec<_>>();
+    let observed = all
+        .into_iter()
+        .enumerate()
+        .map(|(index, item)| {
+            let admitted = index < max_candidates;
+            RerankPoolObservedCandidate {
+                memory_id: item.memory_id,
+                merged_rank: index + 1,
+                admitted,
+                dropped_at: (!admitted).then(|| "hybrid_cap".to_string()),
+                graph_allocation_rank: None,
+                admissions: item.admissions,
+            }
+        })
+        .collect();
+    (admitted, observed)
 }
 
 /// Write a deterministic logical JSONL export of canonical store tables.
@@ -3960,6 +4352,7 @@ fn import_archive_into_connection(
     clear_import_tables(&transaction)?;
     let (parse, fts_memory_rows, fts_source_episode_rows) = {
         let parse = parse_import_file(&transaction, request)?;
+        normalize_imported_schema_metadata(&transaction, parse.schema_version)?;
         validate_import_integrity(&transaction)?;
         let (fts_memory_rows, fts_source_episode_rows) = rebuild_fts(&transaction)?;
         #[cfg(feature = "semantic")]
@@ -4016,7 +4409,48 @@ fn validate_import_integrity(transaction: &Transaction<'_>) -> Result<()> {
     validate_import_source_refs(transaction)?;
     validate_import_source_episodes(transaction)?;
     validate_import_memory_invariants(transaction)?;
+    validate_import_representations(transaction)?;
     validate_import_space_isolation(transaction)?;
+    Ok(())
+}
+
+fn validate_import_representations(transaction: &Transaction<'_>) -> Result<()> {
+    let mut statement = transaction.prepare(
+        "SELECT r.version_id, r.kind, r.text, r.text_sha256, v.id
+         FROM memory_representations r
+         LEFT JOIN memory_versions v ON v.id = r.version_id
+         ORDER BY r.version_id",
+    )?;
+    let rows = statement.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, String>(3)?,
+            row.get::<_, Option<String>>(4)?,
+        ))
+    })?;
+    for row in rows {
+        let (version_id, kind, text, text_sha256, version_exists) = row?;
+        if version_exists.is_none() {
+            return Err(Error::InvalidRequest {
+                message: format!(
+                    "import archive has representation for missing version {version_id}"
+                ),
+            });
+        }
+        validate_retrieval_representation(&RetrievalRepresentationInput {
+            kind,
+            text: text.clone(),
+        })?;
+        if sha256_hex(text.as_bytes()) != text_sha256 {
+            return Err(Error::InvalidRequest {
+                message: format!(
+                    "import archive has representation hash mismatch for version {version_id}"
+                ),
+            });
+        }
+    }
     Ok(())
 }
 
@@ -4520,26 +4954,6 @@ fn maybe_write_chunk_embedding(
     Ok(())
 }
 
-/// Vector index table name for source-episode chunk embeddings at `dims`.
-#[cfg(feature = "semantic")]
-fn source_episode_vec_table(dims: usize) -> String {
-    format!("source_episode_vec_{dims}")
-}
-
-#[cfg(feature = "semantic")]
-fn ensure_source_episode_vec_table(
-    connection: &Connection,
-    table: &str,
-    dims: usize,
-) -> Result<()> {
-    if !table_exists(connection, table)? {
-        connection.execute_batch(&format!(
-            "CREATE VIRTUAL TABLE IF NOT EXISTS {table} USING vec0(\n  source_episode_id TEXT NOT NULL,\n  embedding FLOAT[{dims}]\n);"
-        ))?;
-    }
-    Ok(())
-}
-
 /// Write one chunk embedding: the canonical `embeddings` sidecar row (keyed by
 /// `source_episode_id`, `memory_id`/`version_id` NULL) plus the rebuildable ANN
 /// projection in `source_episode_vec_{dims}`. Enforces the store's single active
@@ -4554,8 +4968,7 @@ fn write_source_episode_embedding(
     now: &str,
 ) -> Result<()> {
     enforce_active_embedding_model(transaction, model, dims, now)?;
-    let table = source_episode_vec_table(dims);
-    ensure_source_episode_vec_table(transaction, &table, dims)?;
+    let table = ensure_source_episode_vector_table(transaction, dims)?;
     transaction.execute(
         "INSERT INTO embeddings (id, source_episode_id, embedding_model, dimensions, vector_blob, status, created_at, updated_at)
          VALUES (?1, ?2, ?3, ?4, ?5, 'ready', ?6, ?6)",
@@ -4739,7 +5152,7 @@ fn document_semantic_candidates(
     snippet_chars: usize,
 ) -> Result<Vec<DocumentChunkHit>> {
     let dims = embedding.len();
-    let table = source_episode_vec_table(dims);
+    let table = source_episode_vector_table(dims);
     if !table_exists(connection, &table)? {
         return Ok(Vec::new());
     }
@@ -4873,26 +5286,6 @@ fn document_rrf_merge(
         .collect()
 }
 
-/// `source_episode_recall_events` is engine-owned telemetry: which document
-/// chunks earned retrieval traffic. Created lazily (not part of schema
-/// validation) and excluded from export/import, like `recall_events`. This is
-/// the signal that later drives usage-based promotion of chunks into memories.
-const SOURCE_EPISODE_RECALL_DDL: &str = "
-CREATE TABLE IF NOT EXISTS source_episode_recall_events (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  source_episode_id TEXT NOT NULL,
-  space_name TEXT NOT NULL,
-  ts TEXT NOT NULL,
-  query TEXT,
-  query_sha256 TEXT,
-  rank INTEGER,
-  score REAL,
-  match_type TEXT
-);
-CREATE INDEX IF NOT EXISTS idx_se_recall_src ON source_episode_recall_events(source_episode_id);
-CREATE INDEX IF NOT EXISTS idx_se_recall_ts ON source_episode_recall_events(ts);
-";
-
 /// Record one retrieval event per returned chunk. `query_sha256` lets the
 /// promotion step count distinct queries (query diversity) without storing the
 /// raw query repeatedly. Opens its own short write transaction.
@@ -4903,7 +5296,7 @@ fn record_document_retrievals(
 ) -> Result<usize> {
     let mut connection = open_initialized_write(path)?;
     let transaction = connection.transaction()?;
-    transaction.execute_batch(SOURCE_EPISODE_RECALL_DDL)?;
+    ensure_source_episode_recall_events(&transaction)?;
     let now = now_timestamp(&transaction)?;
     let query_opt = (!query.is_empty()).then_some(query);
     let query_sha = query_opt.map(sha256_text);
@@ -5960,6 +6353,7 @@ struct FtsMemoryProjection {
     status: String,
     kind: String,
     content: String,
+    retrieval_text: Option<String>,
     summary: Option<String>,
     tags: String,
     source_text: Option<String>,
@@ -5977,12 +6371,13 @@ fn fts_memory_projection_from_row(row: &Row<'_>) -> rusqlite::Result<FtsMemoryPr
         status: row.get(4)?,
         kind: row.get(5)?,
         content: row.get(6)?,
-        summary: row.get(7)?,
-        tags: row.get(8)?,
-        source_text: row.get(9)?,
-        project_key: row.get(10)?,
-        entity_key: row.get(11)?,
-        claim_key: row.get(12)?,
+        retrieval_text: row.get(7)?,
+        summary: row.get(8)?,
+        tags: row.get(9)?,
+        source_text: row.get(10)?,
+        project_key: row.get(11)?,
+        entity_key: row.get(12)?,
+        claim_key: row.get(13)?,
     })
 }
 
@@ -6001,6 +6396,7 @@ fn rebuild_fts(transaction: &Transaction<'_>) -> Result<(i64, i64)> {
                 m.status,
                 m.kind,
                 v.content,
+                COALESCE(r.text, v.summary),
                 v.summary,
                 COALESCE((
                     SELECT group_concat(tag, ' ')
@@ -6011,7 +6407,8 @@ fn rebuild_fts(transaction: &Transaction<'_>) -> Result<(i64, i64)> {
                 m.entity_key,
                 m.claim_key
              FROM memories m
-             JOIN memory_versions v ON v.id = m.active_version_id",
+             JOIN memory_versions v ON v.id = m.active_version_id
+             LEFT JOIN memory_representations r ON r.version_id = v.id",
         )?;
         let rows = statement.query_map([], fts_memory_projection_from_row)?;
         collect_rows(rows)?
@@ -6028,7 +6425,7 @@ fn rebuild_fts(transaction: &Transaction<'_>) -> Result<(i64, i64)> {
         );
         transaction.execute(
             "INSERT INTO memory_fts (
-                memory_id, version_id, space_name, silo_name, status, kind, content, summary,
+                memory_id, version_id, space_name, silo_name, status, kind, content, retrieval_text,
                 tags, source_text, metadata_text
              ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
             params![
@@ -6039,7 +6436,7 @@ fn rebuild_fts(transaction: &Transaction<'_>) -> Result<(i64, i64)> {
                 &row.status,
                 &row.kind,
                 &row.content,
-                row.summary.as_deref(),
+                row.retrieval_text.as_deref(),
                 &row.tags,
                 row.source_text.as_deref(),
                 &metadata_text,
@@ -6047,7 +6444,7 @@ fn rebuild_fts(transaction: &Transaction<'_>) -> Result<(i64, i64)> {
         )?;
         transaction.execute(
             "INSERT INTO memory_fts_public (
-                memory_id, version_id, space_name, silo_name, status, kind, content, summary,
+                memory_id, version_id, space_name, silo_name, status, kind, content, retrieval_text,
                 tags, metadata_text
              ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             params![
@@ -6058,7 +6455,7 @@ fn rebuild_fts(transaction: &Transaction<'_>) -> Result<(i64, i64)> {
                 &row.status,
                 &row.kind,
                 &row.content,
-                row.summary.as_deref(),
+                row.retrieval_text.as_deref(),
                 &row.tags,
                 &metadata_text,
             ],
@@ -6304,6 +6701,7 @@ fn dream_store_tx(transaction: &Transaction<'_>, request: &DreamRequest) -> Resu
             orphan_entities: 0,
             dangling_relationships: 0,
             inactive_evidence_relationships: 0,
+            missing_entity_projections: Vec::new(),
             relationship_proposals: Vec::new(),
             truncated: false,
             orphan_entity_ids: Vec::new(),
@@ -6378,8 +6776,7 @@ fn dream_promote_memories(
 ) -> Result<DreamPromoteReport> {
     // recall_events is created lazily; ensure it exists so the aggregate is valid
     // even on stores that have never logged a recall.
-    transaction.execute_batch(RECALL_EVENTS_DDL)?;
-    ensure_recall_events_optional_columns(transaction)?;
+    ensure_recall_events(transaction)?;
 
     // Conditions and bound values are kept in lock-step: every `?` placeholder
     // appended to `conditions` has its value pushed to `values` in the same order.
@@ -6802,6 +7199,27 @@ fn dream_graph_diagnostics(
     transaction: &Transaction<'_>,
     request: &PreparedDreamRequest,
 ) -> Result<DreamGraphReport> {
+    let mut missing_entity_projections =
+        dream_graph_missing_entity_projections(transaction, request)?;
+    let missing_entity_projections_truncated =
+        missing_entity_projections.len() > request.max_memories;
+    missing_entity_projections.truncate(request.max_memories);
+
+    // Stage exactly the bounded repair set before deriving relationship
+    // proposals. The outer dream transaction rolls back every dry-run, so this
+    // yields apply-parity without persisting dry-run mutations or admitting
+    // relationships whose missing endpoints fall outside the bound.
+    let now = now_timestamp(transaction)?;
+    for projection in &missing_entity_projections {
+        upsert_memory_entity_projection(
+            transaction,
+            &projection.space,
+            &projection.entity_key,
+            None,
+            &now,
+        )?;
+    }
+
     let mut orphan_entity_ids = dream_graph_orphan_entity_ids(transaction, request)?;
     let mut dangling_relationship_ids =
         dream_graph_dangling_relationship_ids(transaction, request)?;
@@ -6812,7 +7230,8 @@ fn dream_graph_diagnostics(
     // The queries fetch max_memories + 1 rows to detect truncation. Truncate
     // before acting so the tombstoned rows and the reported ids are the same
     // set (the sentinel row must not be mutated without being reported).
-    let truncated = orphan_entity_ids.len() > request.max_memories
+    let truncated = missing_entity_projections_truncated
+        || orphan_entity_ids.len() > request.max_memories
         || dangling_relationship_ids.len() > request.max_memories
         || inactive_evidence_relationship_ids.len() > request.max_memories
         || relationship_proposals.len() > request.max_memories;
@@ -6852,12 +7271,49 @@ fn dream_graph_diagnostics(
         orphan_entities: orphan_entity_ids.len(),
         dangling_relationships: dangling_relationship_ids.len(),
         inactive_evidence_relationships: inactive_evidence_relationship_ids.len(),
+        missing_entity_projections,
         relationship_proposals,
         truncated,
         orphan_entity_ids,
         dangling_relationship_ids,
         inactive_evidence_relationship_ids,
     })
+}
+
+fn dream_graph_missing_entity_projections(
+    transaction: &Transaction<'_>,
+    request: &PreparedDreamRequest,
+) -> Result<Vec<DreamEntityProjection>> {
+    let mut conditions = vec![
+        "m.status = 'active'".to_string(),
+        "m.entity_key IS NOT NULL".to_string(),
+        "TRIM(m.entity_key) <> ''".to_string(),
+        "NOT EXISTS ( \
+           SELECT 1 FROM entities e \
+            WHERE e.space_name = m.space_name \
+              AND e.entity_key = m.entity_key \
+         )"
+        .to_string(),
+    ];
+    let mut values = Vec::new();
+    append_dream_memory_filters(&mut conditions, &mut values, request, "m");
+    let sql = format!(
+        "SELECT DISTINCT m.space_name, m.entity_key
+           FROM memories m
+          WHERE {}
+          ORDER BY m.space_name ASC, m.entity_key ASC
+          LIMIT {}",
+        conditions.join(" AND "),
+        request.max_memories.saturating_add(1)
+    );
+    let mut statement = transaction.prepare(&sql)?;
+    let rows = statement.query_map(params_from_iter(values.iter()), |row| {
+        Ok(DreamEntityProjection {
+            space: row.get(0)?,
+            entity_key: row.get(1)?,
+        })
+    })?;
+    collect_rows(rows)
 }
 
 /// Differentiated edge confidence from evidence multiplicity: a saturating map
@@ -7197,7 +7653,7 @@ fn dream_budget_json(request: &PreparedDreamRequest) -> String {
 
 fn dream_summary_json(report: &DreamReport) -> String {
     format!(
-        "{{\"status\":{},\"promoted\":{},\"expired\":{},\"skipped_pinned\":{},\"reindex_memory_rows\":{},\"reindex_source_episode_rows\":{},\"duplicate_proposals\":{},\"graph_orphan_entities\":{},\"graph_dangling_relationships\":{},\"graph_inactive_evidence_relationships\":{},\"graph_relationship_proposals\":{},\"tag_links_written\":{},\"dry_run\":{}}}",
+        "{{\"status\":{},\"promoted\":{},\"expired\":{},\"skipped_pinned\":{},\"reindex_memory_rows\":{},\"reindex_source_episode_rows\":{},\"duplicate_proposals\":{},\"graph_orphan_entities\":{},\"graph_dangling_relationships\":{},\"graph_inactive_evidence_relationships\":{},\"graph_missing_entity_projections\":{},\"graph_relationship_proposals\":{},\"tag_links_written\":{},\"dry_run\":{}}}",
         json_string_for_store(&report.status),
         report.promote.promoted,
         report.expire.expired,
@@ -7208,6 +7664,7 @@ fn dream_summary_json(report: &DreamReport) -> String {
         report.graph.orphan_entities,
         report.graph.dangling_relationships,
         report.graph.inactive_evidence_relationships,
+        report.graph.missing_entity_projections.len(),
         report.graph.relationship_proposals.len(),
         report.link.links_written,
         report.dry_run
@@ -7345,6 +7802,7 @@ struct ImportState {
     footer_seen: bool,
     current_table_index: usize,
     schema_version: i32,
+    tables: Vec<&'static ExportTableSpec>,
     row_count: u64,
     table_counts: Vec<u64>,
 }
@@ -7355,9 +7813,10 @@ impl ImportState {
             header_seen: false,
             footer_seen: false,
             current_table_index: 0,
-            schema_version: SCHEMA_VERSION,
+            schema_version: 0,
+            tables: Vec::new(),
             row_count: 0,
-            table_counts: vec![0; EXPORT_TABLES.len()],
+            table_counts: Vec::new(),
         }
     }
 
@@ -7396,15 +7855,13 @@ impl ImportState {
             );
         }
         let schema_version = import_i64_field(object, "schema_version", line_number)?;
-        if schema_version != i64::from(SCHEMA_VERSION) {
-            return Err(Error::SchemaMismatch {
-                expected: SCHEMA_VERSION,
-                actual: i32::try_from(schema_version).unwrap_or_default(),
-            });
-        }
-        validate_import_table_list(object, line_number)?;
+        let schema_version = i32::try_from(schema_version).unwrap_or_default();
+        let tables = import_tables_for_schema(schema_version)?;
+        validate_import_table_list(object, &tables, line_number)?;
         validate_rebuildable_omitted(object, line_number)?;
-        self.schema_version = SCHEMA_VERSION;
+        self.schema_version = schema_version;
+        self.table_counts = vec![0; tables.len()];
+        self.tables = tables;
         self.header_seen = true;
         Ok(())
     }
@@ -7418,15 +7875,21 @@ impl ImportState {
         self.require_open_rows(line_number)?;
         import_reject_unknown_fields(object, &["type", "table", "data"], line_number)?;
         let table_name = import_string_field(object, "table", line_number)?;
-        let table_index = export_table_index(table_name).ok_or_else(|| Error::InvalidRequest {
-            message: format!("import JSONL line {line_number}: unknown export table {table_name}"),
-        })?;
+        let table_index = self
+            .tables
+            .iter()
+            .position(|table| table.name == table_name)
+            .ok_or_else(|| Error::InvalidRequest {
+                message: format!(
+                    "import JSONL line {line_number}: unknown export table {table_name}"
+                ),
+            })?;
         if table_index < self.current_table_index {
             return import_invalid(line_number, "import rows are not in export table order");
         }
         self.current_table_index = table_index;
         let data = import_object_field(object, "data", line_number)?;
-        insert_import_row(transaction, &EXPORT_TABLES[table_index], data, line_number)?;
+        insert_import_row(transaction, self.tables[table_index], data, line_number)?;
         self.table_counts[table_index] = self.table_counts[table_index].saturating_add(1);
         self.row_count = self.row_count.saturating_add(1);
         Ok(())
@@ -7464,10 +7927,10 @@ impl ImportState {
         object: &BTreeMap<String, ImportJsonValue>,
         line_number: usize,
     ) -> Result<()> {
-        if object.len() != EXPORT_TABLES.len() {
+        if object.len() != self.tables.len() {
             return import_invalid(line_number, "import footer table_counts mismatch");
         }
-        for (index, table) in EXPORT_TABLES.iter().enumerate() {
+        for (index, table) in self.tables.iter().enumerate() {
             let count = import_i64_field(object, table.name, line_number)?;
             if count < 0 || u64::try_from(count).ok() != Some(self.table_counts[index]) {
                 return import_invalid(line_number, "import footer table count mismatch");
@@ -7477,7 +7940,7 @@ impl ImportState {
     }
 
     fn table_reports(&self) -> Vec<ExportTableReport> {
-        EXPORT_TABLES
+        self.tables
             .iter()
             .zip(&self.table_counts)
             .map(|(table, rows)| ExportTableReport {
@@ -7490,18 +7953,33 @@ impl ImportState {
 
 fn validate_import_table_list(
     object: &BTreeMap<String, ImportJsonValue>,
+    expected_tables: &[&ExportTableSpec],
     line_number: usize,
 ) -> Result<()> {
     let tables = import_array_field(object, "tables", line_number)?;
-    if tables.len() != EXPORT_TABLES.len() {
+    if tables.len() != expected_tables.len() {
         return import_invalid(line_number, "import header table list mismatch");
     }
-    for (value, table) in tables.iter().zip(EXPORT_TABLES) {
+    for (value, table) in tables.iter().zip(expected_tables) {
         if import_json_string(value) != Some(table.name) {
             return import_invalid(line_number, "import header table list mismatch");
         }
     }
     Ok(())
+}
+
+fn import_tables_for_schema(schema_version: i32) -> Result<Vec<&'static ExportTableSpec>> {
+    match schema_version {
+        SCHEMA_VERSION => Ok(EXPORT_TABLES.iter().collect()),
+        5 => Ok(EXPORT_TABLES
+            .iter()
+            .filter(|table| table.name != "memory_representations")
+            .collect()),
+        actual => Err(Error::SchemaMismatch {
+            expected: SCHEMA_VERSION,
+            actual,
+        }),
+    }
 }
 
 fn validate_rebuildable_omitted(
@@ -7662,10 +8140,6 @@ fn hex_nibble(byte: u8, line_number: usize) -> Result<u8> {
         b'A'..=b'F' => Ok(byte - b'A' + 10),
         _ => import_invalid(line_number, "import BLOB hex contains non-hex character"),
     }
-}
-
-fn export_table_index(name: &str) -> Option<usize> {
-    EXPORT_TABLES.iter().position(|table| table.name == name)
 }
 
 fn validate_import_request(request: &ImportRequest) -> Result<()> {
@@ -9535,18 +10009,7 @@ fn prepare_search_request(request: &SearchRequest) -> Result<PreparedSearchReque
         });
     }
 
-    let mut filters = request.filters.clone();
-    filters.spaces = resolve_space_filter(&filters.spaces);
-    if filters.statuses.is_empty() {
-        filters.statuses.push(status::ACTIVE.to_string());
-    }
-    // Recall must not surface logically stale facts. Past-`valid_to` and
-    // reached-`expires_at` memories are excluded from search even before the
-    // dream expire task deletes them. (An API escape hatch can later set this
-    // false; the search path forces it on for now.)
-    filters.hide_expired = true;
-    filters = normalize_search_filters(filters)?;
-    validate_search_filters(&filters)?;
+    let filters = prepare_recall_filters(&request.filters)?;
 
     let fts_terms = search_variant_terms(&terms);
     let fts_query = search_fts_query(&fts_terms, request.include_source, " AND ");
@@ -9606,7 +10069,7 @@ fn search_fts_query(terms: &[String], include_source: bool, joiner: &str) -> Str
     } else {
         terms
             .iter()
-            .map(|term| format!("{{content summary tags metadata_text}} : {term}"))
+            .map(|term| format!("{{content retrieval_text tags metadata_text}} : {term}"))
             .collect::<Vec<_>>()
             .join(joiner)
     }
@@ -9794,6 +10257,21 @@ fn normalize_search_filters(mut filters: SearchFilters) -> Result<SearchFilters>
     filters.entity_keys = normalize_filter_values(&filters.entity_keys)?;
     filters.claim_keys = normalize_filter_values(&filters.claim_keys)?;
     filters.tags = normalized_tags(&filters.tags)?;
+    Ok(filters)
+}
+
+fn prepare_recall_filters(filters: &SearchFilters) -> Result<SearchFilters> {
+    let mut filters = filters.clone();
+    filters.spaces = resolve_space_filter(&filters.spaces);
+    if filters.statuses.is_empty() {
+        filters.statuses.push(status::ACTIVE.to_string());
+    }
+    // Recall must not surface logically stale facts. Past-`valid_to` and
+    // reached-`expires_at` memories are excluded before any retrieval route
+    // selects candidates, even before the dream expire task deletes them.
+    filters.hide_expired = true;
+    filters = normalize_search_filters(filters)?;
+    validate_search_filters(&filters)?;
     Ok(filters)
 }
 
@@ -10781,7 +11259,15 @@ fn semantic_candidates_late_interaction(
     // lets the single-vector ranking veto MaxSim's selection and the recall
     // gain disappears (observed in the first acceptance run).
     let selection = request.limit.saturating_add(request.offset);
-    let pool = maxsim_candidates(connection, query_tokens, token_model, selection)?;
+    let eligible_ids = memory_ids_matching_filters(connection, &request.filters)?;
+    let pool = maxsim_candidates(
+        connection,
+        query_tokens,
+        token_model,
+        &eligible_ids,
+        selection,
+        0,
+    )?;
     if pool.is_empty() {
         return Ok(vec![]);
     }
@@ -11108,6 +11594,20 @@ fn filters_where_clause(filters: &SearchFilters, args: &mut SqlArgs) -> String {
     }
 }
 
+fn memory_ids_matching_filters(
+    connection: &Connection,
+    filters: &SearchFilters,
+) -> Result<BTreeSet<String>> {
+    let mut args = SqlArgs::with_reserved(0);
+    let where_clause = filters_where_clause(filters, &mut args);
+    let sql = format!("SELECT m.id FROM memories m WHERE {where_clause}");
+    let mut statement = connection.prepare(&sql)?;
+    let rows = statement.query_map(params_from_iter(args.values.iter()), |row| {
+        row.get::<_, String>(0)
+    })?;
+    Ok(collect_rows(rows)?.into_iter().collect())
+}
+
 fn push_in_predicate(
     predicates: &mut Vec<String>,
     column: &str,
@@ -11117,18 +11617,6 @@ fn push_in_predicate(
     if !values.is_empty() {
         predicates.push(format!("{column} IN ({})", args.placeholder_list(values)));
     }
-}
-
-#[cfg(feature = "semantic")]
-fn semantic_table_for_dims(dims: usize) -> Result<String> {
-    if !(1..=MAX_SEMANTIC_EMBEDDING_DIMS).contains(&dims) {
-        return Err(Error::InvalidRequest {
-            message: format!(
-                "embedding dimension {dims} is not supported (expected 1..={MAX_SEMANTIC_EMBEDDING_DIMS})"
-            ),
-        });
-    }
-    Ok(format!("memory_vec_{dims}"))
 }
 
 #[cfg(feature = "semantic")]
@@ -11726,6 +12214,9 @@ fn validate_remember_request(request: &RememberRequest) -> Result<()> {
             message: format!("summary must be at most {MAX_SUMMARY_CHARS} characters"),
         });
     }
+    if let Some(representation) = &request.retrieval_representation {
+        validate_retrieval_representation(representation)?;
+    }
     validate_optional_metadata_value("space", request.space.as_deref())?;
     reject_all_spaces_sentinel(request.space.as_deref())?;
     validate_optional_metadata_value("silo", request.silo.as_deref())?;
@@ -12162,6 +12653,16 @@ fn remember_memory_tx(
         ],
     )?;
 
+    let stored_representation = request
+        .retrieval_representation
+        .as_ref()
+        .map(|input| insert_representation(transaction, &version_id, input, &now))
+        .transpose()?;
+
+    let retrieval_text = retrieval_companion(
+        request.summary.as_deref(),
+        request.retrieval_representation.as_ref(),
+    );
     transaction.execute(
         "INSERT INTO memory_events (id, memory_id, event_type, new_status, actor, data_json, created_at)
          VALUES (?1, ?2, 'remember', ?3, 'memkeeper', ?4, ?5)",
@@ -12218,7 +12719,7 @@ fn remember_memory_tx(
 
     transaction.execute(
         "INSERT INTO memory_fts (
-            memory_id, version_id, space_name, silo_name, status, kind, content, summary,
+            memory_id, version_id, space_name, silo_name, status, kind, content, retrieval_text,
             tags, source_text, metadata_text
          ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
         params![
@@ -12229,7 +12730,7 @@ fn remember_memory_tx(
             status::ACTIVE,
             &memory_kind,
             &request.content,
-            request.summary.as_deref(),
+            retrieval_text,
             &tags_text,
             request.source_ref_json.as_deref(),
             &metadata_text,
@@ -12237,7 +12738,7 @@ fn remember_memory_tx(
     )?;
     transaction.execute(
         "INSERT INTO memory_fts_public (
-            memory_id, version_id, space_name, silo_name, status, kind, content, summary,
+            memory_id, version_id, space_name, silo_name, status, kind, content, retrieval_text,
             tags, metadata_text
          ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
         params![
@@ -12248,7 +12749,7 @@ fn remember_memory_tx(
             status::ACTIVE,
             &memory_kind,
             &request.content,
-            request.summary.as_deref(),
+            retrieval_text,
             &tags_text,
             &metadata_text,
         ],
@@ -12304,6 +12805,21 @@ fn remember_memory_tx(
             "indexed"
         }
         .to_string(),
+        representation: stored_representation.as_ref().map(|stored| {
+            let semantic_indexed = request.token_embedding.is_some();
+            RepresentationWriteStatus {
+                kind: stored.kind.clone(),
+                text_sha256: stored.text_sha256.clone(),
+                fts_indexed: true,
+                semantic_indexed,
+                status: if semantic_indexed {
+                    "indexed"
+                } else {
+                    "lexical_only"
+                }
+                .to_string(),
+            }
+        }),
         candidates,
         candidates_truncated,
         auto_superseded,
@@ -12463,8 +12979,7 @@ fn write_embedding_row(
     embedding: &[f32],
     now: &str,
 ) -> Result<()> {
-    let table = semantic_table_for_dims(dims)?;
-    ensure_semantic_table(transaction, &table, dims)?;
+    let table = ensure_memory_vector_table(transaction, dims)?;
     // Canonical vector sidecar (source of truth for export/import).
     transaction.execute(
         "INSERT INTO embeddings (id, memory_id, version_id, embedding_model, dimensions, vector_blob, status, created_at, updated_at)
@@ -12486,21 +13001,6 @@ fn write_embedding_row(
         params![memory_id, embedding_json],
     )?;
     Ok(())
-}
-
-#[cfg(feature = "semantic")]
-fn ensure_semantic_table(connection: &Connection, table: &str, dims: usize) -> Result<()> {
-    if !table_exists(connection, table)? {
-        connection.execute_batch(&semantic_table_ddl(table, dims))?;
-    }
-    Ok(())
-}
-
-#[cfg(feature = "semantic")]
-fn semantic_table_ddl(table: &str, dims: usize) -> String {
-    format!(
-        "CREATE VIRTUAL TABLE IF NOT EXISTS {table} USING vec0(\n  memory_id TEXT NOT NULL,\n  embedding FLOAT[{dims}]\n);"
-    )
 }
 
 #[cfg(feature = "semantic")]
@@ -12608,8 +13108,7 @@ fn rebuild_vector_index(connection: &Connection) -> Result<usize> {
         if dims == 0 || embedding.len() != dims {
             continue;
         }
-        let table = semantic_table_for_dims(dims)?;
-        ensure_semantic_table(connection, &table, dims)?;
+        let table = ensure_memory_vector_table(connection, dims)?;
         connection.execute(
             &format!("DELETE FROM {table} WHERE memory_id = ?1"),
             params![memory_id],
@@ -12641,22 +13140,6 @@ pub fn reindex_vectors(path: impl AsRef<Path>) -> Result<usize> {
     let count = rebuild_vector_index(&transaction)?;
     transaction.commit()?;
     Ok(count)
-}
-
-#[cfg(feature = "semantic")]
-fn drop_all_vector_tables(transaction: &Transaction<'_>) -> Result<()> {
-    let tables: Vec<String> = {
-        let mut statement = transaction.prepare(
-            "SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE 'memory_vec_%'",
-        )?;
-        let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
-        rows.collect::<rusqlite::Result<Vec<_>>>()?
-    };
-    for table in tables {
-        // Table name comes from sqlite_master and is therefore trusted.
-        transaction.execute(&format!("DROP TABLE IF EXISTS {table}"), [])?;
-    }
-    Ok(())
 }
 
 /// One active memory's content, to be re-embedded under a new model.
@@ -12699,7 +13182,8 @@ pub fn collect_reembed_targets(path: impl AsRef<Path>) -> Result<Vec<ReembedTarg
 
 /// Collect active memories needing late-interaction token embeddings.
 ///
-/// Text is `summary + "\n\n" + content` (the eval-validated doc composition).
+/// Text uses the persisted representation when present, otherwise summary,
+/// followed by canonical content.
 /// With `force`, every active memory is returned (model switch / re-embed);
 /// otherwise only memories without a token row.
 ///
@@ -12713,25 +13197,26 @@ pub fn collect_token_backfill_targets(
 ) -> Result<Vec<(String, String)>> {
     let connection = open_initialized_read_fast(path.as_ref())?;
     let sql = if force {
-        "SELECT m.id, COALESCE(v.summary, ''), v.content FROM memories m \
+        "SELECT m.id, COALESCE(r.text, v.summary, ''), v.content FROM memories m \
          JOIN memory_versions v ON v.id = m.active_version_id \
+         LEFT JOIN memory_representations r ON r.version_id = v.id \
          WHERE m.status = 'active' ORDER BY m.id"
     } else {
-        "SELECT m.id, COALESCE(v.summary, ''), v.content FROM memories m \
+        "SELECT m.id, COALESCE(r.text, v.summary, ''), v.content FROM memories m \
          JOIN memory_versions v ON v.id = m.active_version_id \
+         LEFT JOIN memory_representations r ON r.version_id = v.id \
          LEFT JOIN memory_token_embeddings t ON t.memory_id = m.id \
          WHERE m.status = 'active' AND t.memory_id IS NULL ORDER BY m.id"
     };
     let mut statement = connection.prepare(sql)?;
     let rows = statement.query_map([], |row| {
         let id: String = row.get(0)?;
-        let summary: String = row.get(1)?;
+        let companion: String = row.get(1)?;
         let content: String = row.get(2)?;
-        let text = if summary.is_empty() {
-            content
-        } else {
-            format!("{summary}\n\n{content}")
-        };
+        let text = representation_document(
+            &content,
+            (!companion.is_empty()).then_some(companion.as_str()),
+        );
         Ok((id, text))
     })?;
     rows.collect::<rusqlite::Result<Vec<_>>>()
@@ -13153,7 +13638,7 @@ fn remember_candidate_fts_query(terms: &BTreeSet<String>) -> String {
         .iter()
         .filter(|term| term.chars().count() >= 4)
         .take(MAX_REMEMBER_LEXICAL_TERMS)
-        .map(|term| format!("{{content summary tags metadata_text}} : {term}"))
+        .map(|term| format!("{{content retrieval_text tags metadata_text}} : {term}"))
         .collect::<Vec<_>>()
         .join(" OR ")
 }
@@ -13457,6 +13942,7 @@ fn load_memory(connection: &Connection, id: &str, options: GetOptions) -> Result
                     deleted_at: row.get(19)?,
                     content: row.get(20)?,
                     summary: row.get(21)?,
+                    retrieval_representation: None,
                     content_sha256: row.get(22)?,
                     source_ref_json: if options.include_source {
                         row.get(23)?
@@ -13478,6 +13964,7 @@ fn load_memory(connection: &Connection, id: &str, options: GetOptions) -> Result
         })?;
 
     memory.tags = load_tags(connection, id)?;
+    memory.retrieval_representation = load_representation(connection, &memory.version_id)?;
     if options.include_history {
         let mut versions = load_versions_limited(connection, id, MAX_HISTORY_LIMIT)?;
         if !options.include_source {
@@ -13516,12 +14003,17 @@ fn load_versions_limited(
             version_num: row.get(1)?,
             content: row.get(2)?,
             summary: row.get(3)?,
+            retrieval_representation: None,
             content_sha256: row.get(4)?,
             created_at: row.get(5)?,
             source_ref_json: row.get(6)?,
         })
     })?;
-    collect_rows(rows)
+    let mut versions = collect_rows(rows)?;
+    for version in &mut versions {
+        version.retrieval_representation = load_representation(connection, &version.id)?;
+    }
+    Ok(versions)
 }
 
 fn load_events_limited(
@@ -13697,154 +14189,6 @@ impl JsonValidator {
     pub(crate) fn is_object(input: &str) -> bool {
         import_json_object_is_valid(input)
     }
-}
-
-pub(crate) fn open_initialized_read_fast(path: &Path) -> Result<Connection> {
-    validate_store_path(path)?;
-    if !path.exists() {
-        return Err(Error::NotInitialized {
-            path: path.to_path_buf(),
-        });
-    }
-
-    match inspect_existing_store_immutable(path)? {
-        ExistingStoreInspection::Compatible => {}
-        ExistingStoreInspection::OlderSchema(actual)
-        | ExistingStoreInspection::FutureSchema(actual) => {
-            return Err(Error::SchemaMismatch {
-                expected: SCHEMA_VERSION,
-                actual,
-            });
-        }
-        ExistingStoreInspection::Unrecognized => match inspect_existing_store(path)? {
-            ExistingStoreInspection::Compatible => {}
-            ExistingStoreInspection::OlderSchema(actual)
-            | ExistingStoreInspection::FutureSchema(actual) => {
-                return Err(Error::SchemaMismatch {
-                    expected: SCHEMA_VERSION,
-                    actual,
-                });
-            }
-            ExistingStoreInspection::Unrecognized => {
-                return Err(Error::NotInitialized {
-                    path: path.to_path_buf(),
-                });
-            }
-        },
-    }
-
-    reject_sqlite_sidecar_symlinks(path)?;
-    register_sqlite_vec_extension()?;
-    let connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-    configure_connection(&connection)?;
-    validate_initialized(path, &connection)?;
-    Ok(connection)
-}
-
-pub(crate) fn open_initialized_write(path: &Path) -> Result<Connection> {
-    validate_store_path(path)?;
-    if !path.exists() {
-        return Err(Error::NotInitialized {
-            path: path.to_path_buf(),
-        });
-    }
-
-    let needs_migration = match inspect_existing_store_immutable(path)? {
-        ExistingStoreInspection::Compatible => false,
-        ExistingStoreInspection::OlderSchema(_) => true,
-        ExistingStoreInspection::Unrecognized => match inspect_existing_store(path)? {
-            ExistingStoreInspection::Compatible => false,
-            ExistingStoreInspection::OlderSchema(_) => true,
-            ExistingStoreInspection::Unrecognized => {
-                return Err(Error::NotInitialized {
-                    path: path.to_path_buf(),
-                });
-            }
-            ExistingStoreInspection::FutureSchema(actual) => {
-                return Err(Error::SchemaMismatch {
-                    expected: SCHEMA_VERSION,
-                    actual,
-                });
-            }
-        },
-        ExistingStoreInspection::FutureSchema(actual) => {
-            return Err(Error::SchemaMismatch {
-                expected: SCHEMA_VERSION,
-                actual,
-            });
-        }
-    };
-
-    reject_sqlite_sidecar_symlinks(path)?;
-    register_sqlite_vec_extension()?;
-    let connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
-    configure_connection(&connection)?;
-    if needs_migration {
-        apply_schema(&connection)?;
-    }
-    validate_initialized(path, &connection)?;
-    Ok(connection)
-}
-
-fn reject_symlink_path(path: &Path) -> Result<()> {
-    if fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
-        return Err(Error::InvalidPath {
-            path: path.to_path_buf(),
-            reason: "path must not be a symlink",
-        });
-    }
-    Ok(())
-}
-
-pub(crate) fn reject_sqlite_sidecar_symlinks(path: &Path) -> Result<()> {
-    for suffix in ["-wal", "-shm", "-journal"] {
-        let sidecar = sidecar_path(path, suffix);
-        if fs::symlink_metadata(&sidecar).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
-            return Err(Error::InvalidPath {
-                path: sidecar,
-                reason: "SQLite sidecar path must not be a symlink",
-            });
-        }
-    }
-    Ok(())
-}
-
-pub(crate) fn validate_store_path(path: &Path) -> Result<()> {
-    if path.as_os_str().is_empty() {
-        return Err(Error::InvalidPath {
-            path: path.to_path_buf(),
-            reason: "path must not be empty",
-        });
-    }
-    let display_path = path.to_string_lossy();
-    if path == Path::new(":memory:") || display_path.starts_with("file:") {
-        return Err(Error::InvalidPath {
-            path: path.to_path_buf(),
-            reason:
-                "durable stores must use plain filesystem paths, not SQLite URI or memory paths",
-        });
-    }
-    if let Ok(metadata) = fs::symlink_metadata(path) {
-        if metadata.file_type().is_symlink() {
-            return Err(Error::InvalidPath {
-                path: path.to_path_buf(),
-                reason: "store path must not be a symlink",
-            });
-        }
-        if metadata.is_dir() {
-            return Err(Error::InvalidPath {
-                path: path.to_path_buf(),
-                reason: "path points to a directory",
-            });
-        }
-    } else if path.is_dir() {
-        return Err(Error::InvalidPath {
-            path: path.to_path_buf(),
-            reason: "path points to a directory",
-        });
-    }
-    reject_sqlite_sidecar_symlinks(path)?;
-    Ok(())
 }
 
 fn reject_source_sidecar_output(source_store: &Path, output_path: &Path) -> Result<()> {
@@ -14066,187 +14410,7 @@ fn cleanup_temp_output(path: &Path) {
     let _ = fs::remove_file(sidecar_path(path, "-journal"));
 }
 
-fn claim_or_preflight_init_path(path: &Path) -> Result<bool> {
-    if !path.exists() {
-        match create_new_private_file(path, false) {
-            Ok(_) => return Ok(true),
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
-            Err(error) => return Err(Error::Io(error)),
-        }
-    }
-    preflight_init_path(path)
-}
-
-fn preflight_init_path(path: &Path) -> Result<bool> {
-    validate_store_path(path)?;
-    if !path.exists() {
-        return Ok(true);
-    }
-
-    let metadata = fs::metadata(path)?;
-    if metadata.len() == 0 {
-        return Ok(false);
-    }
-
-    match inspect_existing_store(path)? {
-        ExistingStoreInspection::Compatible | ExistingStoreInspection::OlderSchema(_) => Ok(false),
-        ExistingStoreInspection::Unrecognized => Err(Error::UnsafeExistingDatabase {
-            path: path.to_path_buf(),
-        }),
-        ExistingStoreInspection::FutureSchema(actual) => Err(Error::SchemaMismatch {
-            expected: SCHEMA_VERSION,
-            actual,
-        }),
-    }
-}
-
-fn inspect_existing_store(path: &Path) -> Result<ExistingStoreInspection> {
-    match inspect_existing_store_copy(path) {
-        Ok(inspection) => Ok(inspection),
-        Err(Error::Database(_)) => Ok(ExistingStoreInspection::Unrecognized),
-        Err(error) => Err(error),
-    }
-}
-
-fn inspect_existing_store_immutable(path: &Path) -> Result<ExistingStoreInspection> {
-    match inspect_existing_store_immutable_inner(path) {
-        Ok(inspection) => Ok(inspection),
-        Err(Error::Database(_)) => Ok(ExistingStoreInspection::Unrecognized),
-        Err(error) => Err(error),
-    }
-}
-
-fn inspect_existing_store_immutable_inner(path: &Path) -> Result<ExistingStoreInspection> {
-    let uri = sqlite_immutable_uri(path)?;
-    register_sqlite_vec_extension()?;
-    let connection = Connection::open_with_flags(
-        &uri,
-        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI,
-    )?;
-    configure_connection(&connection)?;
-    let actual = user_version(&connection)?;
-    if actual > SCHEMA_VERSION {
-        return Ok(ExistingStoreInspection::FutureSchema(actual));
-    }
-    if actual < SCHEMA_VERSION {
-        return if older_schema_is_memkeeper(&connection, actual)? {
-            Ok(ExistingStoreInspection::OlderSchema(actual))
-        } else {
-            Ok(ExistingStoreInspection::Unrecognized)
-        };
-    }
-
-    match validate_initialized(path, &connection) {
-        Ok(()) => Ok(ExistingStoreInspection::Compatible),
-        Err(Error::NotInitialized { .. }) => Ok(ExistingStoreInspection::Unrecognized),
-        Err(Error::SchemaMismatch { actual, .. }) => {
-            Ok(ExistingStoreInspection::FutureSchema(actual))
-        }
-        Err(error) => Err(error),
-    }
-}
-
-fn sqlite_immutable_uri(path: &Path) -> Result<String> {
-    let absolute = fs::canonicalize(path)?;
-    Ok(format!(
-        "file:{}?mode=ro&immutable=1",
-        percent_encode_path(&absolute.to_string_lossy())
-    ))
-}
-
-fn percent_encode_path(value: &str) -> String {
-    let mut output = String::with_capacity(value.len());
-    for byte in value.as_bytes() {
-        match *byte {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'/' | b'-' | b'.' | b'_' | b'~' => {
-                output.push(char::from(*byte));
-            }
-            byte => {
-                let _ = write!(output, "%{byte:02X}");
-            }
-        }
-    }
-    output
-}
-
-fn inspect_existing_store_copy(path: &Path) -> Result<ExistingStoreInspection> {
-    inspect_on_copy(path, |connection| {
-        configure_connection(connection)?;
-        let actual = user_version(connection)?;
-        if actual > SCHEMA_VERSION {
-            return Ok(ExistingStoreInspection::FutureSchema(actual));
-        }
-        if actual < SCHEMA_VERSION {
-            return if older_schema_is_memkeeper(connection, actual)? {
-                Ok(ExistingStoreInspection::OlderSchema(actual))
-            } else {
-                Ok(ExistingStoreInspection::Unrecognized)
-            };
-        }
-
-        match validate_initialized(path, connection) {
-            Ok(()) => Ok(ExistingStoreInspection::Compatible),
-            Err(Error::NotInitialized { .. }) => Ok(ExistingStoreInspection::Unrecognized),
-            Err(Error::SchemaMismatch { actual, .. }) => {
-                Ok(ExistingStoreInspection::FutureSchema(actual))
-            }
-            Err(error) => Err(error),
-        }
-    })
-}
-
-pub(crate) fn inspect_on_copy<T>(
-    path: &Path,
-    inspect: impl FnOnce(&Connection) -> Result<T>,
-) -> Result<T> {
-    reject_symlink_path(path)?;
-    let copy_path = inspection_copy_path()?;
-    fs::copy(path, &copy_path)?;
-    copy_sidecar_if_present(path, &copy_path, "-wal")?;
-    copy_sidecar_if_present(path, &copy_path, "-shm")?;
-    copy_sidecar_if_present(path, &copy_path, "-journal")?;
-
-    register_sqlite_vec_extension()?;
-    let result = Connection::open_with_flags(&copy_path, OpenFlags::SQLITE_OPEN_READ_ONLY)
-        .map_err(Error::Database)
-        .and_then(|connection| inspect(&connection));
-
-    cleanup_inspection_copy(&copy_path);
-    result
-}
-
-fn inspection_copy_path() -> Result<PathBuf> {
-    for _ in 0..16 {
-        let dir = env::temp_dir().join(format!(
-            "memkeeper-inspect-{}-{}-{}",
-            process::id(),
-            unique_nanos(),
-            ID_COUNTER.fetch_add(1, Ordering::Relaxed)
-        ));
-        match create_private_dir(&dir) {
-            Ok(()) => return Ok(dir.join("store.sqlite")),
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
-            Err(error) => return Err(Error::Io(error)),
-        }
-    }
-    Err(Error::InvalidPath {
-        path: env::temp_dir(),
-        reason: "could not create private inspection directory",
-    })
-}
-
-#[cfg(unix)]
-fn create_private_dir(path: &Path) -> std::io::Result<()> {
-    use std::os::unix::fs::DirBuilderExt;
-    fs::DirBuilder::new().mode(0o700).create(path)
-}
-
-#[cfg(not(unix))]
-fn create_private_dir(path: &Path) -> std::io::Result<()> {
-    fs::create_dir(path)
-}
-
-fn create_new_private_file(path: &Path, read: bool) -> std::io::Result<File> {
+pub(crate) fn create_new_private_file(path: &Path, read: bool) -> std::io::Result<File> {
     let mut options = OpenOptions::new();
     options.write(true).create_new(true);
     if read {
@@ -14265,41 +14429,7 @@ fn apply_private_file_mode(options: &mut OpenOptions) {
 #[cfg(not(unix))]
 fn apply_private_file_mode(_options: &mut OpenOptions) {}
 
-fn copy_sidecar_if_present(source: &Path, copy: &Path, suffix: &str) -> Result<()> {
-    let source_sidecar = sidecar_path(source, suffix);
-    match fs::symlink_metadata(&source_sidecar) {
-        Ok(metadata) => {
-            if metadata.file_type().is_symlink() {
-                return Err(Error::InvalidPath {
-                    path: source_sidecar,
-                    reason: "SQLite sidecar path must not be a symlink",
-                });
-            }
-            fs::copy(source_sidecar, sidecar_path(copy, suffix))?;
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => return Err(Error::Io(error)),
-    }
-    Ok(())
-}
-
-fn cleanup_inspection_copy(path: &Path) {
-    let _ = fs::remove_file(path);
-    let _ = fs::remove_file(sidecar_path(path, "-wal"));
-    let _ = fs::remove_file(sidecar_path(path, "-shm"));
-    let _ = fs::remove_file(sidecar_path(path, "-journal"));
-    if let Some(parent) = path.parent() {
-        let _ = fs::remove_dir(parent);
-    }
-}
-
-fn sidecar_path(path: &Path, suffix: &str) -> PathBuf {
-    let mut value = path.as_os_str().to_os_string();
-    value.push(suffix);
-    PathBuf::from(value)
-}
-
-fn create_parent_dirs(path: &Path) -> Result<()> {
+pub(crate) fn create_parent_dirs(path: &Path) -> Result<()> {
     if let Some(parent) = path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
@@ -14307,241 +14437,6 @@ fn create_parent_dirs(path: &Path) -> Result<()> {
         fs::create_dir_all(parent)?;
     }
     Ok(())
-}
-
-#[cfg(feature = "semantic")]
-fn register_sqlite_vec_extension() -> Result<()> {
-    // sqlite-vec exposes SQLite's raw extension entry point; rusqlite requires
-    // registering that entry point before opening connections that use vec0. The
-    // registration is process-global, so do it once to avoid adding duplicate
-    // auto-extension hooks on repeated short-lived CLI/store calls.
-    match SQLITE_VEC_EXTENSION_REGISTERED.get_or_init(|| {
-        let entry: RawAutoExtension =
-            unsafe { std::mem::transmute(sqlite_vec::sqlite3_vec_init as *const ()) };
-        unsafe { register_auto_extension(entry) }.map_err(|error| error.to_string())
-    }) {
-        Ok(()) => Ok(()),
-        Err(message) => Err(Error::InvalidRequest {
-            message: format!("failed to register sqlite-vec extension: {message}"),
-        }),
-    }
-}
-
-#[cfg(not(feature = "semantic"))]
-#[allow(clippy::unnecessary_wraps)]
-fn register_sqlite_vec_extension() -> Result<()> {
-    Ok(())
-}
-
-pub(crate) fn configure_connection(connection: &Connection) -> Result<()> {
-    connection.busy_timeout(Duration::from_millis(BUSY_TIMEOUT_MS))?;
-    connection.execute_batch("PRAGMA foreign_keys = ON;")?;
-    Ok(())
-}
-
-fn enable_wal(connection: &Connection) -> Result<String> {
-    connection
-        .query_row("PRAGMA journal_mode = WAL", [], |row| row.get(0))
-        .map_err(Into::into)
-}
-
-pub(crate) fn journal_mode(connection: &Connection) -> Result<String> {
-    connection
-        .query_row("PRAGMA journal_mode", [], |row| row.get(0))
-        .map_err(Into::into)
-}
-
-pub(crate) fn user_version(connection: &Connection) -> Result<i32> {
-    connection
-        .query_row("PRAGMA user_version", [], |row| row.get(0))
-        .map_err(Into::into)
-}
-
-pub(crate) fn sqlite_version(connection: &Connection) -> Result<String> {
-    connection
-        .query_row("SELECT sqlite_version()", [], |row| row.get(0))
-        .map_err(Into::into)
-}
-
-fn apply_schema(connection: &Connection) -> Result<()> {
-    connection.execute_batch("BEGIN IMMEDIATE;")?;
-    let schema_sql = transactional_schema_sql();
-    let result = connection
-        .execute_batch(&schema_sql)
-        .and_then(|()| apply_feature_schema(connection))
-        .and_then(|()| connection.execute_batch("COMMIT;"));
-
-    if let Err(error) = result {
-        let _ = connection.execute_batch("ROLLBACK;");
-        return Err(Error::Database(error));
-    }
-
-    Ok(())
-}
-
-fn apply_feature_schema(connection: &Connection) -> rusqlite::Result<()> {
-    connection.execute_batch(SCHEMA_UPGRADE_SQL)
-}
-
-fn transactional_schema_sql() -> String {
-    let mut sql = String::with_capacity(SCHEMA_SQL.len());
-    for line in SCHEMA_SQL.lines() {
-        let trimmed = line.trim_start();
-        if trimmed.starts_with("PRAGMA foreign_keys")
-            || trimmed.starts_with("PRAGMA journal_mode")
-            || trimmed.starts_with("PRAGMA busy_timeout")
-        {
-            continue;
-        }
-        sql.push_str(line);
-        sql.push('\n');
-    }
-    sql
-}
-
-pub(crate) fn validate_initialized(path: &Path, connection: &Connection) -> Result<()> {
-    let actual = user_version(connection)?;
-    if actual == 0 {
-        return Err(Error::NotInitialized {
-            path: path.to_path_buf(),
-        });
-    }
-    if actual != SCHEMA_VERSION {
-        return Err(Error::SchemaMismatch {
-            expected: SCHEMA_VERSION,
-            actual,
-        });
-    }
-
-    for table in REQUIRED_TABLES {
-        if !table_exists(connection, table)? {
-            return Err(Error::NotInitialized {
-                path: path.to_path_buf(),
-            });
-        }
-    }
-    for table in REQUIRED_FTS_TABLES {
-        if !table_exists(connection, table)? {
-            return Err(Error::NotInitialized {
-                path: path.to_path_buf(),
-            });
-        }
-    }
-    let applied = count(
-        connection,
-        &format!("SELECT COUNT(*) FROM schema_migrations WHERE version = {SCHEMA_VERSION}"),
-    )?;
-    if applied == 0 {
-        return Err(Error::NotInitialized {
-            path: path.to_path_buf(),
-        });
-    }
-
-    let schema_config = required_config_value(path, connection, "schema_version")?;
-    let expected_schema = SCHEMA_VERSION.to_string();
-    if schema_config != expected_schema {
-        let actual = schema_config.parse().unwrap_or_default();
-        return Err(Error::SchemaMismatch {
-            expected: SCHEMA_VERSION,
-            actual,
-        });
-    }
-
-    let protocol = required_config_value(path, connection, "protocol_version")?;
-    if protocol != "memkeeper.v0.1" {
-        return Err(Error::NotInitialized {
-            path: path.to_path_buf(),
-        });
-    }
-
-    let default_space = required_config_value(path, connection, "default_space")?;
-    if default_space != DEFAULT_SPACE {
-        return Err(Error::NotInitialized {
-            path: path.to_path_buf(),
-        });
-    }
-
-    let seeded_space = count(
-        connection,
-        "SELECT COUNT(*) FROM spaces WHERE name = 'workspace-memory'",
-    )?;
-    if seeded_space == 0 {
-        return Err(Error::NotInitialized {
-            path: path.to_path_buf(),
-        });
-    }
-
-    Ok(())
-}
-
-fn older_schema_is_memkeeper(connection: &Connection, actual: i32) -> Result<bool> {
-    if actual <= 0 || actual >= SCHEMA_VERSION {
-        return Ok(false);
-    }
-    for table in REQUIRED_TABLES {
-        if !table_exists(connection, table)? {
-            return Ok(false);
-        }
-    }
-    for table in REQUIRED_FTS_TABLES {
-        if !table_exists(connection, table)? {
-            return Ok(false);
-        }
-    }
-    let migration_count = count(
-        connection,
-        &format!("SELECT COUNT(*) FROM schema_migrations WHERE version = {actual}"),
-    )?;
-    if migration_count == 0 {
-        return Ok(false);
-    }
-    let schema_config = connection
-        .query_row(
-            "SELECT value FROM config_kv WHERE key = 'schema_version'",
-            [],
-            |row| row.get::<_, String>(0),
-        )
-        .optional()?;
-    let protocol = connection
-        .query_row(
-            "SELECT value FROM config_kv WHERE key = 'protocol_version'",
-            [],
-            |row| row.get::<_, String>(0),
-        )
-        .optional()?;
-    let default_space = connection
-        .query_row(
-            "SELECT value FROM config_kv WHERE key = 'default_space'",
-            [],
-            |row| row.get::<_, String>(0),
-        )
-        .optional()?;
-    Ok(schema_config.as_deref() == Some(&actual.to_string())
-        && protocol.as_deref() == Some("memkeeper.v0.1")
-        && default_space.as_deref() == Some(DEFAULT_SPACE))
-}
-
-pub(crate) fn table_exists(connection: &Connection, name: &str) -> Result<bool> {
-    let mut statement = connection.prepare_cached(
-        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type IN ('table','view') AND name = ?1)",
-    )?;
-    let exists = statement.query_row([name], |row| row.get::<_, i64>(0))?;
-    Ok(exists == 1)
-}
-
-pub(crate) fn required_config_value(
-    path: &Path,
-    connection: &Connection,
-    key: &str,
-) -> Result<String> {
-    let value = connection
-        .query_row("SELECT value FROM config_kv WHERE key = ?1", [key], |row| {
-            row.get(0)
-        })
-        .optional()?;
-    value.ok_or_else(|| Error::NotInitialized {
-        path: path.to_path_buf(),
-    })
 }
 
 pub(crate) fn count(connection: &Connection, sql: &str) -> Result<i64> {
