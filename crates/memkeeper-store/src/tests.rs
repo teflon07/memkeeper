@@ -5930,6 +5930,103 @@ fn import_round_trips_export_and_rebuilds_indexes() {
 }
 
 #[test]
+fn import_round_trip_preserves_custom_long_term_default() {
+    let path = temp_store_path("import_custom_long_term_source");
+    let import_path = temp_store_path("import_custom_long_term_target");
+    let export_a = temp_store_path("import_custom_long_term_a").with_extension("jsonl");
+    let export_b = temp_store_path("import_custom_long_term_b").with_extension("jsonl");
+    cleanup_store(&path);
+    cleanup_store(&import_path);
+    cleanup_store(&export_a);
+    cleanup_store(&export_b);
+
+    init_store(&path).expect("init succeeds");
+    create_space(
+        &path,
+        &SpaceCreateRequest {
+            name: "hosted-validation".to_string(),
+            display_name: Some("Hosted Validation".to_string()),
+            description: Some("Synthetic hosted contract validation".to_string()),
+            default_silo: Some("long-term".to_string()),
+            ontology: None,
+            config_json: None,
+            if_not_exists: false,
+        },
+    )
+    .expect("custom space create succeeds");
+
+    init_store(&path).expect("re-init preserves custom space");
+    let source_space = list_spaces(&path)
+        .expect("list source spaces")
+        .spaces
+        .into_iter()
+        .find(|space| space.name == "hosted-validation")
+        .expect("custom source space exists");
+    assert_eq!(source_space.default_silo, "long-term");
+    let source_silos = list_silos(
+        &path,
+        &SiloListRequest {
+            space: Some("hosted-validation".to_string()),
+        },
+    )
+    .expect("list source silos");
+    assert!(source_silos
+        .silos
+        .iter()
+        .any(|silo| silo.name == "long-term" && silo.is_default));
+
+    let mut request = basic_request("preference: synthetic hosted contract uses long-term");
+    request.space = Some("hosted-validation".to_string());
+    request.silo = None;
+    let remembered = remember_memory(&path, &request).expect("remember in custom space");
+    assert_eq!(remembered.memory.silo, "long-term");
+
+    export_store(
+        &path,
+        &ExportRequest {
+            output_path: export_a.clone(),
+            format: "jsonl".to_string(),
+        },
+    )
+    .expect("source export succeeds");
+    import_store(
+        &import_path,
+        &ImportRequest {
+            input_path: export_a.clone(),
+            format: "jsonl".to_string(),
+            dry_run: false,
+            conflict_policy: "fail_if_exists".to_string(),
+        },
+    )
+    .expect("strict import succeeds");
+
+    let imported_space = list_spaces(&import_path)
+        .expect("list imported spaces")
+        .spaces
+        .into_iter()
+        .find(|space| space.name == "hosted-validation")
+        .expect("custom imported space exists");
+    assert_eq!(imported_space.default_silo, "long-term");
+    export_store(
+        &import_path,
+        &ExportRequest {
+            output_path: export_b.clone(),
+            format: "jsonl".to_string(),
+        },
+    )
+    .expect("round-trip export succeeds");
+    assert_eq!(
+        fs::read(&export_a).expect("read source export"),
+        fs::read(&export_b).expect("read round-trip export")
+    );
+
+    cleanup_store(&path);
+    cleanup_store(&import_path);
+    cleanup_store(&export_a);
+    cleanup_store(&export_b);
+}
+
+#[test]
 fn import_rejects_existing_target_and_cleans_failed_create() {
     let source = temp_store_path("import_failure_cleanup_source");
     let target = temp_store_path("import_failure_cleanup_target");

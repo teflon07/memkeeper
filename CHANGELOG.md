@@ -6,6 +6,14 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html) once it reache
 1.0. Until then, minor releases may include breaking changes to the storage
 schema and wire protocol.
 
+## [0.2.15] - 2026-07-14
+
+### Fixed
+- **Custom Space defaults survive restart and restore.** Initialization now
+  limits the legacy `long-term` cleanup to the default `workspace-memory` Space,
+  preserving explicit `long-term` defaults and silos in custom Spaces across
+  restart and logical export/import/export.
+
 ## [0.2.14] - 2026-07-10
 
 ### Added
