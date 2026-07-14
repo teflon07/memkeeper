@@ -35,7 +35,7 @@ no required network or LLM calls.
 
 <p align="center"><sub>Real CLI output, formatted for readability via <a href="scripts/mkfmt"><code>scripts/mkfmt</code></a>. The search query shares no keywords with the memory it surfaces.</sub></p>
 
-> Status: pre-release (v0.2). APIs and the wire protocol may change before 1.0.
+> Status: pre-release (v0.3.0). APIs and the wire protocol may change before 1.0.
 
 ## Quickstart
 
@@ -60,6 +60,32 @@ Prefer not to pipe a script to your shell? Grab a binary from the
 `~/.memkeeper/store.sqlite` when `--store` is omitted; a `--json` value can also be
 `@<file>` or `-` (stdin) instead of an inline string, which avoids shell-quoting
 pitfalls (handy in Windows PowerShell).
+
+## Upgrade from v0.2.x
+
+v0.3.0 upgrades existing stores from schema 5 to schema 6. The migration is
+transactional, but schema 6 stores cannot be opened by v0.2.x. Stop any
+long-running `memkeeper` process and keep a schema 5 backup until you verify the
+upgrade.
+
+Back up the store with your v0.2.x binary before installing v0.3.0:
+
+```sh
+STORE=~/.memkeeper/store.sqlite
+memkeeper backup --store "$STORE" --output "$STORE.schema5.bak" --json
+```
+
+Install v0.3.0, run the migration explicitly, and verify the result before
+restarting any long-running process:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/teflon07/memkeeper/main/install.sh | bash
+memkeeper init --store "$STORE" --json
+memkeeper doctor --store "$STORE" --json
+```
+
+`init` is safe to rerun. If you need to roll back, restore the schema 5 backup
+before starting the older binary.
 
 ## Use it from your agent (MCP)
 
