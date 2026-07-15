@@ -7287,6 +7287,171 @@ fn export_import_preserves_retrieval_representation() {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)]
+fn import_round_trip_preserves_custom_long_term_default() {
+    let path = temp_store_path("import_custom_long_term_source");
+    let import_path = temp_store_path("import_custom_long_term_target");
+    let export_a = temp_store_path("import_custom_long_term_a").with_extension("jsonl");
+    let export_b = temp_store_path("import_custom_long_term_b").with_extension("jsonl");
+    cleanup_store(&path);
+    cleanup_store(&import_path);
+    cleanup_store(&export_a);
+    cleanup_store(&export_b);
+
+    init_store(&path).expect("init succeeds");
+    create_space(
+        &path,
+        &SpaceCreateRequest {
+            name: "hosted-validation".to_string(),
+            display_name: Some("Hosted Validation".to_string()),
+            description: Some("Synthetic hosted contract validation".to_string()),
+            default_silo: Some("long-term".to_string()),
+            ontology: None,
+            config_json: None,
+            if_not_exists: false,
+        },
+    )
+    .expect("custom space create succeeds");
+
+    init_store(&path).expect("re-init preserves empty custom long-term silo");
+    let reinitialized_source_space = list_spaces(&path)
+        .expect("list reinitialized source spaces")
+        .spaces
+        .into_iter()
+        .find(|space| space.name == "hosted-validation")
+        .expect("custom reinitialized source space exists");
+    assert_eq!(reinitialized_source_space.default_silo, "long-term");
+    let reinitialized_source_silos = list_silos(
+        &path,
+        &SiloListRequest {
+            space: Some("hosted-validation".to_string()),
+        },
+    )
+    .expect("list reinitialized source silos");
+    assert!(reinitialized_source_silos
+        .silos
+        .iter()
+        .any(|silo| silo.name == "long-term" && silo.is_default));
+
+    let card = "archive card contains custom-long-term-schema-six";
+    let mut request =
+        represented_request("preference: synthetic hosted contract uses long-term", card);
+    request.space = Some("hosted-validation".to_string());
+    request.silo = None;
+    let remembered = remember_memory(&path, &request).expect("remember in custom space");
+    assert_eq!(remembered.memory.silo, "long-term");
+    assert_eq!(
+        remembered
+            .memory
+            .retrieval_representation
+            .as_ref()
+            .expect("source representation")
+            .text,
+        card
+    );
+
+    export_store(
+        &path,
+        &ExportRequest {
+            output_path: export_a.clone(),
+            format: "jsonl".to_string(),
+        },
+    )
+    .expect("source export succeeds");
+
+    let source_bytes = fs::read(&export_a).expect("read source export");
+    let source_text = std::str::from_utf8(&source_bytes).expect("source export is utf8");
+    let records = source_text
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("parse export row"))
+        .collect::<Vec<_>>();
+    let header = records
+        .iter()
+        .find(|record| record["type"] == "header")
+        .expect("archive header");
+    assert_eq!(header["schema_version"], SCHEMA_VERSION);
+    assert_eq!(SCHEMA_VERSION, 6);
+    assert_eq!(
+        records
+            .iter()
+            .filter(|record| {
+                record["type"] == "row" && record["table"] == "memory_representations"
+            })
+            .count(),
+        1
+    );
+    let footer = records
+        .iter()
+        .find(|record| record["type"] == "footer")
+        .expect("archive footer");
+    assert_eq!(footer["table_counts"]["memory_representations"], 1);
+
+    import_store(
+        &import_path,
+        &ImportRequest {
+            input_path: export_a.clone(),
+            format: "jsonl".to_string(),
+            dry_run: false,
+            conflict_policy: "fail_if_exists".to_string(),
+        },
+    )
+    .expect("strict import succeeds");
+    export_store(
+        &import_path,
+        &ExportRequest {
+            output_path: export_b.clone(),
+            format: "jsonl".to_string(),
+        },
+    )
+    .expect("round-trip export succeeds");
+
+    assert_eq!(
+        source_bytes,
+        fs::read(&export_b).expect("read round-trip export"),
+        "schema-6 custom Space archive must round-trip byte-identically"
+    );
+    let imported_space = list_spaces(&import_path)
+        .expect("list imported spaces")
+        .spaces
+        .into_iter()
+        .find(|space| space.name == "hosted-validation")
+        .expect("custom imported space exists");
+    assert_eq!(imported_space.default_silo, "long-term");
+    let imported = get_memory(
+        &import_path,
+        &remembered.memory.id,
+        GetOptions {
+            include_history: false,
+            include_links: false,
+            include_source: false,
+        },
+    )
+    .expect("get imported represented memory");
+    assert_eq!(
+        imported
+            .retrieval_representation
+            .as_ref()
+            .expect("imported representation")
+            .text,
+        card
+    );
+
+    init_store(&import_path).expect("re-init imported store");
+    let reinitialized_space = list_spaces(&import_path)
+        .expect("list reinitialized spaces")
+        .spaces
+        .into_iter()
+        .find(|space| space.name == "hosted-validation")
+        .expect("custom reinitialized space exists");
+    assert_eq!(reinitialized_space.default_silo, "long-term");
+
+    cleanup_store(&path);
+    cleanup_store(&import_path);
+    cleanup_store(&export_a);
+    cleanup_store(&export_b);
+}
+
+#[test]
 fn import_rejects_representation_hash_mismatch() {
     let source = temp_store_path("representation_hash_source");
     let target = temp_store_path("representation_hash_target");

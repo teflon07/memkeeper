@@ -602,7 +602,7 @@ checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 
 [[package]]
 name = "memkeeper-cli"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "memkeeper-core",
  "memkeeper-embed",
@@ -616,11 +616,11 @@ dependencies = [
 
 [[package]]
 name = "memkeeper-core"
-version = "0.3.0"
+version = "0.3.1"
 
 [[package]]
 name = "memkeeper-embed"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "anyhow",
  "ndarray",
@@ -634,11 +634,11 @@ dependencies = [
 
 [[package]]
 name = "memkeeper-protocol"
-version = "0.3.0"
+version = "0.3.1"
 
 [[package]]
 name = "memkeeper-store"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "memkeeper-core",
  "rusqlite",
@@ -1285,9 +1285,9 @@ checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
 
 [[package]]
 name = "syn"
-version = "2.0.118"
+version = "2.0.119"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1b9ae57f904213ebb649ce6895b8a66c66f0203b9319718f69a5612a065b1422"
+checksum = "872831b642d1a07999a962a351ed35b955ea2cfc8f3862091e2a240a84f17297"
 dependencies = [
  "proc-macro2",
  "quote",

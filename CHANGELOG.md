@@ -6,6 +6,15 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html) once it reache
 1.0. Until then, minor releases may include breaking changes to the storage
 schema and wire protocol.
 
+## [0.3.1] - 2026-07-14
+
+### Fixed
+- **Custom Space defaults survive initialization and archive restore.** The
+  vestigial `long-term` cleanup is limited to the legacy default
+  `workspace-memory` Space again. Custom Spaces intentionally configured with a
+  `long-term` default now preserve it across initialization and schema-6 logical
+  export/import/export, including archives with retrieval representations.
+
 ## [0.3.0] - 2026-07-14
 
 ### Added
@@ -316,6 +325,7 @@ Initial public release. A local-first memory engine for AI agents.
 - **Adapters**: an MCP bridge and a thin extension client.
 - Dual-licensed **MIT OR Apache-2.0**.
 
+[0.3.1]: https://github.com/teflon07/memkeeper/compare/v0.3.0...v0.3.1
 [0.2.11]: https://github.com/teflon07/memkeeper/releases/tag/v0.2.11
 [0.2.10]: https://github.com/teflon07/memkeeper/releases/tag/v0.2.10
 [0.2.9]: https://github.com/teflon07/memkeeper/releases/tag/v0.2.9

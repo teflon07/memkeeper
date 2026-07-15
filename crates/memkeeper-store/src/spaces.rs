@@ -219,22 +219,25 @@ pub(crate) fn ensure_space_exists(connection: &Connection, space: &str) -> Resul
         })
     }
 }
-/// Remove the vestigial `long-term` silo (2-tier migration) from any space, but
-/// only when no memory references it. Idempotent; preserves a populated silo.
+/// Remove the vestigial `long-term` silo from the legacy default Space, but only
+/// when no memory references it. Idempotent; preserves custom Space configuration.
 pub(crate) fn cleanup_vestigial_long_term_silo(connection: &Connection) -> Result<()> {
-    // Repoint any space still defaulting to the removed silo so default-silo
-    // writes don't strand on a missing silo after the delete below.
+    // Repoint the legacy default Space so default-silo writes don't strand on a
+    // missing silo after the delete below. Custom Spaces may use `long-term`.
     connection.execute(
-        "UPDATE spaces SET default_silo = 'durable' WHERE default_silo = 'long-term'",
-        [],
+        "UPDATE spaces
+         SET default_silo = ?1
+         WHERE name = ?2 AND default_silo = 'long-term'",
+        params![DEFAULT_DURABLE_SILO, DEFAULT_SPACE],
     )?;
     connection.execute(
         "DELETE FROM silos
-         WHERE name = 'long-term'
+         WHERE space_name = ?1
+           AND name = 'long-term'
            AND NOT EXISTS (
                SELECT 1 FROM memories m
                WHERE m.space_name = silos.space_name AND m.silo_name = 'long-term')",
-        [],
+        [DEFAULT_SPACE],
     )?;
     Ok(())
 }
