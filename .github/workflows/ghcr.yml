@@ -47,7 +47,7 @@ jobs:
       # from the stamped server.json (release-prep.sh stamps it). This is robust:
       # workflow_run.head_branch is unreliable for tag-triggered runs, so we derive
       # vX.Y.Z from server.json.version rather than trust the event's branch field.
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           ref: ${{ github.event_name == 'workflow_dispatch' && inputs.version || github.event.workflow_run.head_sha }}
       - id: ver
@@ -71,10 +71,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       # Check out the released tag so the Dockerfile matches the version built.
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           ref: ${{ needs.setup.outputs.version }}
-      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+      - uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -85,7 +85,7 @@ jobs:
         env:
           VERSION: ${{ needs.setup.outputs.version }}
         run: echo "v=${VERSION#v}" >> "$GITHUB_OUTPUT"
-      - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+      - uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: .
           file: ./Dockerfile
@@ -111,7 +111,7 @@ jobs:
       id-token: write   # required for GitHub OIDC
     steps:
       # Check out the released tag so server.json matches the version being published.
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           ref: ${{ needs.setup.outputs.version }}
       - name: Install mcp-publisher
