@@ -18,6 +18,18 @@ use tokenizers::Tokenizer;
 #[cfg(feature = "local")]
 const MAX_SEQ_LEN: usize = 512;
 
+/// Embed-path max sequence length. Defaults to `MAX_SEQ_LEN` (512, mxbai's limit);
+/// override with `MEMKEEPER_EMBED_MAX_SEQ` for a long-context embedder (e.g. bge-m3
+/// at 8192). The reranker cap is intentionally left at `MAX_SEQ_LEN`.
+#[cfg(feature = "local")]
+fn embed_max_seq_len() -> usize {
+    std::env::var("MEMKEEPER_EMBED_MAX_SEQ")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or(MAX_SEQ_LEN)
+}
+
 /// Result type used by embedding and reranking provider implementations.
 pub type ProviderResult<T> = anyhow::Result<T>;
 
@@ -290,76 +302,28 @@ fn local_embedder_from_env() -> Option<EmbedModel> {
 #[cfg(feature = "local")]
 fn local_reranker_from_env() -> Option<RerankerModel> {
     let dir = resolve_local_model_dir("MEMKEEPER_RERANK_MODEL_DIR", "mxbai-rerank-base");
-    load_local_reranker(&dir, LocalRerankerRole::Production)
+    load_local_reranker(&dir)
 }
 
 #[cfg(feature = "local")]
-#[derive(Clone, Copy)]
-enum LocalRerankerRole {
-    Production,
-    Shadow,
-}
-
-#[cfg(feature = "local")]
-fn load_local_reranker(dir: &Path, role: LocalRerankerRole) -> Option<RerankerModel> {
+fn load_local_reranker(dir: &Path) -> Option<RerankerModel> {
     if !dir.exists() {
-        match role {
-            LocalRerankerRole::Production => eprintln!(
-                "[memkeeper] rerank model not found at {}; run `memkeeper pull-models` \
-                 to enable reranking (ranking without the cross-encoder for now)",
-                dir.display()
-            ),
-            LocalRerankerRole::Shadow => eprintln!(
-                "[memkeeper] shadow rerank model dir set but not found at {}; shadow reranking disabled",
-                dir.display()
-            ),
-        }
+        eprintln!(
+            "[memkeeper] rerank model not found at {}; run `memkeeper pull-models` \
+             to enable reranking (ranking without the cross-encoder for now)",
+            dir.display()
+        );
         return None;
     }
     match RerankerModel::load(dir) {
         Ok(model) => {
-            match role {
-                LocalRerankerRole::Production => eprintln!("[memkeeper] rerank model loaded"),
-                LocalRerankerRole::Shadow => eprintln!(
-                    "[memkeeper] shadow rerank model loaded ({}, token_type_ids={})",
-                    model.model_id, model.needs_token_type_ids
-                ),
-            }
+            eprintln!("[memkeeper] rerank model loaded");
             Some(model)
         }
         Err(error) => {
-            let label = match role {
-                LocalRerankerRole::Production => "rerank",
-                LocalRerankerRole::Shadow => "shadow rerank",
-            };
-            eprintln!("[memkeeper] warning: failed to load {label} model: {error}");
+            eprintln!("[memkeeper] warning: failed to load rerank model: {error}");
             None
         }
-    }
-}
-
-/// Load the optional shadow reranker. Strictly opt-in: only activates when the
-/// operator sets `MEMKEEPER_RERANK_SHADOW_MODEL_DIR`. The shadow model scores the
-/// same candidates as production for divergence logging and never affects the
-/// served order, so a missing/broken shadow model warns and disables shadowing
-/// rather than failing (see the require-mode startup guard for fail-closed).
-#[cfg(feature = "local")]
-fn local_shadow_reranker_from_env() -> Option<RerankerModel> {
-    let dir = std::path::PathBuf::from(std::env::var_os("MEMKEEPER_RERANK_SHADOW_MODEL_DIR")?);
-    load_local_reranker(&dir, LocalRerankerRole::Shadow)
-}
-
-/// Construct the optional shadow reranker as a boxed trait object, or `None` when
-/// unconfigured or unavailable in this build.
-#[must_use]
-pub fn shadow_reranker_from_env() -> Option<Box<dyn Reranker>> {
-    #[cfg(feature = "local")]
-    {
-        local_shadow_reranker_from_env().map(|model| Box::new(model) as Box<dyn Reranker>)
-    }
-    #[cfg(not(feature = "local"))]
-    {
-        None
     }
 }
 
@@ -438,6 +402,8 @@ pub struct EmbedModel {
     dims: usize,
     model_id: String,
     pooling: Pooling,
+    needs_token_type_ids: bool,
+    max_seq_len: usize,
 }
 
 #[cfg(feature = "local")]
@@ -456,7 +422,19 @@ impl EmbedModel {
         let tokenizer = Tokenizer::from_file(model_dir.join("tokenizer.json"))
             .map_err(|e| anyhow::anyhow!("failed to load tokenizer: {e}"))?;
         let pooling = Pooling::from_env();
-        let probe = Self::run_session(&mut session, &tokenizer, &["probe"], pooling)?;
+        // XLM-R graphs (bge-m3) take only input_ids/attention_mask; BERT graphs
+        // (mxbai) also require token_type_ids. Feed it only when the graph asks.
+        let needs_token_type_ids =
+            declares_token_type_ids(session.inputs().iter().map(ort::value::Outlet::name));
+        let max_seq_len = embed_max_seq_len();
+        let probe = Self::run_session(
+            &mut session,
+            &tokenizer,
+            &["probe"],
+            pooling,
+            needs_token_type_ids,
+            max_seq_len,
+        )?;
         let dims = probe[0].len();
         Ok(Self {
             model_id: model_id_from_dir(model_dir),
@@ -464,6 +442,8 @@ impl EmbedModel {
             tokenizer,
             dims,
             pooling,
+            needs_token_type_ids,
+            max_seq_len,
         })
     }
 
@@ -481,7 +461,14 @@ impl EmbedModel {
     ///
     /// Returns an error if tokenization or the ONNX inference run fails.
     pub fn embed(&mut self, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
-        Self::run_session(&mut self.session, &self.tokenizer, texts, self.pooling)
+        Self::run_session(
+            &mut self.session,
+            &self.tokenizer,
+            texts,
+            self.pooling,
+            self.needs_token_type_ids,
+            self.max_seq_len,
+        )
     }
 
     /// Embed a single text.
@@ -499,6 +486,8 @@ impl EmbedModel {
         tokenizer: &Tokenizer,
         texts: &[&str],
         pooling: Pooling,
+        needs_token_type_ids: bool,
+        max_seq_len: usize,
     ) -> Result<Vec<Vec<f32>>> {
         let batch_size = texts.len();
         if batch_size == 0 {
@@ -519,12 +508,12 @@ impl EmbedModel {
             .map(|e| e.get_ids().len())
             .max()
             .unwrap_or(1)
-            .min(MAX_SEQ_LEN);
+            .min(max_seq_len);
 
         for enc in &encodings {
-            if enc.get_ids().len() > MAX_SEQ_LEN {
+            if enc.get_ids().len() > max_seq_len {
                 eprintln!(
-                    "[memkeeper-embed] warning: input truncated to {MAX_SEQ_LEN} tokens (was {})",
+                    "[memkeeper-embed] warning: input truncated to {max_seq_len} tokens (was {})",
                     enc.get_ids().len()
                 );
             }
@@ -532,7 +521,6 @@ impl EmbedModel {
 
         let mut input_ids = Array2::<i64>::zeros((batch_size, seq_len));
         let mut attention_mask = Array2::<i64>::zeros((batch_size, seq_len));
-        let token_type_ids = Array2::<i64>::zeros((batch_size, seq_len));
 
         for (i, enc) in encodings.iter().enumerate() {
             let ids = enc.get_ids();
@@ -547,14 +535,25 @@ impl EmbedModel {
             TensorRef::from_array_view(input_ids.view()).context("input_ids tensor")?;
         let t_attention_mask =
             TensorRef::from_array_view(attention_mask.view()).context("attention_mask tensor")?;
-        let t_token_type_ids =
-            TensorRef::from_array_view(token_type_ids.view()).context("token_type_ids tensor")?;
 
-        let outputs = session.run(ort::inputs![
-            "input_ids" => t_input_ids,
-            "attention_mask" => t_attention_mask,
-            "token_type_ids" => t_token_type_ids,
-        ])?;
+        // Feed token_type_ids only when the graph declares it (BERT/mxbai). XLM-R
+        // graphs (bge-m3) reject an unexpected input; both segments are single here,
+        // so a zero tensor is correct when asked for.
+        let outputs = if needs_token_type_ids {
+            let token_type_ids = Array2::<i64>::zeros((batch_size, seq_len));
+            let t_token_type_ids = TensorRef::from_array_view(token_type_ids.view())
+                .context("token_type_ids tensor")?;
+            session.run(ort::inputs![
+                "input_ids" => t_input_ids,
+                "attention_mask" => t_attention_mask,
+                "token_type_ids" => t_token_type_ids,
+            ])?
+        } else {
+            session.run(ort::inputs![
+                "input_ids" => t_input_ids,
+                "attention_mask" => t_attention_mask,
+            ])?
+        };
 
         let hidden: ArrayViewD<'_, f32> = outputs[0].try_extract_array::<f32>()?;
         // hidden shape: [batch, seq_len, hidden_dim]

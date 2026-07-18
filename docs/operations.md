@@ -142,40 +142,25 @@ pinned by the CLI test `pack_result_json_contract_is_stable`.
 Notes:
 - `scores` is aligned 1:1 with `memory_ids` (same order). Entries are the
   cross-encoder rerank score on the rerank path, otherwise the retrieval score.
-- `top_score` is the highest relevance score across the *retrieved candidate
-  pool* (before the score floor / char budget trimmed the pack); `null` for an
-  empty pack.
+- `top_score` is the highest final relevance score in the candidate pool before
+  count or character budgeting. It is `null` when retrieval found no candidates
+  or the pack used the visibly degraded unscored fallback.
+- `min_score` gates the whole pack on `top_score`. It does not drop lower-ranked
+  evidence after the top candidate clears the gate.
 - `truncated` is `true` when memories or text were dropped to honor limits.
 
 ## Required primary reranker
 
-Memkeeper warns and serves plain retrieval order by default when the primary
-cross-encoder cannot load. Set `MEMKEEPER_REQUIRE_RERANK=1` when that degradation
-is unacceptable. The flag makes `pack`, reranked one-shot `search`, `serve`,
-and in-process native MCP refuse rather than return a successful non-reranked
-result. Non-reranked search remains available because it does not request the
-primary reranker.
+Memkeeper emits a visible note and serves one retrieval-only pack when the primary
+cross-encoder cannot load or fails during a request. Set
+`MEMKEEPER_REQUIRE_RERANK=1` when that degradation is unacceptable. The flag makes
+`pack`, reranked one-shot `search`, `serve`, and in-process native MCP refuse
+rather than return a successful non-reranked result. Non-reranked search remains
+available because it does not request the primary reranker.
 
 Use this independently from `MEMKEEPER_REQUIRE_SEMANTIC=1`: the semantic flag
 protects embeddings and requested late interaction, while the reranker flag
 protects cross-encoder ordering.
-
-## Shadow reranker telemetry
-
-Set `MEMKEEPER_RERANK_SHADOW_MODEL_DIR` on a long-lived server to score each
-production rerank candidate set with a second local model. Shadow scoring runs
-after the authoritative pack is assembled on a bounded background worker, so
-it cannot alter or delay the served pack. Failures and queue saturation are
-logged and the production response continues.
-
-Set `MEMKEEPER_REQUIRE_SHADOW_RERANK=1` when the server must refuse startup unless
-the shadow model loaded and its worker started. This requirement is enforced in
-semantic and lexical-only builds.
-
-Comparisons are stored in the local `reranker_shadow_events` table, one row per
-candidate and one batch per pack. Rows include the query, production and shadow
-model ids, scores, and ranks. The table is operational telemetry and is excluded
-from export/import.
 
 ## Supersession modes
 

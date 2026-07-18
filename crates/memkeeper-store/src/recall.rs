@@ -6,62 +6,9 @@ use std::path::Path;
 use rusqlite::params;
 
 use crate::{
-    ensure_recall_events, ensure_reranker_shadow_events, limit_i64, now_timestamp,
-    open_initialized_write, Error, RecallLogReport, RecallLogRequest, Result, ShadowRerankBatch,
-    MAX_METADATA_VALUE_CHARS, MAX_RECALL_EVENTS, MAX_SEARCH_QUERY_CHARS,
+    ensure_recall_events, limit_i64, now_timestamp, open_initialized_write, Error, RecallLogReport,
+    RecallLogRequest, Result, MAX_METADATA_VALUE_CHARS, MAX_RECALL_EVENTS, MAX_SEARCH_QUERY_CHARS,
 };
-
-/// Record one pack's production-vs-shadow reranker comparison. Every row shares a
-/// monotonic `batch` id so offline analysis can group a single pack's candidates.
-/// Returns the number of rows written (0 when the batch is empty).
-///
-/// # Errors
-///
-/// Returns an error if the store is missing/incompatible or `SQLite` rejects the
-/// transaction. Callers on the retrieval hot path should treat failures as
-/// non-fatal (shadow telemetry must never break production retrieval).
-pub fn record_reranker_shadow(path: impl AsRef<Path>, batch: &ShadowRerankBatch) -> Result<usize> {
-    if batch.rows.is_empty() {
-        return Ok(0);
-    }
-    let mut connection = open_initialized_write(path.as_ref())?;
-    let transaction = connection.transaction()?;
-    ensure_reranker_shadow_events(&transaction)?;
-    let now = now_timestamp(&transaction)?;
-    // Next batch id under the write lock: unique and monotonic without an external
-    // dependency, so all rows from this call group cleanly for offline analysis.
-    let batch_id: i64 = transaction.query_row(
-        "SELECT COALESCE(MAX(batch), 0) + 1 FROM reranker_shadow_events",
-        [],
-        |row| row.get(0),
-    )?;
-    let mut recorded = 0_usize;
-    {
-        let mut insert = transaction.prepare_cached(
-            "INSERT INTO reranker_shadow_events
-               (batch, ts, query, prod_model_id, shadow_model_id, memory_id,
-                prod_rank, prod_score, shadow_rank, shadow_score)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
-        )?;
-        for row in &batch.rows {
-            insert.execute(params![
-                batch_id,
-                &now,
-                batch.query.as_deref(),
-                batch.prod_model_id.as_deref(),
-                batch.shadow_model_id.as_deref(),
-                &row.memory_id,
-                limit_i64(row.prod_rank)?,
-                f64::from(row.prod_score),
-                limit_i64(row.shadow_rank)?,
-                f64::from(row.shadow_score),
-            ])?;
-            recorded += 1;
-        }
-    }
-    transaction.commit()?;
-    Ok(recorded)
-}
 
 /// Record recall telemetry events and optionally touch `accessed_at` for
 /// retrieved memories. Events may reference memories that no longer exist.

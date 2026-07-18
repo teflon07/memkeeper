@@ -236,6 +236,54 @@ fn serve_stdio_handles_multiple_json_requests() {
 }
 
 #[test]
+fn serve_startup_notes_capture_adjudication_require_mode() {
+    // With MEMKEEPER_CAPTURE_REQUIRE_ADJUDICATION set, serve must surface the fail-closed posture
+    // once at startup on stderr (never stdout — that would corrupt the JSON-RPC stream). stdin is
+    // piped and closed by wait_with_output (EOF), so serve exits cleanly.
+    let child = memkeeper_command()
+        .env("MEMKEEPER_CAPTURE_REQUIRE_ADJUDICATION", "1")
+        .args(["serve", "--stdio"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn serve");
+    let output = child.wait_with_output().expect("wait serve");
+    assert!(output.status.success(), "serve failed: {output:?}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("capture-adjudication require-mode ACTIVE"),
+        "startup NOTE missing from stderr: {stderr}"
+    );
+    // The NOTE goes to stderr only; stdout stays clean (no request sent -> empty JSON stream).
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !stdout.contains("require-mode"),
+        "startup NOTE leaked into stdout JSON stream: {stdout}"
+    );
+}
+
+#[test]
+fn serve_startup_silent_on_capture_adjudication_by_default() {
+    // Without the env var (permissive default), serve must NOT emit the adjudication NOTE — the
+    // capture write-path is opt-in, so quiet is correct (no crying wolf on every serve).
+    let child = memkeeper_command()
+        .args(["serve", "--stdio"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn serve");
+    let output = child.wait_with_output().expect("wait serve");
+    assert!(output.status.success(), "serve failed: {output:?}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("capture-adjudication require-mode"),
+        "unexpected adjudication NOTE when require-mode is off: {stderr}"
+    );
+}
+
+#[test]
 fn space_and_silo_commands_manage_custom_space() {
     let path = temp_store_path("space_and_silo_commands_manage_custom_space");
     cleanup_store(&path);
@@ -680,7 +728,10 @@ fn batch_search_and_pack_return_compact_context() {
     assert!(pack.status.success(), "pack failed: {pack:?}");
     let pack_stdout = String::from_utf8(pack.stdout).expect("valid utf8");
     assert!(pack_stdout.contains("\"command\":\"pack\""));
-    assert!(pack_stdout.contains("## Retrieved Memory"));
+    assert!(
+        pack_stdout.contains("## Retrieved Memory"),
+        "pack stdout: {pack_stdout}"
+    );
     assert!(pack_stdout.contains(&memory_id));
     assert!(!pack_stdout.contains("\"adapter\":\"host\""));
 

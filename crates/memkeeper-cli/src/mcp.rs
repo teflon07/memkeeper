@@ -672,22 +672,6 @@ pub(crate) fn build_serve_call(
             );
             payload.insert("max_chars".into(), json!(arg_i64(args, "max_chars", 6000)));
             payload.insert("min_score".into(), json!(arg_f64(args, "min_score", 0.0)));
-            for key in [
-                "query_expansion",
-                "thread_expansion",
-                "graph_expansion",
-                "graph_within_entity_maxsim",
-                "max_query_variants",
-                "max_thread_seeds",
-                "max_thread_neighbors",
-                "max_graph_seeds",
-                "max_graph_neighbors",
-                "graph_decay",
-                "graph_rerank_slots",
-                "graph_activation_floor",
-            ] {
-                copy_opt(&mut payload, args, key);
-            }
             let mut filters = Map::new();
             filters.extend(string_filter(args, "space", "spaces"));
             if let Some(Value::Array(tags)) = args.get("tags") {
@@ -1057,19 +1041,7 @@ for factual corrections so the signal is captured explicitly rather than inferre
                 "title": { "type": "string", "description": "Heading for the assembled pack. Default \"context\"." },
                 "max_memories": { "type": "integer", "description": "Maximum memories to include in the pack. Default 10." },
                 "max_chars": { "type": "integer", "description": "Character budget for the assembled pack. Default 6000." },
-                "min_score": { "type": "number", "description": "Drop memories scoring below this threshold; the pack abstains (returns empty) when nothing clears it. Default 0 (no floor)." },
-                "query_expansion": { "type": "boolean", "description": "Default false. Deterministically add subqueries before retrieval." },
-                "thread_expansion": { "type": "boolean", "description": "Default false. Add same-entity/same-claim neighbors to the rerank pool." },
-                "graph_expansion": { "type": "boolean", "description": "Default false. Associative recall: graph-expand the rerank pool one hop from the top seeds so a relationship-reachable memory below the ANN/BM25 threshold can still be reranked (hybrid_assoc_v0)." },
-                "graph_within_entity_maxsim": { "type": "boolean", "description": "Default false. Experimental: select one memory per graph entity by first-query MaxSim; requires late-interaction tokens." },
-                "max_query_variants": { "type": "integer", "description": "Default engine maximum." },
-                "max_thread_seeds": { "type": "integer", "description": "Default 3." },
-                "max_thread_neighbors": { "type": "integer", "description": "Default 3." },
-                "max_graph_seeds": { "type": "integer", "description": "Default 3. Top-of-pool anchors used for graph expansion." },
-                "max_graph_neighbors": { "type": "integer", "description": "Default 5. Graph-reachable neighbors unioned into the pool (activation budget)." },
-                "graph_decay": { "type": "number", "description": "Default 0.5. Per-hop activation decay for graph expansion." },
-                "graph_rerank_slots": { "type": "integer", "description": "Default 0. Reserve N pack slots for top-activation graph candidates so a hop-reached memory the reranker scored low can still land (0 = recall-widening only)." },
-                "graph_activation_floor": { "type": "number", "description": "Default 0.0. Minimum activation a graph candidate needs to claim a reserved rerank slot." },
+                "min_score": { "type": "number", "description": "Return an empty pack when the top final score is below this threshold. Default 0." },
                 "space": { "type": "string", "description": "Restrict retrieval to a single memory space (namespace), or \"*\" for all spaces. Omit for the default space." },
                 "tags": { "type": "array", "items": { "type": "string" }, "description": "Restrict retrieval to memories carrying these tags." },
             }),

@@ -6,7 +6,7 @@
 //! `assemble_reranked_pack` injects the highest-ranked candidates that fit the
 //! char budget *whole*. When the gate passes but the top-ranked candidate is by
 //! itself larger than the entire `max_chars` budget, the loop breaks on the very
-//! first item and the pack is emitted EMPTY — a confidently-relevant memory is
+//! first item and the pack is emitted EMPTY, so a confidently-relevant memory is
 //! dropped purely for being long. Live measurement (2026-06-12) on the 20-query
 //! probe set at the hook config (`max_memories=5, max_chars=1500`) showed this
 //! firing on 5/20 queries (25%), including the highest-confidence hits
@@ -18,22 +18,20 @@
 //!
 //! * **Regression half** (`regression_fingerprint_frozen`): a deterministic FNV
 //!   fingerprint over a sweep of cases where the top item already fits (and the
-//!   gate-blocked / floored / empty-pool cases that must stay empty). The fix
+//!   top-score-blocked / empty-pool cases that must stay empty). The fix
 //!   MUST keep this byte-identical — proof it is surgical.
 //! * **Target half** (`target_*`): the pre-registered post-fix behaviour for the
 //!   defect case. These assertions are RED against the pre-fix engine and turn
 //!   GREEN only when the fix lands. They pin: the top eligible candidate is
 //!   injected truncated to `max_chars`, content is non-empty and within budget,
 //!   the truncation marker `…` is present, valid UTF-8 is preserved on a char
-//!   boundary, and the fallback never fires when the gate blocked or the floor
-//!   excluded the top item.
+//!   boundary, and the fallback never fires when the top-score gate blocked.
 //!
 //! ## Pre-registered success criteria (no moving goalposts)
 //! 1. `regression_fingerprint_frozen` MATCHES the frozen constant below.
 //! 2. All `target_*` assertions pass.
 //! 3. The full `memkeeper-store` unit suite + workspace tests stay green.
-//! 4. No test/oracle file is edited (this file, `src/tests.rs`, `tests/*`).
-//! 5. Live re-measurement: defect count on the 20-probe set drops 5 -> 0.
+//! 4. Live re-measurement: defect count on the 20-probe set drops 5 -> 0.
 
 use memkeeper_store::{
     assemble_reranked_pack, PackReport, PackRequest, RerankCandidate, SearchFilters,
@@ -42,7 +40,7 @@ use memkeeper_store::{
 // Frozen regression fingerprint over `regression_scenarios()`, captured from the
 // pre-fix engine. A value of 0 means "capture mode": the test prints the computed
 // fingerprint and passes, so the baseline can be read once and pinned here.
-const REGRESSION_FINGERPRINT: u64 = 0x2401_bdc4_114b_ece7;
+const REGRESSION_FINGERPRINT: u64 = 0x1913_6440_302b_2e14;
 
 // --- self-contained FNV-1a (matches bench_oracle.rs conventions) ------------
 struct Fnv(u64);
@@ -110,32 +108,27 @@ fn rc(id: &str, content: &str, score: f32) -> RerankCandidate {
         content: content.to_string(),
         rerank_score: score,
         activation: None,
-        graph_pulled: false,
     }
 }
 
-/// One scenario: `(request, cosine_gate, cos_top, candidates)`.
-type Scenario = (PackRequest, f64, f64, Vec<RerankCandidate>);
+/// One scenario: `(request, candidates)`.
+type Scenario = (PackRequest, Vec<RerankCandidate>);
 
 /// Deterministic sweep of cases the fix MUST NOT change: items that fit whole,
-/// whole-item budget truncation, the gate-blocked / floored / empty-pool cases
+/// whole-item budget truncation, the top-score-blocked / empty-pool cases
 /// that must stay empty, and exact-boundary fits.
 fn regression_scenarios() -> Vec<Scenario> {
     vec![
         // single short item, generous budget
-        (req(5, 10_000, 0.0), 0.0, 0.0, vec![rc("a", "short", 0.9)]),
+        (req(5, 10_000, 0.0), vec![rc("a", "short", 0.9)]),
         // two items both fit, ordered by score
         (
             req(5, 10_000, 0.0),
-            0.0,
-            0.0,
             vec![rc("a", "low", 0.1), rc("b", "high", 0.9)],
         ),
         // max_memories cap: 3 candidates, 2 injected -> truncated
         (
             req(2, 10_000, 0.0),
-            0.0,
-            0.0,
             vec![
                 rc("a", "aaa", 0.3),
                 rc("b", "bbb", 0.9),
@@ -146,44 +139,29 @@ fn regression_scenarios() -> Vec<Scenario> {
         // budget but the FIRST item fits whole (top item NOT oversized)
         (
             req(5, 14, 0.0),
-            0.0,
-            0.0,
             vec![rc("a", "aaaa", 0.9), rc("b", "bbbbbbbbbb", 0.5)],
         ),
         // exact-boundary fit: "- aaaa\n" == 7 bytes == max_chars
-        (req(5, 7, 0.0), 0.0, 0.0, vec![rc("a", "aaaa", 0.9)]),
-        // gate blocked (cos below gate, rr below min) -> empty, stays empty
-        (
-            req(5, 1500, 0.2),
-            0.30,
-            0.10,
-            vec![rc("a", &"x".repeat(2000), 0.05)],
-        ),
-        // legacy per-item floor drops sub-floor items
+        (req(5, 7, 0.0), vec![rc("a", "aaaa", 0.9)]),
+        // Top-score gate blocks the pack.
+        (req(5, 1500, 0.2), vec![rc("a", &"x".repeat(2000), 0.05)]),
+        // The top-score gate passes, so lower-ranked evidence remains eligible.
         (
             req(5, 10_000, 0.4),
-            0.0,
-            0.0,
             vec![rc("a", "aa", 0.9), rc("b", "bb", 0.5), rc("c", "cc", 0.2)],
         ),
-        // legacy floor excludes an OVERSIZED top item -> must stay empty (the
-        // budget fallback must not override the floor)
-        (
-            req(5, 1500, 0.8),
-            0.0,
-            0.0,
-            vec![rc("a", &"x".repeat(2000), 0.10)],
-        ),
+        // An oversized top item below the top-score gate remains excluded.
+        (req(5, 1500, 0.8), vec![rc("a", &"x".repeat(2000), 0.10)]),
         // empty candidate pool -> empty pack, top_score None
-        (req(5, 1500, 0.0), 0.0, 0.0, vec![]),
+        (req(5, 1500, 0.0), vec![]),
     ]
 }
 
 #[test]
 fn regression_fingerprint_frozen() {
     let mut fnv = Fnv::new();
-    for (request, gate, cos_top, candidates) in regression_scenarios() {
-        let report = assemble_reranked_pack(&request, gate, cos_top, &candidates);
+    for (request, candidates) in regression_scenarios() {
+        let report = assemble_reranked_pack(&request, &candidates);
         mix_pack(&mut fnv, &report);
     }
     let fp = fnv.finish();
@@ -194,7 +172,7 @@ fn regression_fingerprint_frozen() {
     }
     assert_eq!(
         fp, REGRESSION_FINGERPRINT,
-        "regression fingerprint DRIFT: the fix changed a fit/blocked/floored case it must not touch"
+        "regression fingerprint DRIFT: the fix changed a fit/blocked case it must not touch"
     );
 }
 
@@ -204,11 +182,10 @@ const OVERSIZED: usize = 2_000; // > the 1500 hook budget
 const MARKER: &str = "…\n";
 
 #[test]
-fn target_oversized_top_injected_truncated_via_cosine_gate() {
+fn target_oversized_top_injected_truncated_after_gate_passes() {
     let request = req(5, 1500, 0.0);
     let candidates = vec![rc("top", &"a".repeat(OVERSIZED), 0.05)];
-    // cos_top (0.80) clears the gate -> emit; top item is oversized.
-    let report = assemble_reranked_pack(&request, 0.30, 0.80, &candidates);
+    let report = assemble_reranked_pack(&request, &candidates);
     assert_eq!(
         report.memory_ids,
         vec!["top".to_string()],
@@ -239,7 +216,7 @@ fn target_oversized_top_then_smaller_injects_only_top() {
         rc("top", &"a".repeat(OVERSIZED), 0.90),
         rc("second", "small", 0.50),
     ];
-    let report = assemble_reranked_pack(&request, 0.30, 0.80, &candidates);
+    let report = assemble_reranked_pack(&request, &candidates);
     assert_eq!(
         report.memory_ids,
         vec!["top".to_string()],
@@ -253,7 +230,7 @@ fn target_oversized_top_preserves_utf8_char_boundary() {
     let request = req(5, 1500, 0.0);
     // "é" is 2 bytes in UTF-8; 1000 of them = 2000 bytes, oversized.
     let candidates = vec![rc("top", &"é".repeat(1000), 0.05)];
-    let report = assemble_reranked_pack(&request, 0.30, 0.80, &candidates);
+    let report = assemble_reranked_pack(&request, &candidates);
     assert_eq!(report.memory_ids, vec!["top".to_string()]);
     assert!(report.content.len() <= request.max_chars);
     // If truncation split a multibyte char, the String would be invalid and the
@@ -269,8 +246,8 @@ fn target_oversized_top_preserves_utf8_char_boundary() {
 fn target_oversized_top_injected_via_reranker_confidence() {
     let request = req(5, 1500, 0.4);
     let candidates = vec![rc("top", &"a".repeat(OVERSIZED), 0.45)];
-    // cos_top (0.05) below the gate, but rr_top (0.45) >= min_score (0.4) -> emit.
-    let report = assemble_reranked_pack(&request, 0.30, 0.05, &candidates);
+    // The top rerank score (0.45) clears min_score (0.4).
+    let report = assemble_reranked_pack(&request, &candidates);
     assert_eq!(report.memory_ids, vec!["top".to_string()]);
     assert!(!report.content.is_empty());
     assert!(report.content.len() <= request.max_chars);

@@ -93,6 +93,8 @@ pub enum Command {
     CandidateApprove,
     /// Reject a candidate memory.
     CandidateReject,
+    /// Quarantine a candidate memory (an adjudicator flagged it).
+    CandidateQuarantine,
 }
 
 impl Command {
@@ -141,6 +143,7 @@ impl Command {
             Self::CandidateList => "candidate-list",
             Self::CandidateApprove => "candidate-approve",
             Self::CandidateReject => "candidate-reject",
+            Self::CandidateQuarantine => "candidate-quarantine",
         }
     }
 
@@ -189,6 +192,7 @@ impl Command {
             "candidate-list" => Some(Self::CandidateList),
             "candidate-approve" => Some(Self::CandidateApprove),
             "candidate-reject" => Some(Self::CandidateReject),
+            "candidate-quarantine" => Some(Self::CandidateQuarantine),
             _ => None,
         }
     }
@@ -299,6 +303,7 @@ mod tests {
             Command::CandidateList,
             Command::CandidateApprove,
             Command::CandidateReject,
+            Command::CandidateQuarantine,
         ];
         for command in commands {
             assert_eq!(Command::parse(command.as_str()), Some(command));

@@ -80,16 +80,11 @@ Prompt-time retrieval knobs:
 | `MEMKEEPER_HOOK_MAX_MEMORIES` | `5` | Max memories in the injected pack. |
 | `MEMKEEPER_HOOK_MAX_CHARS` | `3000` | Max characters in the injected pack. |
 | `MEMKEEPER_HOOK_RERANK_CANDIDATES` | `12` | Candidate pool the cross-encoder reranks after ANN+BM25 fusion (capped at 50). ~100ms/doc on CPU; 12 keeps warm retrieval ~1.5–2s while preserving quality. |
-| `MEMKEEPER_HOOK_QUERY_EXPANSION` | `true` | Deterministically adds bounded subqueries before embedding/retrieval; set `0` to disable. |
-| `MEMKEEPER_HOOK_THREAD_EXPANSION` | `true` | Adds same-entity/same-claim neighbors from top anchors into the rerank pool; set `0` to disable. |
-| `MEMKEEPER_HOOK_MAX_QUERY_VARIANTS` | `8` | Cap on expanded query variants. |
-| `MEMKEEPER_HOOK_MAX_THREAD_SEEDS` | `3` | Anchor count for same-thread expansion. |
-| `MEMKEEPER_HOOK_MAX_THREAD_NEIGHBORS` | `3` | Neighbor count per anchor. |
 | `MEMKEEPER_EMBED_MODEL_DIR` | bundled `models/mxbai-embed-large` if present | Local embedder dir. Set empty / `MEMKEEPER_EMBED_PROVIDER=none` to force BM25. |
 | `MEMKEEPER_RERANK_MODEL_DIR` | bundled `models/mxbai-rerank-base` if present | Local cross-encoder reranker dir. |
 | `MEMKEEPER_HOOK_MIN_PROMPT_CHARS` | `20` | Skip retrieval for shorter prompts. |
 | `MEMKEEPER_HOOK_MAX_QUERY_CHARS` | `500` | Query prefix length from the submitted prompt. |
-| `MEMKEEPER_HOOK_MIN_SCORE` | unset | Optional precision floor for `pack`. Leave unset by default: the floor applies to ANN/embedding scores on the rerank path (rerank itself only reorders, it does not threshold), and an over-tight floor drops real recall. When a floor yields no matches, the adapter skips injection entirely. |
+| `MEMKEEPER_HOOK_MIN_SCORE` | `0.05` | Pack-level abstention threshold on the top final score. Lower-ranked evidence remains eligible after the top score clears the gate. |
 
 Each var also accepts a `PI_` prefix variant, for example `PI_MEMKEEPER_HOOK_MAX_CHARS`.
 

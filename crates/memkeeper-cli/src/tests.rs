@@ -5,18 +5,19 @@ use super::run_rerank_payload;
 use super::{
     backup_request_from_json, batch_search_request_from_json, diagnostic_store_candidate_from,
     dream_graph_json, dream_request_from_json, entity_search_request_from_json,
-    entity_upsert_request_from_json, export_request_from_json, forget_request_from_json,
-    get_request_from_json, graph_context_request_from_json, graph_neighbors_request_from_json,
-    history_request_from_json, hook_query_text, import_request_from_json, json_string, memory_json,
-    memory_list_request_from_json, pack_expansion_options_from_json, pack_request_from_json,
-    parse_backup_args, parse_batch_search_args, parse_doctor_args, parse_dream_args,
-    parse_entity_search_args, parse_entity_upsert_args, parse_export_args, parse_forget_args,
-    parse_graph_context_args, parse_graph_neighbors_args, parse_history_args, parse_hook_flags,
-    parse_import_args, parse_memory_list_args, parse_pack_args, parse_relationship_upsert_args,
-    parse_remember_args, parse_serve_args, parse_serve_request, parse_silo_list_args,
-    parse_space_create_args, parse_space_list_args, parse_stats_args, parse_store_args,
-    pool_trace_result_json, relationship_upsert_request_from_json, remember_request_from_json,
-    remember_result_json, rerank_request_from_json, search_request_from_json, serve_line_response,
+    entity_upsert_request_from_json, evidence_join_options_from_json, export_request_from_json,
+    forget_request_from_json, get_request_from_json, graph_context_request_from_json,
+    graph_neighbors_request_from_json, history_request_from_json, hook_query_text,
+    import_request_from_json, json_string, memory_json, memory_list_request_from_json,
+    pack_request_from_json, parse_backup_args, parse_batch_search_args, parse_doctor_args,
+    parse_dream_args, parse_entity_search_args, parse_entity_upsert_args, parse_export_args,
+    parse_forget_args, parse_graph_context_args, parse_graph_neighbors_args, parse_history_args,
+    parse_hook_flags, parse_import_args, parse_memory_list_args, parse_pack_args,
+    parse_pool_trace_args, parse_relationship_upsert_args, parse_remember_args, parse_serve_args,
+    parse_serve_request, parse_silo_list_args, parse_space_create_args, parse_space_list_args,
+    parse_stats_args, parse_store_args, pool_trace_pack_request_from_json, pool_trace_result_json,
+    relationship_upsert_request_from_json, remember_request_from_json, remember_result_json,
+    rerank_request_from_json, search_request_from_json, serve_line_response,
     silo_list_request_from_json, space_create_request_from_json, space_record_json, versions_json,
     CliError, DreamEntityProjection, DreamGraphReport, SemanticModels, SpaceRecord,
     DEFAULT_PROMOTE_THRESHOLD, PROJECT_STORE_RELATIVE_PATH,
@@ -98,24 +99,22 @@ fn representation_output_is_conditional_and_auditable() {
 }
 
 #[test]
-fn representation_rerank_documents_are_bounded() {
+fn rerank_documents_use_bounded_canonical_content_only() {
     let content = "canonical-content-".repeat(50);
     assert!(content.chars().count() > 512);
     let card = "c".repeat(512);
     let pool = vec![memkeeper_store::RerankPoolCandidate {
         memory_id: "mem-represented".to_string(),
         content: content.clone(),
-        summary: Some(card.clone()),
         activation: None,
-        graph_pulled: false,
         admissions: Vec::new(),
     }];
 
-    let (documents, companion_indexes) = super::rerank_pool_documents(&pool, 512);
-    assert_eq!(documents.len(), 2);
-    assert_eq!(companion_indexes, vec![0]);
+    let documents = super::rerank_pool_documents(&pool, 512);
+    assert_eq!(documents.len(), 1);
     assert_eq!(documents[0].chars().count(), 512);
-    assert_eq!(documents[1], card);
+    assert_eq!(documents[0], &content[..512]);
+    assert_ne!(documents[0], card);
 
     let report = memkeeper_store::assemble_reranked_pack(
         &memkeeper_store::PackRequest {
@@ -131,14 +130,11 @@ fn representation_rerank_documents_are_bounded() {
             query_token_embeddings: None,
             token_model_id: None,
         },
-        0.0,
-        1.0,
         &[memkeeper_store::RerankCandidate {
             memory_id: "mem-represented".to_string(),
             content: content.clone(),
             rerank_score: 1.0,
             activation: None,
-            graph_pulled: false,
         }],
     );
     assert!(report.content.contains(&content));
@@ -205,8 +201,11 @@ fn required_semantic_rejects_representation_encode_failure() {
     assert_eq!(token_embeddings, 0);
 }
 
-#[cfg(feature = "embed")]
+#[cfg(feature = "semantic")]
 struct FixedTestReranker;
+
+#[cfg(feature = "embed")]
+struct FailingTestReranker;
 
 #[cfg(feature = "embed")]
 struct FixedTestEmbedder;
@@ -251,7 +250,7 @@ impl memkeeper_embed::Embedder for FixedTestEmbedder {
     }
 }
 
-#[cfg(feature = "embed")]
+#[cfg(feature = "semantic")]
 impl memkeeper_embed::Reranker for FixedTestReranker {
     fn model_id(&self) -> &'static str {
         "fixed-production"
@@ -269,6 +268,111 @@ impl memkeeper_embed::Reranker for FixedTestReranker {
     }
 }
 
+#[cfg(feature = "embed")]
+impl memkeeper_embed::Reranker for FailingTestReranker {
+    fn model_id(&self) -> &'static str {
+        "failing-test-reranker"
+    }
+
+    fn rerank(
+        &mut self,
+        _query: &str,
+        _documents: &[&str],
+    ) -> memkeeper_embed::ProviderResult<Vec<f32>> {
+        Err(std::io::Error::other("injected rerank failure").into())
+    }
+}
+
+#[cfg(feature = "embed")]
+#[test]
+fn pack_request_time_rerank_failure_respects_require_mode() {
+    use std::sync::Mutex;
+
+    let directory = tempfile::tempdir().expect("temp directory");
+    let store = directory.path().join("store.sqlite");
+    memkeeper_store::init_store(&store).expect("init succeeds");
+    let memory = remember_request_from_json(
+        r#"{"content":"decision: keep the pack failure path explicit"}"#,
+    )
+    .expect("request parses");
+    memkeeper_store::remember_memory(&store, &memory).expect("memory stored");
+    let request = pack_request_from_json(
+        r#"{"title":"failure policy","queries":["pack failure path"],"max_memories":3,"max_chars":1000}"#,
+    )
+    .expect("pack parses");
+    let models = SemanticModels {
+        embed: None,
+        rerank: Some(Mutex::new(Box::new(FailingTestReranker))),
+        colbert: None,
+    };
+
+    let refused = super::execute_pack_request(&store, request.clone(), &models, true)
+        .expect_err("required rerank must fail closed");
+    assert!(matches!(refused, CliError::SemanticUnavailable(_)));
+
+    let degraded = super::execute_pack_request(&store, request, &models, false)
+        .expect("optional rerank may visibly degrade");
+    assert!(degraded.content.contains("pack failure path"));
+    assert!(
+        degraded.scores.is_empty(),
+        "retrieval scores must not masquerade as rerank confidence"
+    );
+}
+
+#[test]
+fn retrieval_only_fallback_preserves_the_unified_pool_order() {
+    use memkeeper_store::{AdmissionObservation, AdmissionSource, RerankPool, RerankPoolCandidate};
+
+    let request = pack_request_from_json(
+        r#"{"title":"fallback","queries":["where does Steve work?"],"max_memories":2,"max_chars":1000,"min_score":0.9}"#,
+    )
+    .expect("pack parses");
+    let pool = RerankPool {
+        cos_top: f64::NAN,
+        candidates: vec![
+            RerankPoolCandidate {
+                memory_id: "direct".to_string(),
+                content: "Steve profile seed.".to_string(),
+                activation: None,
+                admissions: vec![AdmissionObservation {
+                    source: AdmissionSource::Bm25,
+                    query_index: 0,
+                    source_rank: 1,
+                    seed_memory_id: None,
+                    activation: None,
+                    graph_route: None,
+                }],
+            },
+            RerankPoolCandidate {
+                memory_id: "graph".to_string(),
+                content: "Steve works at Acme Labs.".to_string(),
+                activation: Some(0.5),
+                admissions: vec![AdmissionObservation {
+                    source: AdmissionSource::Graph,
+                    query_index: 0,
+                    source_rank: 1,
+                    seed_memory_id: Some("direct".to_string()),
+                    activation: Some(0.5),
+                    graph_route: None,
+                }],
+            },
+        ],
+        graph_outcome: Some("active".to_string()),
+        observed: Vec::new(),
+        pool_width: 2,
+    };
+
+    let report = super::retrieval_only_pack_report(&request, pool.candidates);
+
+    assert_eq!(report.memory_ids, ["direct", "graph"]);
+    assert!(report
+        .content
+        .starts_with("## Retrieved Memory: fallback\n"));
+    assert!(report.content.contains("Acme Labs"));
+    assert!(report.scores.is_empty());
+    assert_eq!(report.top_score, None);
+}
+
 #[cfg(feature = "semantic")]
 #[test]
 fn standalone_rerank_reports_loaded_provider_model_id() {
@@ -278,7 +382,6 @@ fn standalone_rerank_reports_loaded_provider_model_id() {
         embed: None,
         rerank: Some(Mutex::new(Box::new(FixedTestReranker))),
         colbert: None,
-        rerank_shadow: None,
     };
     let request = super::RerankRequest {
         query: "alpha".to_string(),
@@ -291,426 +394,6 @@ fn standalone_rerank_reports_loaded_provider_model_id() {
         result.contains(r#""model_id":"fixed-production""#),
         "result: {result}"
     );
-}
-
-#[cfg(feature = "embed")]
-struct BlockingTestReranker {
-    started: std::sync::mpsc::SyncSender<()>,
-    release: std::sync::mpsc::Receiver<()>,
-}
-
-#[cfg(feature = "embed")]
-struct AlternateTestReranker;
-
-#[cfg(feature = "embed")]
-impl memkeeper_embed::Reranker for AlternateTestReranker {
-    fn model_id(&self) -> &'static str {
-        "alternate-shadow"
-    }
-
-    fn rerank(
-        &mut self,
-        _query: &str,
-        documents: &[&str],
-    ) -> memkeeper_embed::ProviderResult<Vec<f32>> {
-        Ok((0..documents.len())
-            .map(|index| if index == 0 { 0.1 } else { 0.8 })
-            .collect())
-    }
-}
-
-#[cfg(feature = "embed")]
-struct PanickingTestReranker {
-    triggered: std::sync::mpsc::SyncSender<()>,
-}
-
-#[cfg(feature = "embed")]
-struct ErrorTestReranker {
-    triggered: std::sync::mpsc::SyncSender<()>,
-}
-
-#[cfg(feature = "embed")]
-impl memkeeper_embed::Reranker for ErrorTestReranker {
-    fn model_id(&self) -> &'static str {
-        "error-shadow"
-    }
-
-    fn rerank(
-        &mut self,
-        _query: &str,
-        _documents: &[&str],
-    ) -> memkeeper_embed::ProviderResult<Vec<f32>> {
-        self.triggered.send(()).expect("test is listening");
-        Err(std::io::Error::other("intentional shadow inference error").into())
-    }
-}
-
-#[cfg(feature = "embed")]
-struct WrongShapeTestReranker {
-    triggered: std::sync::mpsc::SyncSender<()>,
-}
-
-#[cfg(feature = "embed")]
-impl memkeeper_embed::Reranker for WrongShapeTestReranker {
-    fn model_id(&self) -> &'static str {
-        "wrong-shape-shadow"
-    }
-
-    fn rerank(
-        &mut self,
-        _query: &str,
-        _documents: &[&str],
-    ) -> memkeeper_embed::ProviderResult<Vec<f32>> {
-        self.triggered.send(()).expect("test is listening");
-        Ok(Vec::new())
-    }
-}
-
-#[cfg(feature = "embed")]
-struct GateOnceTestReranker {
-    started: std::sync::mpsc::SyncSender<()>,
-    release: Option<std::sync::mpsc::Receiver<()>>,
-    scored: std::sync::mpsc::SyncSender<()>,
-}
-
-#[cfg(feature = "embed")]
-impl memkeeper_embed::Reranker for GateOnceTestReranker {
-    fn model_id(&self) -> &'static str {
-        "gate-once-shadow"
-    }
-
-    fn rerank(
-        &mut self,
-        _query: &str,
-        documents: &[&str],
-    ) -> memkeeper_embed::ProviderResult<Vec<f32>> {
-        if let Some(release) = self.release.take() {
-            self.started.send(()).expect("test is listening");
-            release.recv().expect("test releases shadow");
-            self.scored.send(()).expect("test observes scoring");
-        }
-        Ok(vec![0.5; documents.len()])
-    }
-}
-
-#[cfg(feature = "embed")]
-impl memkeeper_embed::Reranker for PanickingTestReranker {
-    fn model_id(&self) -> &'static str {
-        "panicking-shadow"
-    }
-
-    fn rerank(
-        &mut self,
-        _query: &str,
-        _documents: &[&str],
-    ) -> memkeeper_embed::ProviderResult<Vec<f32>> {
-        self.triggered.send(()).expect("test is listening");
-        panic!("intentional shadow test panic");
-    }
-}
-
-#[cfg(feature = "embed")]
-impl memkeeper_embed::Reranker for BlockingTestReranker {
-    fn model_id(&self) -> &'static str {
-        "blocking-shadow"
-    }
-
-    fn rerank(
-        &mut self,
-        _query: &str,
-        documents: &[&str],
-    ) -> memkeeper_embed::ProviderResult<Vec<f32>> {
-        self.started.send(()).expect("test is listening");
-        self.release.recv().expect("test releases shadow");
-        Ok(vec![0.5; documents.len()])
-    }
-}
-
-#[cfg(feature = "embed")]
-#[test]
-fn served_pack_does_not_wait_for_shadow_reranking() {
-    use std::sync::{mpsc, Mutex};
-    use std::time::Duration;
-
-    let dir = tempfile::tempdir().expect("temp dir");
-    let store = dir.path().join("store.sqlite");
-    memkeeper_store::init_store(&store).expect("store initializes");
-    for content in ["alpha memory", "beta memory"] {
-        let request =
-            remember_request_from_json(&serde_json::json!({"content": content}).to_string())
-                .expect("remember request parses");
-        memkeeper_store::remember_memory(&store, &request).expect("memory is stored");
-    }
-
-    let (started_tx, started_rx) = mpsc::sync_channel(1);
-    let (release_tx, release_rx) = mpsc::sync_channel(1);
-    let models = SemanticModels {
-        embed: None,
-        rerank: Some(Mutex::new(Box::new(FixedTestReranker))),
-        colbert: None,
-        rerank_shadow: super::ShadowRerankWorker::start(Box::new(BlockingTestReranker {
-            started: started_tx,
-            release: release_rx,
-        })),
-    };
-    let request = serde_json::json!({
-        "request_id": "shadow-async",
-        "command": "pack",
-        "store_path": store,
-        "payload": {
-            "title": "shadow isolation",
-            "queries": ["memory"],
-            "max_memories": 2,
-            "max_chars": 1000,
-            "rerank_candidates": 2
-        }
-    })
-    .to_string();
-    let (response_tx, response_rx) = mpsc::sync_channel(1);
-    let handle = std::thread::spawn(move || {
-        let response = serve_line_response(&request, std::time::Instant::now(), &models);
-        response_tx.send(response).expect("test receives response");
-    });
-
-    started_rx
-        .recv_timeout(Duration::from_secs(5))
-        .expect("shadow scoring starts");
-    let response_before_release = response_rx.recv_timeout(Duration::from_millis(250));
-    release_tx.send(()).expect("release shadow scorer");
-    handle.join().expect("serve request does not panic");
-
-    let response = response_before_release.expect("production response must not wait for shadow");
-    assert!(response.contains("\"ok\":true"), "response: {response}");
-}
-
-#[cfg(feature = "embed")]
-#[test]
-fn shadow_enabled_pack_preserves_output_and_persists_comparison() {
-    use std::sync::Mutex;
-    use std::time::Duration;
-
-    let dir = tempfile::tempdir().expect("temp dir");
-    let store = dir.path().join("store.sqlite");
-    memkeeper_store::init_store(&store).expect("store initializes");
-    for content in ["alpha memory", "beta memory"] {
-        let request =
-            remember_request_from_json(&serde_json::json!({"content": content}).to_string())
-                .expect("remember request parses");
-        memkeeper_store::remember_memory(&store, &request).expect("memory is stored");
-    }
-    let request = serde_json::json!({
-        "request_id": "shadow-output",
-        "command": "pack",
-        "store_path": store,
-        "payload": {
-            "title": "shadow comparison",
-            "queries": ["memory"],
-            "max_memories": 2,
-            "max_chars": 1000,
-            "rerank_candidates": 2
-        }
-    })
-    .to_string();
-    let production_only = SemanticModels {
-        embed: None,
-        rerank: Some(Mutex::new(Box::new(FixedTestReranker))),
-        colbert: None,
-        rerank_shadow: None,
-    };
-    let baseline = serve_line_response(&request, std::time::Instant::now(), &production_only);
-
-    let with_shadow = SemanticModels {
-        embed: None,
-        rerank: Some(Mutex::new(Box::new(FixedTestReranker))),
-        colbert: None,
-        rerank_shadow: super::ShadowRerankWorker::start(Box::new(AlternateTestReranker)),
-    };
-    let shadowed = serve_line_response(&request, std::time::Instant::now(), &with_shadow);
-
-    let baseline_json: serde_json::Value = serde_json::from_str(&baseline).expect("baseline JSON");
-    let shadowed_json: serde_json::Value = serde_json::from_str(&shadowed).expect("shadowed JSON");
-    let baseline_pack = serde_json::to_string(&baseline_json["result"]["pack"]).unwrap();
-    let shadowed_pack = serde_json::to_string(&shadowed_json["result"]["pack"]).unwrap();
-    assert_eq!(baseline_pack.as_bytes(), shadowed_pack.as_bytes());
-
-    let deadline = std::time::Instant::now() + Duration::from_secs(3);
-    let persisted = loop {
-        let rows = rusqlite::Connection::open(&store)
-            .and_then(|connection| {
-                connection.query_row("SELECT COUNT(*) FROM reranker_shadow_events", [], |row| {
-                    row.get::<_, i64>(0)
-                })
-            })
-            .unwrap_or(0);
-        if rows == 2 {
-            break true;
-        }
-        if std::time::Instant::now() >= deadline {
-            break false;
-        }
-        std::thread::sleep(Duration::from_millis(20));
-    };
-    assert!(
-        persisted,
-        "shadow comparison should be persisted asynchronously"
-    );
-}
-
-#[cfg(feature = "embed")]
-#[test]
-fn served_pack_survives_shadow_panic() {
-    use std::sync::{mpsc, Mutex};
-    use std::time::Duration;
-
-    let dir = tempfile::tempdir().expect("temp dir");
-    let store = dir.path().join("store.sqlite");
-    memkeeper_store::init_store(&store).expect("store initializes");
-    let remember = remember_request_from_json(r#"{"content":"alpha memory"}"#)
-        .expect("remember request parses");
-    memkeeper_store::remember_memory(&store, &remember).expect("memory is stored");
-    let (triggered_tx, triggered_rx) = mpsc::sync_channel(1);
-    let models = SemanticModels {
-        embed: None,
-        rerank: Some(Mutex::new(Box::new(FixedTestReranker))),
-        colbert: None,
-        rerank_shadow: super::ShadowRerankWorker::start(Box::new(PanickingTestReranker {
-            triggered: triggered_tx,
-        })),
-    };
-    let request = serde_json::json!({
-        "request_id": "shadow-panic",
-        "command": "pack",
-        "store_path": store,
-        "payload": {
-            "title": "shadow panic isolation",
-            "queries": ["alpha"],
-            "max_memories": 1,
-            "max_chars": 1000,
-            "rerank_candidates": 1
-        }
-    })
-    .to_string();
-
-    let response = serve_line_response(&request, std::time::Instant::now(), &models);
-    assert!(response.contains("\"ok\":true"), "response: {response}");
-    triggered_rx
-        .recv_timeout(Duration::from_secs(3))
-        .expect("shadow panic path executes");
-}
-
-#[cfg(feature = "embed")]
-#[test]
-fn served_pack_survives_shadow_error_and_score_shape_mismatch() {
-    use std::sync::{mpsc, Mutex};
-    use std::time::Duration;
-
-    let dir = tempfile::tempdir().expect("temp dir");
-    let store = dir.path().join("store.sqlite");
-    memkeeper_store::init_store(&store).expect("store initializes");
-    let remember = remember_request_from_json(r#"{"content":"alpha memory"}"#)
-        .expect("remember request parses");
-    memkeeper_store::remember_memory(&store, &remember).expect("memory is stored");
-    let request = serde_json::json!({
-        "request_id": "shadow-failure",
-        "command": "pack",
-        "store_path": store,
-        "payload": {"title":"failure isolation","queries":["alpha"],"max_memories":1,"max_chars":1000,"rerank_candidates":1}
-    })
-    .to_string();
-
-    for shadow in ["error", "shape"] {
-        let (triggered_tx, triggered_rx) = mpsc::sync_channel(1);
-        let reranker: Box<dyn memkeeper_embed::Reranker> = if shadow == "error" {
-            Box::new(ErrorTestReranker {
-                triggered: triggered_tx,
-            })
-        } else {
-            Box::new(WrongShapeTestReranker {
-                triggered: triggered_tx,
-            })
-        };
-        let models = SemanticModels {
-            embed: None,
-            rerank: Some(Mutex::new(Box::new(FixedTestReranker))),
-            colbert: None,
-            rerank_shadow: super::ShadowRerankWorker::start(reranker),
-        };
-        let response = serve_line_response(&request, std::time::Instant::now(), &models);
-        assert!(response.contains("\"ok\":true"), "response: {response}");
-        triggered_rx
-            .recv_timeout(Duration::from_secs(3))
-            .expect("shadow failure path executes");
-    }
-}
-
-#[cfg(feature = "embed")]
-#[test]
-fn served_pack_stays_nonblocking_when_shadow_queue_and_store_are_busy() {
-    use rusqlite::Connection;
-    use std::sync::{mpsc, Mutex};
-    use std::time::Duration;
-
-    let dir = tempfile::tempdir().expect("temp dir");
-    let store = dir.path().join("store.sqlite");
-    memkeeper_store::init_store(&store).expect("store initializes");
-    let remember = remember_request_from_json(r#"{"content":"alpha memory"}"#)
-        .expect("remember request parses");
-    memkeeper_store::remember_memory(&store, &remember).expect("memory is stored");
-    let writer = Connection::open(&store).expect("open competing writer");
-    writer
-        .execute_batch("BEGIN IMMEDIATE")
-        .expect("hold the SQLite write lock");
-
-    let (started_tx, started_rx) = mpsc::sync_channel(1);
-    let (release_tx, release_rx) = mpsc::sync_channel(1);
-    let (scored_tx, scored_rx) = mpsc::sync_channel(1);
-    let models = SemanticModels {
-        embed: None,
-        rerank: Some(Mutex::new(Box::new(FixedTestReranker))),
-        colbert: None,
-        rerank_shadow: super::ShadowRerankWorker::start(Box::new(GateOnceTestReranker {
-            started: started_tx,
-            release: Some(release_rx),
-            scored: scored_tx,
-        })),
-    };
-    let request = serde_json::json!({
-        "request_id": "shadow-backpressure",
-        "command": "pack",
-        "store_path": store,
-        "payload": {"title":"backpressure","queries":["alpha"],"max_memories":1,"max_chars":1000,"rerank_candidates":1}
-    })
-    .to_string();
-
-    let first = serve_line_response(&request, std::time::Instant::now(), &models);
-    assert!(first.contains("\"ok\":true"));
-    started_rx
-        .recv_timeout(Duration::from_secs(3))
-        .expect("worker holds the first job");
-    for _ in 0..=super::SHADOW_RERANK_QUEUE_CAPACITY {
-        let started = std::time::Instant::now();
-        let response = serve_line_response(&request, std::time::Instant::now(), &models);
-        assert!(response.contains("\"ok\":true"));
-        assert!(
-            started.elapsed() < Duration::from_millis(500),
-            "full shadow queue must not delay production"
-        );
-    }
-    release_tx.send(()).expect("release shadow inference");
-    scored_rx
-        .recv_timeout(Duration::from_secs(3))
-        .expect("worker reaches the blocked telemetry write");
-    std::thread::sleep(Duration::from_millis(50));
-    let started = std::time::Instant::now();
-    let response = serve_line_response(&request, std::time::Instant::now(), &models);
-    assert!(response.contains("\"ok\":true"));
-    assert!(
-        started.elapsed() < Duration::from_millis(500),
-        "SQLite contention in telemetry must not delay production"
-    );
-    writer
-        .execute_batch("ROLLBACK")
-        .expect("release write lock");
 }
 
 #[test]
@@ -1389,7 +1072,7 @@ fn batch_search_json_rejects_unknown_fields() {
 #[test]
 fn pack_json_and_flags_parse() {
     let request = pack_request_from_json(
-        r#"{"title":"impl","queries":["sqlite","search"],"filters":{"kinds":["decision"]},"max_memories":4,"max_chars":1000,"format":"markdown","query_expansion":true,"thread_expansion":true}"#,
+        r#"{"title":"impl","queries":["sqlite","search"],"filters":{"kinds":["decision"]},"max_memories":4,"max_chars":1000,"format":"markdown"}"#,
     )
     .expect("parse succeeds");
     assert_eq!(request.title, "impl");
@@ -1400,83 +1083,78 @@ fn pack_json_and_flags_parse() {
     assert_eq!(request.filters.kinds, vec!["decision".to_string()]);
     assert_eq!(request.max_memories, 4);
     assert_eq!(request.max_chars, 1000);
-    let expansion = pack_expansion_options_from_json(
-        r#"{"title":"impl","queries":["sqlite"],"query_expansion":true,"thread_expansion":true,"max_query_variants":5,"max_thread_seeds":2,"max_thread_neighbors":4}"#,
-    )
-    .expect("expansion parses");
-    assert!(expansion.query_expansion);
-    assert!(expansion.thread_expansion);
-    assert_eq!(expansion.max_query_variants, 5);
-    assert_eq!(expansion.max_thread_seeds, 2);
-    assert_eq!(expansion.max_thread_neighbors, 4);
-
     let args = [
         "--store".to_string(),
         "store.sqlite".to_string(),
         "--json".to_string(),
-        r#"{"title":"impl","queries":["sqlite"],"query_expansion":true}"#.to_string(),
+        r#"{"title":"impl","queries":["sqlite"]}"#.to_string(),
     ];
     let parsed = parse_pack_args(&args).expect("parse flags succeeds");
     assert_eq!(parsed.request.title, "impl");
     assert_eq!(parsed.request.max_memories, 10);
-    assert!(parsed.expansion.query_expansion);
 }
 
 #[test]
-fn graph_within_entity_maxsim_parses_defaults_and_is_documented() {
-    let enabled = pack_expansion_options_from_json(
-        r#"{"graph_expansion":true,"graph_within_entity_maxsim":true}"#,
-    )
-    .expect("experimental graph selector parses");
-    assert_eq!(
-        enabled.graph_within_entity_selection,
-        memkeeper_store::GraphWithinEntitySelection::Maxsim
-    );
+fn evidence_join_is_the_only_normal_pack_path() {
+    let expansion = evidence_join_options_from_json(r"{}").expect("default parses");
+    assert_eq!(expansion.max_graph_seeds, 4);
+    assert_eq!(expansion.max_graph_neighbors, 4);
 
-    let defaulted = pack_expansion_options_from_json("{}").expect("defaults parse");
-    assert_eq!(
-        defaulted.graph_within_entity_selection,
-        memkeeper_store::GraphWithinEntitySelection::Recency
-    );
+    for retired_field in [
+        r#"{"title":"context","queries":["where does Steve work?"],"cosine_gate":0.62}"#,
+        r#"{"title":"context","queries":["where does Steve work?"],"query_expansion":true}"#,
+        r#"{"title":"context","queries":["where does Steve work?"],"thread_expansion":true}"#,
+        r#"{"title":"context","queries":["where does Steve work?"],"max_query_variants":8}"#,
+        r#"{"title":"context","queries":["where does Steve work?"],"max_thread_seeds":3}"#,
+        r#"{"title":"context","queries":["where does Steve work?"],"max_thread_neighbors":3}"#,
+        r#"{"title":"context","queries":["where does Steve work?"],"max_graph_seeds":4}"#,
+        r#"{"title":"context","queries":["where does Steve work?"],"max_graph_neighbors":4}"#,
+        r#"{"title":"context","queries":["where does Steve work?"],"graph_decay":0.5}"#,
+        r#"{"title":"context","queries":["where does Steve work?"],"graph_expansion":false}"#,
+        r#"{"title":"context","queries":["where does Steve work?"],"graph_strategy":"associative_v0"}"#,
+        r#"{"title":"context","queries":["where does Steve work?"],"graph_rerank_slots":2}"#,
+        r#"{"title":"context","queries":["where does Steve work?"],"graph_activation_floor":0.1}"#,
+    ] {
+        assert!(
+            pack_request_from_json(retired_field).is_err(),
+            "retired retrieval controls are no longer part of pack: {retired_field}"
+        );
+    }
 
     for command in ["pack", "pool-trace"] {
-        let schema = crate::schema::COMMAND_SCHEMAS
+        let schema = crate::schema::schema_for(command).expect("schema");
+        assert!(!schema
+            .fields
             .iter()
-            .find(|schema| schema.command == command)
-            .expect("command schema exists");
-        assert!(
-            schema
-                .fields
-                .iter()
-                .any(|field| field.name == "graph_within_entity_maxsim"),
-            "{command} documents the request-only selector"
-        );
+            .any(|field| matches!(field.name, "graph_expansion" | "graph_strategy")));
     }
 
     let pack_tool = crate::mcp::tool_definitions()
         .into_iter()
         .find(|tool| tool["name"] == "pack")
         .expect("pack tool exists");
-    assert!(
-        pack_tool["inputSchema"]["properties"]
-            .get("graph_within_entity_maxsim")
-            .is_some(),
-        "MCP pack schema exposes the selector"
-    );
-    let args = serde_json::Map::from_iter([
-        ("queries".to_string(), serde_json::json!(["graph recall"])),
-        (
-            "graph_within_entity_maxsim".to_string(),
-            serde_json::json!(true),
-        ),
-    ]);
-    let (_, payload) = crate::mcp::build_serve_call("pack", &args).expect("MCP maps pack");
-    assert_eq!(
-        pack_expansion_options_from_json(&payload)
-            .expect("mapped payload parses")
-            .graph_within_entity_selection,
-        memkeeper_store::GraphWithinEntitySelection::Maxsim
-    );
+    assert!(pack_tool["inputSchema"]["properties"]
+        .get("graph_expansion")
+        .is_none());
+    assert!(pack_tool["inputSchema"]["properties"]
+        .get("graph_strategy")
+        .is_none());
+
+    let trace_json = r#"{"title":"trace","queries":["where does Steve work?"],"max_graph_seeds":2,"max_graph_neighbors":3,"graph_decay":0.4}"#;
+    pool_trace_pack_request_from_json(trace_json).expect("trace accepts diagnostic graph controls");
+    let trace_options = evidence_join_options_from_json(trace_json).expect("trace options parse");
+    assert_eq!(trace_options.max_graph_seeds, 2);
+    assert_eq!(trace_options.max_graph_neighbors, 3);
+    assert!((trace_options.graph_decay - 0.4).abs() < f64::EPSILON);
+
+    let trace_args = [
+        "--store".to_string(),
+        "store.sqlite".to_string(),
+        "--json".to_string(),
+        trace_json.to_string(),
+    ];
+    let parsed = parse_pool_trace_args(&trace_args).expect("trace flags parse");
+    assert_eq!(parsed.expansion, trace_options);
 }
 
 #[test]
@@ -1784,17 +1462,6 @@ fn parse_remember_requires_request_json() {
 }
 
 #[test]
-fn max_combine_rerank_scores_takes_per_candidate_max() {
-    use super::max_combine_rerank_scores;
-    // Candidates 0 and 2 have summaries; candidate 0's summary wins, 2's loses.
-    let combined = max_combine_rerank_scores(&[0.2, 0.9, 0.5], &[0.8, 0.1], &[0, 2]);
-    assert_eq!(combined, vec![0.8, 0.9, 0.5]);
-    // No summaries: content scores pass through untouched.
-    let untouched = max_combine_rerank_scores(&[0.3, 0.4], &[], &[]);
-    assert_eq!(untouched, vec![0.3, 0.4]);
-}
-
-#[test]
 fn default_build_includes_semantic() {
     // Guard against the silent-FTS footgun: a plain `cargo build`/`cargo test`
     // must produce a semantic binary. If `semantic` is ever dropped from the
@@ -1890,7 +1557,7 @@ fn parse_payload_for(command: &str, json: &str) -> Result<(), CliError> {
         "memory-list" => memory_list_request_from_json(json).map(|_| ()),
         "batch-search" => batch_search_request_from_json(json).map(|_| ()),
         "pack" => pack_request_from_json(json).map(|_| ()),
-        "pool-trace" => pack_request_from_json(json).map(|_| ()),
+        "pool-trace" => pool_trace_pack_request_from_json(json).map(|_| ()),
         "get" => get_request_from_json(json).map(|_| ()),
         "forget" => forget_request_from_json(json).map(|_| ()),
         "verify" => verify_request_from_json(json).map(|_| ()),
@@ -1904,6 +1571,7 @@ fn parse_payload_for(command: &str, json: &str) -> Result<(), CliError> {
         "candidate-list" => candidate_list_request_from_json(json).map(|_| ()),
         "candidate-approve" => candidate_approve_request_from_json(json).map(|_| ()),
         "candidate-reject" => candidate_reject_request_from_json(json).map(|_| ()),
+        "candidate-quarantine" => candidate_quarantine_request_from_json(json).map(|_| ()),
         "ingest" => ingest_request_from_json(json).map(|_| ()),
         "document-search" => document_search_request_from_json(json).map(|_| ()),
         "document-get" => document_get_request_from_json(json).map(|_| ()),
@@ -2116,19 +1784,43 @@ fn pool_trace_result_is_id_only_and_preserves_source_observations() {
     let pool = memkeeper_store::RerankPool {
         cos_top: 0.9,
         candidates: Vec::new(),
+        graph_outcome: Some("active".to_string()),
         observed: vec![memkeeper_store::RerankPoolObservedCandidate {
             memory_id: "mem-1".to_string(),
             merged_rank: 1,
             admitted: true,
             dropped_at: None,
             graph_allocation_rank: Some(2),
-            admissions: vec![memkeeper_store::AdmissionObservation {
-                source: memkeeper_store::AdmissionSource::Ann,
-                query_index: 0,
-                source_rank: 1,
-                seed_memory_id: None,
-                activation: None,
-            }],
+            admissions: vec![
+                memkeeper_store::AdmissionObservation {
+                    source: memkeeper_store::AdmissionSource::Ann,
+                    query_index: 0,
+                    source_rank: 1,
+                    seed_memory_id: None,
+                    activation: None,
+                    graph_route: None,
+                },
+                memkeeper_store::AdmissionObservation {
+                    source: memkeeper_store::AdmissionSource::Graph,
+                    query_index: 0,
+                    source_rank: 1,
+                    seed_memory_id: None,
+                    activation: Some(0.75),
+                    graph_route: Some(memkeeper_store::GraphRouteObservation {
+                        seed_source: memkeeper_store::GraphSeedSource::Entity,
+                        seed_memory_id: None,
+                        seed_entity_id: "entity-steve".to_string(),
+                        matched_query_index: Some(0),
+                        matched_query_span: Some("steve".to_string()),
+                        hop_depth: 1,
+                        relationship_ids: vec!["rel-1".to_string()],
+                        predicate_names: vec!["works_at".to_string()],
+                        traversal_directions: vec!["forward".to_string()],
+                        evidence_class: memkeeper_store::GraphEvidenceClass::EndpointSupport,
+                        route_outcome: "active".to_string(),
+                    }),
+                },
+            ],
         }],
         pool_width: 16,
     };
@@ -2149,6 +1841,14 @@ fn pool_trace_result_is_id_only_and_preserves_source_observations() {
     );
     assert!(trace.get("candidates").is_some());
     assert!(json.contains("\"memory_id\":\"mem-1\""));
+    assert!(json.contains("\"graph_outcome\":\"active\""));
+    assert!(json.contains("\"seed_source\":\"entity\""));
+    assert!(json.contains("\"seed_entity_id\":\"entity-steve\""));
+    assert!(json.contains("\"matched_query_span\":\"steve\""));
+    assert!(json.contains("\"relationship_ids\":[\"rel-1\"]"));
+    assert!(json.contains("\"evidence_class\":\"endpoint_support\""));
+    assert!(!json.contains("source_episode"));
+    assert!(!json.contains("metadata_json"));
     assert!(json.contains("\"source\":\"ann\""));
     assert!(json.contains("\"graph_allocation_rank\":2"));
     assert!(!json.contains("content"));
@@ -2173,7 +1873,6 @@ fn served_pool_trace_uses_exact_hybrid_pool_without_returning_content() {
         embed: Some(Mutex::new(Box::new(FixedTestEmbedder))),
         rerank: None,
         colbert: None,
-        rerank_shadow: None,
     };
     let request = serde_json::json!({
         "request_id": "pool-trace-test",

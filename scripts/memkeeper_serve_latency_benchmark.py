@@ -25,6 +25,8 @@ import time
 from pathlib import Path
 from typing import Any
 
+import harness_lib
+
 WORKSPACE = Path(__file__).resolve().parents[3]
 DEFAULT_BIN = WORKSPACE / "memory" / "memkeeper" / "target" / "release" / "memkeeper"
 
@@ -194,6 +196,8 @@ def main() -> int:
     parser.add_argument("--runs", type=int, default=20)
     parser.add_argument("--warmup", type=int, default=3)
     parser.add_argument("--json", action="store_true")
+    parser.add_argument("--results", type=Path, default=None, help="JSONL checkpoint file (one record per arm)")
+    parser.add_argument("--resume", action="store_true", help="skip arms already recorded in --results")
     args = parser.parse_args()
 
     env = os.environ.copy()
@@ -215,11 +219,39 @@ def main() -> int:
         "workspace memory operations",
     ]
 
-    with tempfile.TemporaryDirectory(prefix="memkeeper_serve_latency_") as tmpdir:
-        store = Path(tmpdir) / "store.sqlite"
-        seed_store(args.binary, store, env, args.memories)
-        cli_latencies = measure_cli(args.binary, store, env, queries, args.runs, args.rerank)
-        serve_latencies = measure_serve(args.binary, store, env, queries, args.runs, args.warmup, args.rerank)
+    done: set[str] = set()
+    prior: dict[str, dict] = {}
+    if args.results is not None:
+        if args.results.exists() and not args.resume:
+            raise SystemExit(
+                f"results file exists; pass --resume to continue it or use a fresh --results path: {args.results}"
+            )
+        if args.resume:
+            prior = harness_lib.latest_records(harness_lib.iter_jsonl_records(args.results), key="arm")
+            done = {arm for arm, record in prior.items() if record.get("status") == "ok"}
+    elif args.resume:
+        raise SystemExit("--resume requires --results")
+
+    cli_latencies = prior["cli"]["latencies_ms"] if "cli" in done else None
+    serve_latencies = prior["serve"]["latencies_ms"] if "serve" in done else None
+
+    if cli_latencies is None or serve_latencies is None:
+        with tempfile.TemporaryDirectory(prefix="memkeeper_serve_latency_") as tmpdir:
+            store = Path(tmpdir) / "store.sqlite"
+            seed_store(args.binary, store, env, args.memories)
+            handle = args.results.open("a", encoding="utf-8") if args.results else None
+            try:
+                if cli_latencies is None:
+                    cli_latencies = measure_cli(args.binary, store, env, queries, args.runs, args.rerank)
+                    if handle is not None:
+                        harness_lib.append_result(handle, {"arm": "cli", "status": "ok", "latencies_ms": cli_latencies})
+                if serve_latencies is None:
+                    serve_latencies = measure_serve(args.binary, store, env, queries, args.runs, args.warmup, args.rerank)
+                    if handle is not None:
+                        harness_lib.append_result(handle, {"arm": "serve", "status": "ok", "latencies_ms": serve_latencies})
+            finally:
+                if handle is not None:
+                    handle.close()
 
     result = {
         "binary": str(args.binary),

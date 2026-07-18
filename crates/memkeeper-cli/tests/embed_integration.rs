@@ -2,10 +2,8 @@
 #![cfg(feature = "semantic")]
 #![allow(missing_docs)]
 
-use std::io::{BufRead, Write};
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
-use std::time::{Duration, Instant};
+use std::process::Command;
 
 fn workspace_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -22,16 +20,294 @@ fn memkeeper_bin() -> PathBuf {
         .unwrap_or_else(|| workspace_root().join("target/debug/memkeeper"))
 }
 
+fn model_root() -> PathBuf {
+    std::env::var_os("MEMKEEPER_TEST_MODEL_ROOT")
+        .map_or_else(|| workspace_root().join("models"), PathBuf::from)
+}
+
 fn embed_model_dir() -> PathBuf {
-    workspace_root().join("models/mxbai-embed-large")
+    model_root().join("mxbai-embed-large")
 }
 
 fn rerank_model_dir() -> PathBuf {
-    workspace_root().join("models/mxbai-rerank-base")
+    model_root().join("mxbai-xsmall-int8")
 }
 
-fn shadow_rerank_model_dir() -> PathBuf {
-    workspace_root().join("models/mxbai-xsmall-int8")
+fn colbert_model_dir() -> PathBuf {
+    model_root().join("colbert-small")
+}
+
+fn semantic_command() -> Command {
+    let mut command = Command::new(memkeeper_bin());
+    command
+        .env_remove("MEMKEEPER_STORE")
+        .env_remove("MEMKEEPER_SOCK")
+        .env("MEMKEEPER_EMBED_MODEL_DIR", embed_model_dir())
+        .env("MEMKEEPER_RERANK_MODEL_DIR", rerank_model_dir())
+        .env("MEMKEEPER_COLBERT_MODEL_DIR", colbert_model_dir())
+        .env("MEMKEEPER_LATE_INTERACTION", "1")
+        .env("MEMKEEPER_REQUIRE_SEMANTIC", "1")
+        .env("MEMKEEPER_REQUIRE_RERANK", "1");
+    command
+}
+
+fn assert_evidence_join_models_exist() {
+    for path in [
+        embed_model_dir().join("model.onnx"),
+        rerank_model_dir().join("model.onnx"),
+        colbert_model_dir().join("model.onnx"),
+    ] {
+        assert!(
+            path.is_file(),
+            "required model artifact missing: {}",
+            path.display()
+        );
+    }
+}
+
+fn run_json_command(
+    store: &std::path::Path,
+    command: &str,
+    payload: &serde_json::Value,
+) -> serde_json::Value {
+    let output = semantic_command()
+        .args([
+            command,
+            "--store",
+            store.to_str().unwrap(),
+            "--json",
+            &payload.to_string(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{command} failed:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice(&output.stdout).unwrap_or_else(|error| {
+        panic!(
+            "invalid JSON command output: {error}\nstdout: {}",
+            String::from_utf8_lossy(&output.stdout)
+        )
+    })
+}
+
+fn remember_semantic(store: &std::path::Path, content: &str, entity_key: Option<&str>) -> String {
+    let mut payload = serde_json::json!({
+        "content": content,
+        "silo": "durable",
+        "scope": "workspace",
+        "kind": "fact"
+    });
+    if let Some(entity_key) = entity_key {
+        payload["entity_key"] = serde_json::json!(entity_key);
+    }
+    run_json_command(store, "remember", &payload)["result"]["memory"]["id"]
+        .as_str()
+        .expect("remembered memory id")
+        .to_string()
+}
+
+fn upsert_test_entity(store: &std::path::Path, entity_key: &str, canonical_name: &str) {
+    run_json_command(
+        store,
+        "entity-upsert",
+        &serde_json::json!({
+            "entity_key": entity_key,
+            "canonical_name": canonical_name
+        }),
+    );
+}
+
+fn upsert_test_route(
+    store: &std::path::Path,
+    subject_key: &str,
+    predicate: &str,
+    object_key: &str,
+    subject_memory_id: &str,
+    object_memory_id: &str,
+) {
+    run_json_command(
+        store,
+        "relationship-upsert",
+        &serde_json::json!({
+            "subject_entity_key": subject_key,
+            "relation_type": predicate,
+            "object_entity_key": object_key,
+            "memory_id": subject_memory_id,
+            "metadata_json": serde_json::json!({
+                "routing": true,
+                "origin": "adjudicated_capture",
+                "routing_contract": "evidence_join_v1",
+                "routing_contract_version": 1,
+                "object_memory_id": object_memory_id
+            }).to_string()
+        }),
+    );
+}
+
+fn trace_memory<'a>(
+    trace: &'a serde_json::Value,
+    memory_id: &str,
+) -> Option<&'a serde_json::Value> {
+    trace["result"]["pool_trace"]["candidates"]
+        .as_array()?
+        .iter()
+        .find(|candidate| candidate["memory_id"] == memory_id)
+}
+
+#[test]
+#[ignore = "requires the production embed, ColBERT, and INT8 reranker artifacts"]
+fn evidence_graph_join_recovers_exact_entity_seed() {
+    assert_evidence_join_models_exist();
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join("store.sqlite");
+    let init = semantic_command()
+        .args(["init", "--store", store.to_str().unwrap(), "--json"])
+        .output()
+        .unwrap();
+    assert!(init.status.success(), "init failed: {init:?}");
+
+    upsert_test_entity(&store, "person:steve", "Steve");
+    upsert_test_entity(&store, "org:acme", "Acme Labs");
+    let subject_id = remember_semantic(
+        &store,
+        "Steve profile identity record.",
+        Some("person:steve"),
+    );
+    let object_id = remember_semantic(
+        &store,
+        "ZXQ-771 canonical organization endpoint evidence.",
+        Some("org:acme"),
+    );
+    for content in [
+        "Where a remote employee completes payroll forms.",
+        "How an architect chooses a productive workplace.",
+        "Employment policy and office location guidance.",
+        "A directory of companies and job titles.",
+    ] {
+        remember_semantic(&store, content, None);
+    }
+    upsert_test_route(
+        &store,
+        "person:steve",
+        "works_at",
+        "org:acme",
+        &subject_id,
+        &object_id,
+    );
+
+    let base_payload = serde_json::json!({
+        "title": "exact entity integration",
+        "queries": ["Where does Steve work?"],
+        "max_memories": 2,
+        "max_chars": 2000,
+        "rerank_candidates": 2
+    });
+    let treatment = run_json_command(&store, "pool-trace", &base_payload);
+    let target = trace_memory(&treatment, &object_id).expect("entity route recovers endpoint");
+    assert!(target["sources"].as_array().is_some_and(|sources| {
+        sources.iter().any(|source| {
+            source["graph_route"]["seed_source"] == "entity"
+                && source["graph_route"]["matched_query_span"] == "steve"
+                && source["graph_route"]["route_outcome"] == "active"
+        })
+    }));
+
+    let pack = run_json_command(&store, "pack", &base_payload);
+    assert!(
+        pack["result"]["pack"]["content"]
+            .as_str()
+            .unwrap_or("")
+            .contains("ZXQ-771"),
+        "shipping unified rerank path must land endpoint: {pack}"
+    );
+}
+
+#[test]
+#[ignore = "requires the production embed, ColBERT, and INT8 reranker artifacts"]
+fn evidence_graph_join_recovers_semantic_bridge_two_hop() {
+    assert_evidence_join_models_exist();
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join("store.sqlite");
+    let init = semantic_command()
+        .args(["init", "--store", store.to_str().unwrap(), "--json"])
+        .output()
+        .unwrap();
+    assert!(init.status.success(), "init failed: {init:?}");
+
+    for (key, name) in [
+        ("node:alpha", "Alpha Node"),
+        ("node:beta", "Beta Node"),
+        ("node:gamma", "Gamma Node"),
+    ] {
+        upsert_test_entity(&store, key, name);
+    }
+    let alpha_id = remember_semantic(
+        &store,
+        "orchard deployment anchor for the production rollout",
+        Some("node:alpha"),
+    );
+    let beta_id = remember_semantic(
+        &store,
+        "intermediate cobalt bridge support",
+        Some("node:beta"),
+    );
+    let gamma_id = remember_semantic(
+        &store,
+        "CAPYBARA-992 terminal evidence record",
+        Some("node:gamma"),
+    );
+    for index in 0..8 {
+        remember_semantic(
+            &store,
+            &format!("orchard deployment anchor checklist distractor {index}"),
+            None,
+        );
+    }
+    upsert_test_route(
+        &store,
+        "node:alpha",
+        "routes_to",
+        "node:beta",
+        &alpha_id,
+        &beta_id,
+    );
+    upsert_test_route(
+        &store,
+        "node:beta",
+        "supports",
+        "node:gamma",
+        &beta_id,
+        &gamma_id,
+    );
+
+    let base_payload = serde_json::json!({
+        "title": "semantic bridge integration",
+        "queries": ["orchard deployment anchor"],
+        "max_memories": 2,
+        "max_chars": 2000,
+        "rerank_candidates": 2
+    });
+    let treatment = run_json_command(&store, "pool-trace", &base_payload);
+    assert!(
+        trace_memory(&treatment, &alpha_id).is_some(),
+        "real model must supply the semantic memory seed: {treatment}"
+    );
+    let target = trace_memory(&treatment, &gamma_id).expect("two-hop endpoint recovered");
+    assert!(target["sources"].as_array().is_some_and(|sources| {
+        sources.iter().any(|source| {
+            source["graph_route"]["seed_source"] == "memory"
+                && source["graph_route"]["hop_depth"] == 2
+                && source["graph_route"]["route_outcome"] == "active"
+        })
+    }));
+
+    // The endpoint deliberately shares no query text. This case proves that a
+    // real semantic seed can recover a two-hop graph candidate into the unified
+    // rerank pool; the frozen effectiveness gate owns final-pack quality.
 }
 
 #[test]
@@ -68,125 +344,6 @@ fn primary_require_mode_refuses_invalid_model_in_real_pack() {
         "stderr: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-}
-
-#[test]
-#[ignore = "requires production model files and built binary"]
-fn shadow_require_mode_refuses_invalid_model_in_real_server() {
-    let output = Command::new(memkeeper_bin())
-        .env("MEMKEEPER_EMBED_MODEL_DIR", embed_model_dir())
-        .env("MEMKEEPER_RERANK_MODEL_DIR", rerank_model_dir())
-        .env(
-            "MEMKEEPER_RERANK_SHADOW_MODEL_DIR",
-            "/definitely/missing/shadow-model",
-        )
-        .env("MEMKEEPER_REQUIRE_SHADOW_RERANK", "1")
-        .args(["serve", "--stdio"])
-        .stdin(Stdio::null())
-        .output()
-        .unwrap();
-    assert_eq!(output.status.code(), Some(2), "output: {output:?}");
-    assert!(
-        String::from_utf8_lossy(&output.stderr).contains("refusing to start"),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-}
-
-#[test]
-#[ignore = "requires production and xsmall INT8 reranker model files; run with -- --ignored"]
-fn shadow_daemon_pack_matches_baseline_and_writes_comparison() {
-    let dir = tempfile::tempdir().unwrap();
-    let store = dir.path().join("store.sqlite");
-    let init = Command::new(memkeeper_bin())
-        .args(["init", "--store", store.to_str().unwrap(), "--json"])
-        .output()
-        .unwrap();
-    assert!(init.status.success(), "init failed: {init:?}");
-
-    let embedding = vec![0.1_f32; 1024];
-    remember_with_embedding(&store, "alpha memory about SQLite", &embedding);
-    remember_with_embedding(&store, "beta memory about weather", &embedding);
-    let payload = serde_json::json!({
-        "title": "shadow integration",
-        "queries": ["memory"],
-        "query_embeddings": [embedding],
-        "max_memories": 2,
-        "max_chars": 1000,
-        "rerank_candidates": 2,
-        "min_score": 0.0
-    });
-    let baseline = Command::new(memkeeper_bin())
-        .env("MEMKEEPER_EMBED_MODEL_DIR", embed_model_dir())
-        .env("MEMKEEPER_RERANK_MODEL_DIR", rerank_model_dir())
-        .env_remove("MEMKEEPER_RERANK_SHADOW_MODEL_DIR")
-        .args([
-            "pack",
-            "--store",
-            store.to_str().unwrap(),
-            "--json",
-            &payload.to_string(),
-        ])
-        .output()
-        .unwrap();
-    assert!(
-        baseline.status.success(),
-        "baseline pack failed: {}",
-        String::from_utf8_lossy(&baseline.stderr)
-    );
-    let baseline_json: serde_json::Value = serde_json::from_slice(&baseline.stdout).unwrap();
-
-    let mut daemon = Command::new(memkeeper_bin())
-        .env("MEMKEEPER_EMBED_MODEL_DIR", embed_model_dir())
-        .env("MEMKEEPER_RERANK_MODEL_DIR", rerank_model_dir())
-        .env(
-            "MEMKEEPER_RERANK_SHADOW_MODEL_DIR",
-            shadow_rerank_model_dir(),
-        )
-        .env("MEMKEEPER_REQUIRE_SHADOW_RERANK", "1")
-        .args(["serve", "--stdio"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
-    let request = serde_json::json!({
-        "request_id": "shadow-integration",
-        "command": "pack",
-        "store_path": store,
-        "payload": payload
-    });
-    writeln!(daemon.stdin.as_mut().unwrap(), "{request}").unwrap();
-    let mut response = String::new();
-    std::io::BufReader::new(daemon.stdout.as_mut().unwrap())
-        .read_line(&mut response)
-        .unwrap();
-    let shadow_json: serde_json::Value = serde_json::from_str(&response).unwrap();
-    let baseline_pack = serde_json::to_string(&baseline_json["result"]["pack"]).unwrap();
-    let shadow_pack = serde_json::to_string(&shadow_json["result"]["pack"]).unwrap();
-    assert_eq!(
-        baseline_pack.as_bytes(),
-        shadow_pack.as_bytes(),
-        "shadow mode must not change the authoritative pack bytes"
-    );
-
-    let deadline = Instant::now() + Duration::from_secs(5);
-    let rows = loop {
-        let rows = rusqlite::Connection::open(&store)
-            .and_then(|connection| {
-                connection.query_row("SELECT COUNT(*) FROM reranker_shadow_events", [], |row| {
-                    row.get::<_, i64>(0)
-                })
-            })
-            .unwrap_or(0);
-        if rows == 2 || Instant::now() >= deadline {
-            break rows;
-        }
-        std::thread::sleep(Duration::from_millis(25));
-    };
-    let _ = daemon.kill();
-    let _ = daemon.wait();
-    assert_eq!(rows, 2, "one telemetry row per production candidate");
 }
 
 #[test]
@@ -272,7 +429,7 @@ fn pack_with_reranker_places_relevant_memory_first() {
 
 #[test]
 #[ignore = "requires model files and built binary"]
-fn pack_cosine_gate_emits_relevant_terse_prompt_and_suppresses_off_topic() {
+fn pack_top_score_gate_emits_relevant_prompt_and_suppresses_off_topic() {
     let dir = tempfile::tempdir().unwrap();
     let store = dir.path().join("store.sqlite");
 
@@ -309,11 +466,9 @@ fn pack_cosine_gate_emits_relevant_terse_prompt_and_suppresses_off_topic() {
             .unwrap();
     }
 
-    // Regression for the silent-injection bug: this terse query's relevant
-    // memory reranks below 0.6, so legacy min_score=0.6 filters it out. With the
-    // query-level cosine gate enabled, cos_top decides that the prompt is
-    // on-topic and the reranker is used only for ordering.
-    let gated_relevant = pack_content(
+    // The pack uses one top rerank-score gate. Once the top candidate clears
+    // it, lower-ranked evidence remains eligible for the count/char budget.
+    let relevant = pack_content(
         &store,
         &serde_json::json!({
             "title": "test",
@@ -322,33 +477,15 @@ fn pack_cosine_gate_emits_relevant_terse_prompt_and_suppresses_off_topic() {
             "max_chars": 4000,
             "format": "markdown",
             "rerank_candidates": 3,
-            "cosine_gate": 0.62,
-            "min_score": 0.6
+            "min_score": 0.05
         }),
     );
     assert!(
-        gated_relevant.contains("Empty error files"),
-        "cosine-gated pack should inject the relevant memory. content:\n{gated_relevant}"
+        relevant.contains("Empty error files"),
+        "top-score-gated pack should inject the relevant memory. content:\n{relevant}"
     );
 
-    let legacy_relevant = pack_content(
-        &store,
-        &serde_json::json!({
-            "title": "test",
-            "queries": ["supervisor stale error logs"],
-            "max_memories": 3,
-            "max_chars": 4000,
-            "format": "markdown",
-            "rerank_candidates": 3,
-            "min_score": 0.6
-        }),
-    );
-    assert!(
-        legacy_relevant.is_empty(),
-        "legacy per-item rerank floor should still suppress this below-0.6 fixture"
-    );
-
-    let gated_off_topic = pack_content(
+    let off_topic = pack_content(
         &store,
         &serde_json::json!({
             "title": "test",
@@ -357,13 +494,12 @@ fn pack_cosine_gate_emits_relevant_terse_prompt_and_suppresses_off_topic() {
             "max_chars": 4000,
             "format": "markdown",
             "rerank_candidates": 3,
-            "cosine_gate": 0.62,
-            "min_score": 0.6
+            "min_score": 0.05
         }),
     );
     assert!(
-        gated_off_topic.is_empty(),
-        "cosine gate should suppress off-topic prompts. content:\n{gated_off_topic}"
+        off_topic.is_empty(),
+        "top rerank-score gate should suppress off-topic prompts. content:\n{off_topic}"
     );
 }
 
@@ -401,7 +537,6 @@ fn pack_rerank_pool_includes_bm25_candidates_with_manual_embeddings() {
         "max_chars": 4000,
         "format": "markdown",
         "rerank_candidates": 3,
-        "cosine_gate": 0.0,
         "min_score": 0.0
     });
     let content = pack_content(&store, &payload);

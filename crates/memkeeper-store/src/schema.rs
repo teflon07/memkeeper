@@ -230,25 +230,6 @@ CREATE INDEX IF NOT EXISTS idx_recall_events_memory ON recall_events(memory_id);
 CREATE INDEX IF NOT EXISTS idx_recall_events_ts ON recall_events(ts);
 ";
 
-/// `reranker_shadow_events` stores local production-vs-shadow comparisons.
-const RERANKER_SHADOW_DDL: &str = "
-CREATE TABLE IF NOT EXISTS reranker_shadow_events (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  batch INTEGER NOT NULL,
-  ts TEXT NOT NULL,
-  query TEXT,
-  prod_model_id TEXT,
-  shadow_model_id TEXT,
-  memory_id TEXT NOT NULL,
-  prod_rank INTEGER,
-  prod_score REAL,
-  shadow_rank INTEGER,
-  shadow_score REAL
-);
-CREATE INDEX IF NOT EXISTS idx_reranker_shadow_batch ON reranker_shadow_events(batch);
-CREATE INDEX IF NOT EXISTS idx_reranker_shadow_ts ON reranker_shadow_events(ts);
-";
-
 /// `source_episode_recall_events` stores local document retrieval telemetry.
 const SOURCE_EPISODE_RECALL_DDL: &str = "
 CREATE TABLE IF NOT EXISTS source_episode_recall_events (
@@ -512,11 +493,6 @@ pub(crate) fn ensure_memory_candidates(connection: &Connection) -> Result<()> {
 pub(crate) fn ensure_recall_events(transaction: &Transaction<'_>) -> Result<()> {
     transaction.execute_batch(RECALL_EVENTS_DDL)?;
     ensure_recall_events_optional_columns(transaction)
-}
-
-pub(crate) fn ensure_reranker_shadow_events(transaction: &Transaction<'_>) -> Result<()> {
-    transaction.execute_batch(RERANKER_SHADOW_DDL)?;
-    Ok(())
 }
 
 pub(crate) fn ensure_source_episode_recall_events(transaction: &Transaction<'_>) -> Result<()> {

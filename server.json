@@ -3,11 +3,11 @@
   "name": "io.github.teflon07/memkeeper",
   "description": "Local-first memory for AI agents: on-device hybrid retrieval over a single SQLite file.",
   "repository": { "url": "https://github.com/teflon07/memkeeper", "source": "github" },
-  "version": "0.3.1",
+  "version": "0.4.0",
   "packages": [
     {
       "registryType": "oci",
-      "identifier": "ghcr.io/teflon07/memkeeper:0.3.1",
+      "identifier": "ghcr.io/teflon07/memkeeper:0.4.0",
       "transport": { "type": "stdio" }
     }
   ]

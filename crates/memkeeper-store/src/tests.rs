@@ -3,38 +3,33 @@
 //! because this is still `mod tests` inside the crate root.
 
 use super::{
-    apply_graph_admission_observations, approve_candidate, assemble_reranked_pack,
-    assemble_reranked_pack_with_graph_slots, backup_store, batch_search_memories,
-    build_hybrid_rerank_pool_trace_with_expansion, build_hybrid_rerank_pool_with_expansion,
-    build_pack, build_pack_pool_with_expansion, create_space, diversify_graph_neighbors,
-    document_duplicates, dream_store, empty_pack, expanded_pack_queries, export_store,
-    forget_memory, fts_score, get_document, get_memory, graph_context, graph_neighbors,
-    graph_recall_readiness, import_store, ingest_source, init_store, last_synthesis_run,
+    apply_graph_admission_observations, approve_candidate, assemble_reranked_pack, backup_store,
+    batch_search_memories, build_hybrid_rerank_pool_trace_with_evidence_options,
+    build_hybrid_rerank_pool_with_evidence_options, build_pack, create_space, document_duplicates,
+    dream_store, empty_pack, export_store, forget_memory, fts_score, get_document, get_memory,
+    graph_context, graph_neighbors, import_store, ingest_source, init_store, last_synthesis_run,
     list_candidates, list_memories, list_silos, list_spaces, load_token_embeddings,
     load_token_embeddings_cached, mark_source_episodes_extracted, maxsim_score, memory_history,
     merge_entity, normalize_utc_timestamp, now_julian_day, open_initialized_write,
-    pack_blocked_by_cosine_gate, promotion_candidates, prune_documents, rebuild_fts,
-    recency_score_for_silo, record_recall, record_reranker_shadow, reject_candidate,
-    relationship_confidence_from_evidence, remember_memory, representation_document,
-    rerank_candidate_ranks, retrieval_companion, schema_mentions_required_objects,
-    score_graph_entity_memories, search_documents, search_entities, search_memories,
-    select_graph_entity_memory, sha256_hex, sidecar_path, source_tier_score, store_stats,
-    store_stats_with_health, submit_candidate, upsert_entity, upsert_memory_token_embedding,
-    upsert_relationship, validate_retrieval_representation, verify_memory, BackupRequest,
-    BatchSearchQuery, BatchSearchRequest, CandidateApproveRequest, CandidateListRequest,
-    CandidateRejectRequest, CandidateSubmitRequest, DocumentDuplicatesRequest, DocumentGetRequest,
-    DocumentPruneRequest, DocumentSearchRequest, DreamRequest, EntityMergeRequest,
-    EntitySearchRequest, EntityUpsertRequest, Error, ExportRequest, ForgetRequest, GetOptions,
-    GraphContextRequest, GraphNeighborsRequest, HistoryOptions, ImportRequest, IngestRequest,
-    MarkExtractedRequest, MemoryListRequest, PackExpansionOptions, PackRequest,
-    PromotionCandidatesRequest, RecallEvent, RecallLogRequest, RelationshipUpsertRequest,
-    RememberRequest, RerankCandidate, RerankPool, RetrievalRepresentationInput, SearchFilters,
-    SearchRequest, SearchResult, ShadowRerankBatch, ShadowRerankRow, SiloListRequest,
-    SpaceCreateRequest, VerifyRequest, DEFAULT_PROMOTE_RANK_CAP, DEFAULT_PROMOTE_SCORE_FLOOR,
-    DEFAULT_PROMOTE_THRESHOLD, DOCUMENTS_SPACE, MAX_CONTENT_CHARS, MAX_HISTORY_LIMIT,
-    MAX_MEMORY_LINKS, MAX_METADATA_VALUE_CHARS, MAX_SEARCH_LIMIT, MAX_TIMESTAMP_CHARS,
-    PROJECT_STORE_RELATIVE_PATH, SCHEMA_SQL, SCHEMA_VERSION, USER_STORE_PATH_HINT,
-    VOLATILE_MAX_RECENCY_SCORE,
+    promotion_candidates, prune_documents, rebuild_fts, recency_score_for_silo, record_recall,
+    reject_candidate, relationship_confidence_from_evidence, remember_memory,
+    representation_document, retrieval_companion, schema_mentions_required_objects,
+    search_documents, search_entities, search_memories, sha256_hex, sidecar_path,
+    source_tier_score, store_stats, store_stats_with_health, submit_candidate, upsert_entity,
+    upsert_memory_token_embedding, upsert_relationship, validate_retrieval_representation,
+    verify_memory, BackupRequest, BatchSearchQuery, BatchSearchRequest, CandidateApproveRequest,
+    CandidateListRequest, CandidateRejectRequest, CandidateSubmitRequest,
+    DocumentDuplicatesRequest, DocumentGetRequest, DocumentPruneRequest, DocumentSearchRequest,
+    DreamRequest, EntityMergeRequest, EntitySearchRequest, EntityUpsertRequest, Error,
+    EvidenceJoinOptions, ExportRequest, ForgetRequest, GetOptions, GraphContextRequest,
+    GraphNeighborsRequest, HistoryOptions, ImportRequest, IngestRequest, MarkExtractedRequest,
+    MemoryListRequest, PackRequest, PromotionCandidatesRequest, RecallEvent, RecallLogRequest,
+    RelationshipUpsertRequest, RememberRequest, RerankCandidate, RetrievalRepresentationInput,
+    SearchFilters, SearchRequest, SearchResult, SiloListRequest, SpaceCreateRequest, VerifyRequest,
+    DEFAULT_PROMOTE_RANK_CAP, DEFAULT_PROMOTE_SCORE_FLOOR, DEFAULT_PROMOTE_THRESHOLD,
+    DOCUMENTS_SPACE, MAX_CONTENT_CHARS, MAX_HISTORY_LIMIT, MAX_MEMORY_LINKS,
+    MAX_METADATA_VALUE_CHARS, MAX_SEARCH_LIMIT, MAX_TIMESTAMP_CHARS, PROJECT_STORE_RELATIVE_PATH,
+    SCHEMA_SQL, SCHEMA_VERSION, USER_STORE_PATH_HINT, VOLATILE_MAX_RECENCY_SCORE,
 };
 use memkeeper_core::DEFAULT_SPACE;
 use rusqlite::{params, Connection};
@@ -1595,7 +1590,7 @@ fn entity_upsert_aliases_insert_update_idempotently() {
     let mut second_aliases = second.entity.aliases.clone();
     second_aliases.sort();
     let mut want_second = vec![
-        "memkeeper".to_string(),
+        "Memkeeper".to_string(),
         "FM".to_string(),
         "Graph Projection".to_string(),
     ];
@@ -1617,6 +1612,40 @@ fn entity_upsert_aliases_insert_update_idempotently() {
         .query_row("SELECT COUNT(*) FROM entity_aliases", [], |row| row.get(0))
         .expect("count aliases");
     assert_eq!(alias_count, 3);
+
+    cleanup_store(&path);
+}
+
+#[test]
+fn entity_upsert_mirrors_canonical_name_as_alias() {
+    let path = temp_store_path("entity_upsert_mirrors_canonical_name_as_alias");
+    cleanup_store(&path);
+    init_store(&path).expect("init succeeds");
+
+    let first = upsert_entity(
+        &path,
+        &entity_upsert_request("person:steve", "Steve Edwards"),
+    )
+    .expect("entity upsert succeeds");
+    assert_eq!(first.entity.aliases, vec!["Steve Edwards".to_string()]);
+
+    let second = upsert_entity(
+        &path,
+        &entity_upsert_request("person:steve", "Steve Edwards"),
+    )
+    .expect("replay succeeds");
+    assert_eq!(second.entity.aliases, first.entity.aliases);
+
+    let connection = Connection::open(&path).expect("open store");
+    let alias_count: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM entity_aliases
+              WHERE entity_id = ?1 AND normalized_alias = 'steve edwards'",
+            [&first.entity.id],
+            |row| row.get(0),
+        )
+        .expect("count canonical alias");
+    assert_eq!(alias_count, 1);
 
     cleanup_store(&path);
 }
@@ -4213,107 +4242,6 @@ fn pack_min_score_floor_filters_low_scoring_memories() {
 }
 
 #[test]
-fn pack_query_expansion_derives_bounded_action_and_decision_variants() {
-    let queries = expanded_pack_queries(
-        &["what did we decide about memkeeper retrieval diagnostics".to_string()],
-        PackExpansionOptions {
-            query_expansion: true,
-            thread_expansion: false,
-            max_query_variants: 4,
-            max_thread_seeds: 3,
-            max_thread_neighbors: 3,
-            ..PackExpansionOptions::default()
-        },
-    );
-
-    assert_eq!(
-        queries,
-        vec![
-            "what did we decide about memkeeper retrieval diagnostics".to_string(),
-            "memkeeper retrieval diagnostics".to_string(),
-            "decision memkeeper retrieval diagnostics".to_string(),
-            "action memkeeper retrieval diagnostics".to_string(),
-        ]
-    );
-}
-
-#[test]
-fn pack_pool_thread_expansion_interleaves_same_entity_neighbors() {
-    let path = temp_store_path("pack_pool_thread_expansion_interleaves_same_entity_neighbors");
-    cleanup_store(&path);
-    init_store(&path).expect("init succeeds");
-
-    let mut seed = basic_request("decision: memkeeper diagnostics should expose retrieval misses");
-    seed.entity_key = Some("thread:fm-thread".to_string());
-    seed.claim_key = Some("claim:diagnostics".to_string());
-    seed.observed_at = Some("2026-06-01T00:00:00.000Z".to_string());
-    let seed_report = remember_memory(&path, &seed).expect("remember seed");
-
-    let mut sibling = basic_request("lesson: carry graph anchors forward into packs");
-    sibling.entity_key = Some("thread:fm-thread".to_string());
-    sibling.claim_key = Some("claim:thread-context".to_string());
-    sibling.observed_at = Some("2026-06-02T00:00:00.000Z".to_string());
-    let sibling_report = remember_memory(&path, &sibling).expect("remember sibling");
-
-    let mut unrelated = basic_request("fact: unrelated benchmark fixture");
-    unrelated.entity_key = Some("thread:other".to_string());
-    unrelated.observed_at = Some("2026-06-03T00:00:00.000Z".to_string());
-    remember_memory(&path, &unrelated).expect("remember unrelated");
-
-    let request = PackRequest {
-        title: "thread expansion".to_string(),
-        queries: vec!["retrieval misses".to_string()],
-        filters: SearchFilters::default(),
-        max_memories: 4,
-        max_chars: 2_000,
-        format: "markdown".to_string(),
-        min_score: 0.0,
-        rerank_candidates: 0,
-        query_embeddings: None,
-        query_token_embeddings: None,
-        token_model_id: None,
-    };
-    let base_pool = build_pack_pool_with_expansion(
-        &path,
-        &request,
-        PackExpansionOptions {
-            query_expansion: false,
-            thread_expansion: false,
-            max_query_variants: 4,
-            max_thread_seeds: 3,
-            max_thread_neighbors: 3,
-            ..PackExpansionOptions::default()
-        },
-    )
-    .expect("base pool");
-    assert!(base_pool
-        .iter()
-        .any(|item| item.memory_id == seed_report.memory.id));
-    assert!(!base_pool
-        .iter()
-        .any(|item| item.memory_id == sibling_report.memory.id));
-
-    let expanded_pool = build_pack_pool_with_expansion(
-        &path,
-        &request,
-        PackExpansionOptions {
-            query_expansion: false,
-            thread_expansion: true,
-            max_query_variants: 4,
-            max_thread_seeds: 1,
-            max_thread_neighbors: 2,
-            ..PackExpansionOptions::default()
-        },
-    )
-    .expect("expanded pool");
-    assert!(expanded_pool
-        .iter()
-        .any(|item| item.memory_id == sibling_report.memory.id));
-
-    cleanup_store(&path);
-}
-
-#[test]
 fn pack_pool_retains_query_variant_overlap_for_admitted_candidate() {
     use super::build_pack_pool;
     let path = temp_store_path("pack_pool_query_overlap");
@@ -4351,58 +4279,10 @@ fn pack_pool_retains_query_variant_overlap_for_admitted_candidate() {
     cleanup_store(&path);
 }
 
-#[test]
-fn pack_pool_retains_thread_overlap_for_direct_candidate() {
-    use super::AdmissionSource;
-    use std::collections::BTreeSet;
-    let path = temp_store_path("pack_pool_thread_overlap");
-    cleanup_store(&path);
-    init_store(&path).expect("init succeeds");
-    for content in ["alpha overlap first", "alpha overlap second"] {
-        let mut request = basic_request(content);
-        request.entity_key = Some("thread:overlap".to_string());
-        remember_memory(&path, &request).expect("remember succeeds");
-    }
-    let request = PackRequest {
-        title: "thread overlap".to_string(),
-        queries: vec!["alpha overlap".to_string()],
-        filters: SearchFilters::default(),
-        max_memories: 2,
-        max_chars: 1_000,
-        format: "markdown".to_string(),
-        min_score: 0.0,
-        rerank_candidates: 0,
-        query_embeddings: None,
-        query_token_embeddings: None,
-        token_model_id: None,
-    };
-
-    let pool = build_pack_pool_with_expansion(
-        &path,
-        &request,
-        PackExpansionOptions {
-            thread_expansion: true,
-            max_thread_seeds: 1,
-            max_thread_neighbors: 2,
-            ..PackExpansionOptions::default()
-        },
-    )
-    .expect("pool builds");
-    assert!(pool.iter().any(|candidate| {
-        let sources = candidate
-            .admissions
-            .iter()
-            .map(|observation| observation.source)
-            .collect::<BTreeSet<_>>();
-        sources.contains(&AdmissionSource::Bm25) && sources.contains(&AdmissionSource::Thread)
-    }));
-    cleanup_store(&path);
-}
-
 /// Part 2 (memory-to-memory edges): the `link` dream task writes cross-entity
 /// `memory_links` between curated memories that share discriminative tags, and
-/// the `graph` task then bridges their entities — so associative recall finally
-/// has curated-memory edges to traverse. A memory with only one shared tag stays
+/// the `graph` task then bridges their entities for evidence-backed retrieval.
+/// A memory with only one shared tag stays
 /// unlinked.
 #[test]
 fn dream_link_bridges_tag_sharing_memories_into_the_graph() {
@@ -4738,55 +4618,70 @@ fn dream_link_discriminative_tag_frequency_is_space_local() {
     cleanup_store(&path);
 }
 
-/// Record a succeeded `dream --tasks graph` run so the associative-recall
-/// readiness check treats the graph as synthesized (not stale).
-fn insert_graph_synthesis_run(path: &Path) {
-    let conn = Connection::open(path).expect("open store");
-    conn.execute_batch(
-        "INSERT INTO dream_runs (id, space_name, status, started_at, finished_at, budget_json) \
-         VALUES ('dgraph','workspace-memory','succeeded','2026-06-29T03:00:00Z',\
-                 '2026-06-29T03:05:00Z','{\"tasks\":[\"graph\"],\"space\":\"workspace-memory\"}')",
-    )
-    .expect("insert graph dream run");
+fn routing_metadata(object_memory_id: &str) -> String {
+    serde_json::json!({
+        "routing": true,
+        "origin": "adjudicated_capture",
+        "routing_contract": "evidence_join_v1",
+        "routing_contract_version": 1,
+        "object_memory_id": object_memory_id,
+    })
+    .to_string()
 }
 
-/// Build the seed + relationship-only neighbor fixture shared by the
-/// associative-recall proof tests. Returns (`seed_id`, `neighbor_id`).
-///
-/// The seed lexically matches `warden sandbox deploys`; the neighbor shares no
-/// query terms and carries no embedding, so ANN/BM25 cannot reach it — its only
-/// path to the pool is the `project:warden -depends_on-> component:ledger` edge.
-fn associative_recall_fixture(path: &Path) -> (String, String) {
-    let mut seed = basic_request("decision: adopt the warden sandbox for memkeeper deploys");
-    seed.entity_key = Some("project:warden".to_string());
-    let seed_report = remember_memory(path, &seed).expect("remember seed");
+#[test]
+fn evidence_graph_join_entity_span_and_seed_bounds_are_deterministic() {
+    let query = (0..40)
+        .map(|index| format!("token{index}"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let spans = super::evidence_query_spans(&[query]);
+    assert_eq!(spans.len(), super::MAX_EVIDENCE_ENTITY_SPANS);
+    assert_eq!(spans[0].normalized, "token0 token1 token2 token3 token4");
+    assert_eq!(spans[0].end - spans[0].start, 5);
+    assert!(
+        super::evidence_query_spans(&["where who Steve".to_string()])
+            .iter()
+            .all(|span| span.normalized != "where" && span.normalized != "who")
+    );
 
-    let mut neighbor = basic_request("note: capybara reconciles its journals every midnight cycle");
-    neighbor.entity_key = Some("component:ledger".to_string());
-    let neighbor_report = remember_memory(path, &neighbor).expect("remember neighbor");
+    let memory_seed = super::EvidenceGraphSeed {
+        source: super::GraphSeedSource::Memory,
+        entity_id: "memory-entity".to_string(),
+        space_name: DEFAULT_SPACE.to_string(),
+        score: 0.8,
+        memory_id: Some("memory-seed".to_string()),
+        matched_query_index: None,
+        matched_query_span: None,
+    };
+    let entity_seed = |index: usize| super::EvidenceGraphSeed {
+        source: super::GraphSeedSource::Entity,
+        entity_id: format!("entity-{index}"),
+        space_name: DEFAULT_SPACE.to_string(),
+        score: 1.0,
+        memory_id: None,
+        matched_query_index: Some(0),
+        matched_query_span: Some(format!("entity {index}")),
+    };
+    let entity_seeds = [entity_seed(1), entity_seed(2), entity_seed(3)];
+    let allocated = super::allocate_evidence_seeds(&[memory_seed], &entity_seeds, 2);
+    assert_eq!(allocated.len(), 2);
+    assert_eq!(allocated[0].source, super::GraphSeedSource::Memory);
+    assert_eq!(allocated[1].source, super::GraphSeedSource::Entity);
 
-    upsert_entity(path, &entity_upsert_request("project:warden", "Warden")).expect("entity A");
-    upsert_entity(path, &entity_upsert_request("component:ledger", "Ledger")).expect("entity B");
-    upsert_relationship(
-        path,
-        &RelationshipUpsertRequest {
-            subject_entity_key: Some("project:warden".to_string()),
-            relation_type: "depends_on".to_string(),
-            object_entity_key: Some("component:ledger".to_string()),
-            confidence: 1.0,
-            ..relationship_upsert_request_defaults()
-        },
-    )
-    .expect("relationship A->B");
-    insert_graph_synthesis_run(path);
-
-    (seed_report.memory.id, neighbor_report.memory.id)
-}
-
-fn associative_recall_request() -> PackRequest {
-    PackRequest {
-        title: "assoc".to_string(),
-        queries: vec!["warden sandbox deploys".to_string()],
+    let path = temp_store_path("evidence_entity_seed_bound");
+    cleanup_store(&path);
+    init_store(&path).expect("init succeeds");
+    for (key, name) in [
+        ("entity:aster", "Aster"),
+        ("entity:beryl", "Beryl"),
+        ("entity:cedar", "Cedar"),
+    ] {
+        upsert_entity(&path, &entity_upsert_request(key, name)).expect("entity upsert");
+    }
+    let request = PackRequest {
+        title: "seed bound".to_string(),
+        queries: vec!["Aster Beryl Cedar".to_string()],
         filters: SearchFilters::default(),
         max_memories: 5,
         max_chars: 4_000,
@@ -4796,260 +4691,887 @@ fn associative_recall_request() -> PackRequest {
         query_embeddings: None,
         query_token_embeddings: None,
         token_model_id: None,
-    }
-}
-
-fn associative_recall_on() -> PackExpansionOptions {
-    PackExpansionOptions {
-        graph_expansion: true,
-        max_graph_seeds: 3,
-        max_graph_neighbors: 5,
-        graph_decay: 0.5,
-        ..PackExpansionOptions::default()
-    }
-}
-
-/// Proof (a) — RECALL: a relationship-only neighbor with no lexical/ANN path
-/// appears in the merged candidate pool with associative recall ON, and is
-/// absent with it OFF.
-#[test]
-fn graph_expansion_surfaces_relationship_only_neighbor_in_candidate_pool() {
-    let path = temp_store_path("graph_expansion_candidate_pool");
-    cleanup_store(&path);
-    init_store(&path).expect("init succeeds");
-    let (seed_id, neighbor_id) = associative_recall_fixture(&path);
-    let request = associative_recall_request();
-
-    let off = build_hybrid_rerank_pool_with_expansion(
-        &path,
-        &request,
-        10,
-        PackExpansionOptions::default(),
-    )
-    .expect("pool off");
-    assert!(
-        off.candidates.iter().any(|c| c.memory_id == seed_id),
-        "seed is retrieved lexically"
-    );
-    assert!(
-        !off.candidates.iter().any(|c| c.memory_id == neighbor_id),
-        "relationship-only neighbor has no lexical/ANN path, so it is absent without graph expansion"
-    );
-
-    let on = build_hybrid_rerank_pool_with_expansion(&path, &request, 10, associative_recall_on())
-        .expect("pool on");
-    assert!(
-        on.candidates.iter().any(|c| c.memory_id == neighbor_id),
-        "relationship-only neighbor enters the candidate pool through the graph hop with recall ON"
-    );
-
-    cleanup_store(&path);
-}
-
-/// Proof (b) — RELATIVE GATE / BOUNDED ADMISSION: a relationship-only neighbor is
-/// a below-pool graph addition (`graph_pulled`), so it is QUARANTINED from the
-/// normal rerank fill — even when the cross-encoder scores it higher than the
-/// direct hits, it does NOT land with `slots == 0` (the churn fix: graph expansion
-/// cannot reorder the top-`k`). It lands ONLY when a reserved slot is granted, and
-/// the activation floor still gates that slot. This replaces the old "graph
-/// candidate competes in normal fill" contract, which churned 92% of real packs.
-#[test]
-fn graph_expansion_neighbor_lands_only_through_a_reserved_slot() {
-    let path = temp_store_path("graph_expansion_rerank_pack");
-    cleanup_store(&path);
-    init_store(&path).expect("init succeeds");
-    let (_seed_id, neighbor_id) = associative_recall_fixture(&path);
-    let request = associative_recall_request();
-
-    // Simulated cross-encoder that scores the neighbor ABOVE the direct hits —
-    // the worst case for churn under the old normal-fill contract.
-    let rerank = |pool: &RerankPool, neighbor_score: f32| -> Vec<RerankCandidate> {
-        pool.candidates
-            .iter()
-            .map(|c| RerankCandidate {
-                memory_id: c.memory_id.clone(),
-                content: c.content.clone(),
-                rerank_score: if c.memory_id == neighbor_id {
-                    neighbor_score
-                } else {
-                    0.6
-                },
-                activation: c.activation,
-                graph_pulled: c.graph_pulled,
-            })
-            .collect()
     };
-
-    // OFF: the neighbor never becomes a candidate, so it cannot land in the pack.
-    let off_pool = build_hybrid_rerank_pool_with_expansion(
-        &path,
-        &request,
-        10,
-        PackExpansionOptions::default(),
-    )
-    .expect("pool off");
-    let off_pack =
-        assemble_reranked_pack(&request, 0.0, off_pool.cos_top, &rerank(&off_pool, 0.95));
-    assert!(
-        !off_pack.memory_ids.contains(&neighbor_id),
-        "neighbor cannot land in the pack without graph expansion"
-    );
-
-    let on_pool =
-        build_hybrid_rerank_pool_with_expansion(&path, &request, 10, associative_recall_on())
-            .expect("pool on");
-    // The neighbor is a quarantined below-pool addition; read its activation so the
-    // floor assertions key off the real value rather than a guessed scale.
-    let neighbor_activation = on_pool
-        .candidates
-        .iter()
-        .find(|c| c.memory_id == neighbor_id)
-        .and_then(|c| c.activation)
-        .expect("graph-pulled neighbor carries an activation");
-
-    // ON, slots=0: even scored 0.95 (above every direct hit), the neighbor is
-    // QUARANTINED — graph confidence alone no longer reorders the pack.
-    let quarantined = assemble_reranked_pack_with_graph_slots(
-        &request,
-        0.0,
-        on_pool.cos_top,
-        &rerank(&on_pool, 0.95),
-        0,
-        0.0,
-    );
-    assert!(
-        !quarantined.memory_ids.contains(&neighbor_id),
-        "below-pool graph addition stays out of the normal fill (no reserved slot)"
-    );
-
-    // ON, slots=1, floor below the activation: the neighbor lands via the slot.
-    let landed = assemble_reranked_pack_with_graph_slots(
-        &request,
-        0.0,
-        on_pool.cos_top,
-        &rerank(&on_pool, 0.95),
-        1,
-        0.0,
-    );
-    assert!(
-        landed.memory_ids.contains(&neighbor_id),
-        "graph-surfaced neighbor lands when a reserved slot is granted"
-    );
-
-    // ON, slots=1, floor above the activation: the activation floor gates the slot.
-    let floored = assemble_reranked_pack_with_graph_slots(
-        &request,
-        0.0,
-        on_pool.cos_top,
-        &rerank(&on_pool, 0.95),
-        1,
-        neighbor_activation + 1.0,
-    );
-    assert!(
-        !floored.memory_ids.contains(&neighbor_id),
-        "the activation floor still gates a graph candidate out of its reserved slot"
-    );
-
+    let filters = super::evidence_join_filters(&request).expect("filters");
+    let connection = Connection::open(&path).expect("open store");
+    let entity_seeds =
+        super::evidence_entity_seeds(&connection, &request, &filters).expect("entity seeds");
+    assert_eq!(entity_seeds.len(), super::MAX_EVIDENCE_ENTITY_SEEDS);
     cleanup_store(&path);
 }
 
-/// Proof (c) — FLAG-OFF / DEGRADE byte-identical: with recall ON but no active
-/// relationships (an unusable graph), the candidate pool is byte-identical to
-/// recall OFF. Graph expansion never perturbs the pool when it cannot contribute;
-/// the broader flag-off guarantee is the existing pack/retrieval suite passing
-/// unchanged with `graph_expansion` defaulting to false.
 #[test]
-fn graph_expansion_degrades_to_byte_identical_pool_without_relationships() {
-    let path = temp_store_path("graph_expansion_degrade_identical");
-    cleanup_store(&path);
-    init_store(&path).expect("init succeeds");
+fn evidence_graph_join_candidate_allocation_prevents_source_and_depth_starvation() {
+    let route = |source, depth, relationship: &str| super::GraphRouteObservation {
+        seed_source: source,
+        seed_memory_id: (source == super::GraphSeedSource::Memory)
+            .then(|| "memory-seed".to_string()),
+        seed_entity_id: format!("seed-{source:?}"),
+        matched_query_index: (source == super::GraphSeedSource::Entity).then_some(0),
+        matched_query_span: (source == super::GraphSeedSource::Entity).then(|| "steve".to_string()),
+        hop_depth: depth,
+        relationship_ids: vec![relationship.to_string()],
+        predicate_names: vec!["routes_to".to_string()],
+        traversal_directions: vec!["forward".to_string()],
+        evidence_class: super::GraphEvidenceClass::EndpointSupport,
+        route_outcome: "active".to_string(),
+    };
+    let mut both_sources = super::EvidenceCandidateRoutes::new();
+    for (memory_id, source, activation) in [
+        ("memory-best", super::GraphSeedSource::Memory, 0.9),
+        ("memory-next", super::GraphSeedSource::Memory, 0.8),
+        ("entity-best", super::GraphSeedSource::Entity, 0.2),
+    ] {
+        super::record_evidence_candidate(
+            &mut both_sources,
+            memory_id,
+            activation,
+            route(source, 1, memory_id),
+        );
+    }
+    let selected = super::evidence_candidate_order(&both_sources, 2, &["routes".to_string()]);
+    assert_eq!(&selected[..2], ["memory-best", "entity-best"]);
 
-    // Seed only — no entities, no relationships, no graph synthesis run.
-    let mut seed = basic_request("decision: adopt the warden sandbox for memkeeper deploys");
-    seed.entity_key = Some("project:warden".to_string());
-    remember_memory(&path, &seed).expect("remember seed");
-    let request = associative_recall_request();
+    let mut depth_pressure = super::EvidenceCandidateRoutes::new();
+    for index in 0..8 {
+        let memory_id = format!("depth-one-{index}");
+        super::record_evidence_candidate(
+            &mut depth_pressure,
+            &memory_id,
+            1.0 - f64::from(index) / 100.0,
+            route(super::GraphSeedSource::Memory, 1, &memory_id),
+        );
+    }
+    super::record_evidence_candidate(
+        &mut depth_pressure,
+        "depth-two",
+        0.1,
+        route(super::GraphSeedSource::Memory, 2, "depth-two"),
+    );
+    let selected = super::evidence_candidate_order(&depth_pressure, 2, &["routes".to_string()]);
+    assert_eq!(selected[0], "depth-two");
+    assert!(selected.iter().any(|memory_id| memory_id == "depth-two"));
 
-    let off = build_hybrid_rerank_pool_with_expansion(
-        &path,
-        &request,
-        10,
-        PackExpansionOptions::default(),
-    )
-    .expect("pool off");
-    let on = build_hybrid_rerank_pool_with_expansion(&path, &request, 10, associative_recall_on())
-        .expect("pool on");
-    // The candidate set is the byte-identical invariant: graph expansion
-    // contributes nothing when the graph is unusable. `cos_top` is excluded from
-    // the comparison only because the underlying search blends a time-based
-    // recency factor that jitters at ~1e-11 between any two calls (recall OFF or
-    // ON) — graph items are unioned AFTER cos_top, so they never touch it.
+    super::record_evidence_candidate(
+        &mut depth_pressure,
+        "parallel",
+        0.2,
+        route(super::GraphSeedSource::Memory, 2, "weaker-path"),
+    );
+    super::record_evidence_candidate(
+        &mut depth_pressure,
+        "parallel",
+        0.7,
+        route(super::GraphSeedSource::Memory, 1, "better-path"),
+    );
+    let parallel = &depth_pressure["parallel"];
+    assert_eq!(parallel.len(), 1);
     assert_eq!(
-        off.candidates, on.candidates,
-        "with an unusable graph, recall ON yields a byte-identical candidate pool to recall OFF"
+        parallel
+            .values()
+            .next()
+            .expect("one route from the shared memory seed")
+            .route
+            .relationship_ids,
+        vec!["better-path"]
     );
-
-    cleanup_store(&path);
 }
 
-/// Readiness detection must key off the `tasks` array, not any `"graph"`/`"all"`
-/// token anywhere in `budget_json`. A succeeded promote-only run whose space is
-/// literally named `graph` must NOT be mistaken for a graph synthesis — otherwise
-/// the loud empty/stale WARN would be silently suppressed.
 #[test]
-fn graph_recall_readiness_ignores_graph_named_space_in_budget_json() {
-    let path = temp_store_path("graph_recall_readiness_false_positive");
+fn evidence_graph_join_preserves_distinct_memory_seed_routes_for_depth_allocation() {
+    let route = |seed_memory_id: &str, depth, relationship: &str| super::GraphRouteObservation {
+        seed_source: super::GraphSeedSource::Memory,
+        seed_memory_id: Some(seed_memory_id.to_string()),
+        seed_entity_id: format!("entity-{seed_memory_id}"),
+        matched_query_index: None,
+        matched_query_span: None,
+        hop_depth: depth,
+        relationship_ids: vec![relationship.to_string()],
+        predicate_names: vec!["routes_to".to_string()],
+        traversal_directions: vec!["forward".to_string()],
+        evidence_class: super::GraphEvidenceClass::EndpointSupport,
+        route_outcome: "active".to_string(),
+    };
+    let mut candidates = super::EvidenceCandidateRoutes::new();
+    super::record_evidence_candidate(
+        &mut candidates,
+        "gold",
+        0.8,
+        route("strongest-seed", 2, "strongest-two-hop"),
+    );
+    super::record_evidence_candidate(
+        &mut candidates,
+        "gold",
+        0.9,
+        route("middle-seed", 1, "middle-one-hop"),
+    );
+    super::record_evidence_candidate(
+        &mut candidates,
+        "unrelated",
+        0.7,
+        route("unrelated-seed", 2, "unrelated-two-hop"),
+    );
+
+    assert_eq!(
+        candidates["gold"].len(),
+        2,
+        "routes from distinct semantic seeds must remain independently visible"
+    );
+    let selected = super::evidence_candidate_order(&candidates, 2, &["orchard".to_string()]);
+    assert_eq!(
+        selected[0], "gold",
+        "the strongest seed's two-hop route must retain depth-reservation priority"
+    );
+}
+
+#[test]
+fn evidence_graph_join_entity_routes_use_predicate_query_alignment_for_allocation() {
+    assert!(super::evidence_predicate_path_matches_queries(
+        &["Where does Steve work?".to_string()],
+        &["works_at".to_string()],
+    ));
+    assert!(super::evidence_predicate_path_matches_queries(
+        &["Where is Elena's association based?".to_string()],
+        &["member_of".to_string(), "based_in".to_string()],
+    ));
+    assert!(!super::evidence_predicate_path_matches_queries(
+        &["Where does Steve work?".to_string()],
+        &["lives_in".to_string()],
+    ));
+    assert!(!super::evidence_predicate_path_matches_queries(
+        &["Steve profile".to_string()],
+        &["works_at".to_string()],
+    ));
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn evidence_graph_join_exact_entity_seed_recovers_endpoint_support() {
+    let path = temp_store_path("evidence_graph_join_exact_entity_seed");
     cleanup_store(&path);
     init_store(&path).expect("init succeeds");
 
-    // Active relationship so graph-synthesis detection is the only variable.
-    upsert_entity(&path, &entity_upsert_request("project:warden", "Warden")).expect("entity A");
-    upsert_entity(&path, &entity_upsert_request("component:ledger", "Ledger")).expect("entity B");
+    let mut steve_entity = entity_upsert_request("person:steve", "Steve");
+    steve_entity.aliases = vec!["Stephen".to_string(), "I".to_string()];
+    upsert_entity(&path, &steve_entity).expect("Steve entity with aliases");
+    upsert_entity(&path, &entity_upsert_request("org:acme", "Acme Labs")).expect("Acme entity");
+
+    let mut subject = basic_request("Profile record alpha.");
+    subject.entity_key = Some("person:steve".to_string());
+    let subject_id = remember_memory(&path, &subject)
+        .expect("subject support")
+        .memory
+        .id;
+    let mut object = basic_request("Acme Labs employs its principal architect.");
+    object.entity_key = Some("org:acme".to_string());
+    let object_id = remember_memory(&path, &object)
+        .expect("object support")
+        .memory
+        .id;
+
     upsert_relationship(
         &path,
         &RelationshipUpsertRequest {
-            subject_entity_key: Some("project:warden".to_string()),
-            relation_type: "depends_on".to_string(),
-            object_entity_key: Some("component:ledger".to_string()),
+            subject_entity_key: Some("person:steve".to_string()),
+            relation_type: "works_at".to_string(),
+            object_entity_key: Some("org:acme".to_string()),
+            memory_id: Some(subject_id),
+            metadata_json: Some(routing_metadata(&object_id)),
             confidence: 1.0,
             ..relationship_upsert_request_defaults()
         },
     )
-    .expect("relationship");
+    .expect("routing relationship");
 
-    // A succeeded promote-only run whose budget_json carries "space":"graph": the
-    // naive `%"graph"%` match would false-positive on that token.
-    {
-        let conn = Connection::open(&path).expect("open store");
-        conn.execute_batch(
-            "INSERT INTO dream_runs (id, space_name, status, started_at, finished_at, budget_json) \
-             VALUES ('dpromote','workspace-memory','succeeded','2026-06-29T03:00:00Z',\
-                     '2026-06-29T03:05:00Z','{\"tasks\":[\"promote\"],\"space\":\"graph\"}')",
+    let request = PackRequest {
+        title: "entity route".to_string(),
+        queries: vec!["Where does Steve work?".to_string()],
+        filters: SearchFilters::default(),
+        max_memories: 5,
+        max_chars: 4_000,
+        format: "markdown".to_string(),
+        min_score: 0.0,
+        rerank_candidates: 0,
+        query_embeddings: None,
+        query_token_embeddings: None,
+        token_model_id: None,
+    };
+    let off = build_hybrid_rerank_pool_with_evidence_options(
+        &path,
+        &request,
+        10,
+        EvidenceJoinOptions {
+            max_graph_neighbors: 0,
+            ..EvidenceJoinOptions::default()
+        },
+    )
+    .expect("graph off");
+    assert!(!off
+        .candidates
+        .iter()
+        .any(|candidate| candidate.memory_id == object_id));
+
+    let on = build_hybrid_rerank_pool_with_evidence_options(
+        &path,
+        &request,
+        10,
+        EvidenceJoinOptions {
+            max_graph_seeds: 4,
+            max_graph_neighbors: 4,
+            ..EvidenceJoinOptions::default()
+        },
+    )
+    .expect("evidence join");
+    let target = on
+        .candidates
+        .iter()
+        .find(|candidate| candidate.memory_id == object_id)
+        .expect("exact endpoint support recovered");
+    assert_eq!(on.graph_outcome.as_deref(), Some("active"));
+    let route = target
+        .admissions
+        .iter()
+        .filter_map(|admission| admission.graph_route.as_ref())
+        .find(|route| route.seed_source == super::GraphSeedSource::Entity)
+        .expect("entity graph route observation");
+    assert_eq!(route.seed_source, super::GraphSeedSource::Entity);
+    assert_eq!(route.hop_depth, 1);
+    assert_eq!(route.matched_query_span.as_deref(), Some("steve"));
+
+    let mut unaligned_request = request.clone();
+    unaligned_request.queries = vec!["Where does Steve live?".to_string()];
+    let unaligned_pool = build_hybrid_rerank_pool_with_evidence_options(
+        &path,
+        &unaligned_request,
+        10,
+        EvidenceJoinOptions {
+            max_graph_seeds: 4,
+            max_graph_neighbors: 4,
+            ..EvidenceJoinOptions::default()
+        },
+    )
+    .expect("unaligned evidence join");
+    let unaligned = unaligned_pool
+        .candidates
+        .iter()
+        .find(|candidate| candidate.memory_id == object_id)
+        .expect("unaligned endpoint remains available to semantic reranking");
+    assert!(
+        unaligned
+            .admissions
+            .iter()
+            .any(|admission| admission.source == super::AdmissionSource::Graph),
+        "graph evidence remains in the unified pool for the cross-encoder to judge"
+    );
+
+    for (query, expected_span) in [
+        ("Where does Stephen work?", "stephen"),
+        ("Where do I work?", "i"),
+    ] {
+        let mut alias_request = request.clone();
+        alias_request.queries = vec![query.to_string()];
+        let alias_pool = build_hybrid_rerank_pool_with_evidence_options(
+            &path,
+            &alias_request,
+            10,
+            EvidenceJoinOptions {
+                max_graph_seeds: 4,
+                max_graph_neighbors: 4,
+                ..EvidenceJoinOptions::default()
+            },
         )
-        .expect("insert promote run");
+        .expect("alias evidence join");
+        let alias_route = alias_pool
+            .candidates
+            .iter()
+            .find(|candidate| candidate.memory_id == object_id)
+            .and_then(|candidate| {
+                candidate
+                    .admissions
+                    .iter()
+                    .filter_map(|admission| admission.graph_route.as_ref())
+                    .find(|route| route.seed_source == super::GraphSeedSource::Entity)
+            })
+            .expect("alias resolves to the same entity route");
+        assert_eq!(
+            alias_route.seed_entity_id, route.seed_entity_id,
+            "aliases must not create duplicate entities"
+        );
+        assert_eq!(
+            alias_route.matched_query_span.as_deref(),
+            Some(expected_span)
+        );
     }
-    let before = graph_recall_readiness(&path, "workspace-memory").expect("readiness");
-    assert!(
-        !before.succeeded_graph_synthesis,
-        "a promote-only run must not count as graph synthesis even with a space named 'graph'"
-    );
-    assert!(
-        !before.usable(),
-        "graph is not usable without a real graph synthesis run"
+    let connection = Connection::open(&path).expect("open store");
+    let steve_entities: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM entities WHERE entity_key = 'person:steve'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("entity count");
+    assert_eq!(steve_entities, 1);
+
+    cleanup_store(&path);
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn evidence_graph_join_semantic_seed_recovers_two_hop_endpoint_support() {
+    let path = temp_store_path("evidence_graph_join_semantic_seed_two_hop");
+    cleanup_store(&path);
+    init_store(&path).expect("init succeeds");
+    for (key, name) in [
+        ("node:alpha", "Alpha Node"),
+        ("node:beta", "Beta Node"),
+        ("node:gamma", "Gamma Node"),
+    ] {
+        upsert_entity(&path, &entity_upsert_request(key, name)).expect("entity upsert");
+    }
+
+    let mut alpha = basic_request("orchard deployment anchor");
+    // The canonical source memory is not owned by the captured route entity.
+    // Its relationship support id must still provide the graph join foothold.
+    alpha.entity_key = Some("conversation:canonical".to_string());
+    let alpha_id = remember_memory(&path, &alpha)
+        .expect("alpha support")
+        .memory
+        .id;
+    let mut beta = basic_request("intermediate cobalt bridge");
+    beta.entity_key = Some("node:beta".to_string());
+    let beta_id = remember_memory(&path, &beta)
+        .expect("beta support")
+        .memory
+        .id;
+    let mut gamma = basic_request("terminal capybara evidence");
+    gamma.entity_key = Some("node:gamma".to_string());
+    let gamma_id = remember_memory(&path, &gamma)
+        .expect("gamma support")
+        .memory
+        .id;
+
+    for (subject, relation, object, memory_id, object_memory_id) in [
+        ("node:alpha", "routes_to", "node:beta", &alpha_id, &beta_id),
+        ("node:beta", "supports", "node:gamma", &beta_id, &gamma_id),
+    ] {
+        upsert_relationship(
+            &path,
+            &RelationshipUpsertRequest {
+                subject_entity_key: Some(subject.to_string()),
+                relation_type: relation.to_string(),
+                object_entity_key: Some(object.to_string()),
+                memory_id: Some(memory_id.clone()),
+                metadata_json: Some(routing_metadata(object_memory_id)),
+                confidence: 1.0,
+                ..relationship_upsert_request_defaults()
+            },
+        )
+        .expect("routing relationship");
+    }
+
+    let request = PackRequest {
+        title: "semantic bridge".to_string(),
+        queries: vec!["orchard deployment anchor".to_string()],
+        filters: SearchFilters::default(),
+        max_memories: 5,
+        max_chars: 4_000,
+        format: "markdown".to_string(),
+        min_score: 0.0,
+        rerank_candidates: 0,
+        query_embeddings: None,
+        query_token_embeddings: None,
+        token_model_id: None,
+    };
+    let on = build_hybrid_rerank_pool_with_evidence_options(
+        &path,
+        &request,
+        1,
+        EvidenceJoinOptions {
+            max_graph_seeds: 2,
+            max_graph_neighbors: 4,
+            ..EvidenceJoinOptions::default()
+        },
+    )
+    .expect("evidence join");
+    let target = on
+        .candidates
+        .iter()
+        .find(|candidate| candidate.memory_id == gamma_id)
+        .expect("two-hop endpoint recovered");
+    let route = target
+        .admissions
+        .iter()
+        .find_map(|admission| admission.graph_route.as_ref())
+        .expect("graph route observation");
+    assert_eq!(route.seed_source, super::GraphSeedSource::Memory);
+    assert_eq!(route.seed_entity_id, entity_id_for_key(&path, "node:alpha"));
+    assert_eq!(route.hop_depth, 2);
+
+    let trace = build_hybrid_rerank_pool_trace_with_evidence_options(
+        &path,
+        &request,
+        1,
+        EvidenceJoinOptions {
+            max_graph_seeds: 2,
+            max_graph_neighbors: 1,
+            ..EvidenceJoinOptions::default()
+        },
+    )
+    .expect("capped evidence trace");
+    let capped = trace
+        .observed
+        .iter()
+        .find(|candidate| candidate.memory_id == gamma_id)
+        .expect("two-hop endpoint remains observable after graph cap");
+    assert_eq!(capped.dropped_at.as_deref(), Some("graph_cap"));
+    assert!(capped
+        .admissions
+        .iter()
+        .filter_map(|admission| admission.graph_route.as_ref())
+        .any(|route| route.hop_depth == 2));
+
+    cleanup_store(&path);
+}
+
+#[test]
+fn evidence_graph_join_ambiguous_entity_span_abstains() {
+    let path = temp_store_path("evidence_graph_join_ambiguous_entity_span");
+    cleanup_store(&path);
+    init_store(&path).expect("init succeeds");
+    for (key, name) in [
+        ("person:one", "Alex"),
+        ("person:two", "Alex"),
+        ("org:target", "Target Org"),
+    ] {
+        upsert_entity(&path, &entity_upsert_request(key, name)).expect("entity upsert");
+    }
+    let mut subject = basic_request("alpha profile record");
+    subject.entity_key = Some("person:one".to_string());
+    let subject_id = remember_memory(&path, &subject)
+        .expect("subject support")
+        .memory
+        .id;
+    let mut object = basic_request("capybara endpoint record");
+    object.entity_key = Some("org:target".to_string());
+    let object_id = remember_memory(&path, &object)
+        .expect("object support")
+        .memory
+        .id;
+    upsert_relationship(
+        &path,
+        &RelationshipUpsertRequest {
+            subject_entity_key: Some("person:one".to_string()),
+            relation_type: "works_at".to_string(),
+            object_entity_key: Some("org:target".to_string()),
+            memory_id: Some(subject_id),
+            metadata_json: Some(routing_metadata(&object_id)),
+            confidence: 1.0,
+            ..relationship_upsert_request_defaults()
+        },
+    )
+    .expect("routing relationship");
+
+    let request = PackRequest {
+        title: "ambiguous entity".to_string(),
+        queries: vec!["Where does Alex work?".to_string()],
+        filters: SearchFilters::default(),
+        max_memories: 5,
+        max_chars: 4_000,
+        format: "markdown".to_string(),
+        min_score: 0.0,
+        rerank_candidates: 0,
+        query_embeddings: None,
+        query_token_embeddings: None,
+        token_model_id: None,
+    };
+    let off = build_hybrid_rerank_pool_with_evidence_options(
+        &path,
+        &request,
+        1,
+        EvidenceJoinOptions {
+            max_graph_neighbors: 0,
+            ..EvidenceJoinOptions::default()
+        },
+    )
+    .expect("graph off");
+    let on = build_hybrid_rerank_pool_with_evidence_options(
+        &path,
+        &request,
+        1,
+        EvidenceJoinOptions {
+            max_graph_seeds: 2,
+            max_graph_neighbors: 2,
+            ..EvidenceJoinOptions::default()
+        },
+    )
+    .expect("ambiguous span abstains");
+    assert_eq!(on.graph_outcome.as_deref(), Some("no_eligible_seed_route"));
+    assert_eq!(off.graph_outcome.as_deref(), Some("no_eligible_seed_route"));
+    assert_eq!(on.cos_top.to_bits(), off.cos_top.to_bits());
+    assert_eq!(on.candidates, off.candidates);
+    assert_eq!(on.observed, off.observed);
+    assert_eq!(on.pool_width, off.pool_width);
+    assert!(!on
+        .candidates
+        .iter()
+        .any(|candidate| candidate.memory_id == object_id));
+    cleanup_store(&path);
+}
+
+#[test]
+fn evidence_graph_join_entity_seed_traverses_reverse_and_ignores_unmarked_routes() {
+    let path = temp_store_path("evidence_graph_join_reverse");
+    cleanup_store(&path);
+    init_store(&path).expect("init succeeds");
+    for (key, name) in [
+        ("person:steve", "Steve"),
+        ("org:acme", "Acme Labs"),
+        ("org:noise", "Noise Org"),
+    ] {
+        upsert_entity(&path, &entity_upsert_request(key, name)).expect("entity upsert");
+    }
+    let mut subject = basic_request("principal architect profile");
+    subject.entity_key = Some("person:steve".to_string());
+    let subject_id = remember_memory(&path, &subject)
+        .expect("subject support")
+        .memory
+        .id;
+    let mut object = basic_request("Acme Labs organization record");
+    object.entity_key = Some("org:acme".to_string());
+    let object_id = remember_memory(&path, &object)
+        .expect("object support")
+        .memory
+        .id;
+    let mut noise = basic_request("unmarked noise endpoint");
+    noise.entity_key = Some("org:noise".to_string());
+    let noise_id = remember_memory(&path, &noise)
+        .expect("noise support")
+        .memory
+        .id;
+    upsert_relationship(
+        &path,
+        &RelationshipUpsertRequest {
+            subject_entity_key: Some("person:steve".to_string()),
+            relation_type: "works_at".to_string(),
+            object_entity_key: Some("org:acme".to_string()),
+            memory_id: Some(subject_id.clone()),
+            metadata_json: Some(routing_metadata(&object_id)),
+            confidence: 1.0,
+            ..relationship_upsert_request_defaults()
+        },
+    )
+    .expect("routing relationship");
+    upsert_relationship(
+        &path,
+        &RelationshipUpsertRequest {
+            subject_entity_key: Some("org:acme".to_string()),
+            relation_type: "has_noise".to_string(),
+            object_entity_key: Some("org:noise".to_string()),
+            memory_id: Some(object_id),
+            metadata_json: Some(serde_json::json!({"object_memory_id": noise_id}).to_string()),
+            confidence: 1.0,
+            ..relationship_upsert_request_defaults()
+        },
+    )
+    .expect("unmarked relationship");
+
+    let request = PackRequest {
+        title: "reverse entity route".to_string(),
+        queries: vec!["Who works at Acme Labs?".to_string()],
+        filters: SearchFilters::default(),
+        max_memories: 5,
+        max_chars: 4_000,
+        format: "markdown".to_string(),
+        min_score: 0.0,
+        rerank_candidates: 0,
+        query_embeddings: None,
+        query_token_embeddings: None,
+        token_model_id: None,
+    };
+    let on = build_hybrid_rerank_pool_with_evidence_options(
+        &path,
+        &request,
+        2,
+        EvidenceJoinOptions {
+            max_graph_seeds: 4,
+            max_graph_neighbors: 4,
+            ..EvidenceJoinOptions::default()
+        },
+    )
+    .expect("reverse evidence join");
+    let subject = on
+        .candidates
+        .iter()
+        .find(|candidate| candidate.memory_id == subject_id)
+        .expect("reverse endpoint recovered");
+    let route = subject
+        .admissions
+        .iter()
+        .filter_map(|admission| admission.graph_route.as_ref())
+        .find(|route| route.seed_source == super::GraphSeedSource::Entity)
+        .expect("entity route");
+    assert_eq!(route.traversal_directions, vec!["reverse"]);
+    assert!(!on
+        .candidates
+        .iter()
+        .any(|candidate| candidate.memory_id == noise_id));
+    cleanup_store(&path);
+}
+
+#[test]
+fn evidence_graph_join_routing_relationship_lifecycle_is_evidence_specific() {
+    let path = temp_store_path("evidence_graph_join_relationship_lifecycle");
+    cleanup_store(&path);
+    init_store(&path).expect("init succeeds");
+    upsert_entity(&path, &entity_upsert_request("person:steve", "Steve")).expect("Steve entity");
+    upsert_entity(&path, &entity_upsert_request("org:acme", "Acme")).expect("Acme entity");
+
+    let remember_for = |content: &str, entity_key: &str| {
+        let mut request = basic_request(content);
+        request.entity_key = Some(entity_key.to_string());
+        remember_memory(&path, &request)
+            .expect("support memory")
+            .memory
+            .id
+    };
+    let subject_one = remember_for("Steve profile one", "person:steve");
+    let subject_two = remember_for("Steve profile two", "person:steve");
+    let subject_three = remember_for("Steve profile three", "person:steve");
+    let object_one = remember_for("Acme profile one", "org:acme");
+    let object_two = remember_for("Acme profile two", "org:acme");
+
+    let relationship_request =
+        |relation: &str, subject_memory: &str, object_memory: &str| RelationshipUpsertRequest {
+            subject_entity_key: Some("person:steve".to_string()),
+            relation_type: relation.to_string(),
+            object_entity_key: Some("org:acme".to_string()),
+            memory_id: Some(subject_memory.to_string()),
+            metadata_json: Some(routing_metadata(object_memory)),
+            confidence: 1.0,
+            ..relationship_upsert_request_defaults()
+        };
+
+    let first = upsert_relationship(
+        &path,
+        &relationship_request("works_at", &subject_one, &object_one),
+    )
+    .expect("first routing relationship");
+    assert!(first.created);
+    let replay = upsert_relationship(
+        &path,
+        &relationship_request("works_at", &subject_one, &object_one),
+    )
+    .expect("exact replay");
+    assert!(!replay.created);
+    assert_eq!(replay.relationship.id, first.relationship.id);
+
+    let object_update = upsert_relationship(
+        &path,
+        &relationship_request("works_at", &subject_one, &object_two),
+    )
+    .expect("object support update");
+    assert!(!object_update.created);
+    assert_eq!(object_update.relationship.id, first.relationship.id);
+    let connection = Connection::open(&path).expect("open store");
+    let metadata: String = connection
+        .query_row(
+            "SELECT metadata_json FROM relationships WHERE id = ?1",
+            [&first.relationship.id],
+            |row| row.get(0),
+        )
+        .expect("routing metadata");
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&metadata).expect("metadata json")
+            ["object_memory_id"],
+        object_two
     );
 
-    // A real `dream --tasks graph` run flips it.
-    insert_graph_synthesis_run(&path);
-    let after = graph_recall_readiness(&path, "workspace-memory").expect("readiness");
-    assert!(
-        after.succeeded_graph_synthesis,
-        "a genuine graph synthesis run is detected"
-    );
-    assert!(
-        after.usable(),
-        "usable once synthesized with active relationships present"
-    );
+    let new_subject = upsert_relationship(
+        &path,
+        &relationship_request("works_at", &subject_two, &object_two),
+    )
+    .expect("new subject support");
+    assert!(new_subject.created);
+    assert_ne!(new_subject.relationship.id, first.relationship.id);
 
+    let unmarked = upsert_relationship(
+        &path,
+        &RelationshipUpsertRequest {
+            subject_entity_key: Some("person:steve".to_string()),
+            relation_type: "advises".to_string(),
+            object_entity_key: Some("org:acme".to_string()),
+            memory_id: Some(subject_three.clone()),
+            confidence: 1.0,
+            ..relationship_upsert_request_defaults()
+        },
+    )
+    .expect("unmarked relationship");
+    let upgraded = upsert_relationship(
+        &path,
+        &relationship_request("advises", &subject_three, &object_two),
+    )
+    .expect("same-identity routing upgrade");
+    assert!(!upgraded.created);
+    assert_eq!(upgraded.relationship.id, unmarked.relationship.id);
+
+    drop(connection);
+    cleanup_store(&path);
+}
+
+#[test]
+fn evidence_graph_join_rejects_structural_inactive_expired_and_filtered_routes() {
+    let path = temp_store_path("evidence_graph_join_route_eligibility");
+    cleanup_store(&path);
+    init_store(&path).expect("init succeeds");
+    for (key, name) in [
+        ("person:steve", "Steve"),
+        ("org:generic", "Generic Org"),
+        ("org:inactive", "Inactive Org"),
+        ("org:expired", "Expired Org"),
+        ("org:filtered", "Filtered Org"),
+    ] {
+        upsert_entity(&path, &entity_upsert_request(key, name)).expect("entity upsert");
+    }
+    let remember_for = |content: &str, entity_key: &str, project: &str| {
+        let mut request = basic_request(content);
+        request.entity_key = Some(entity_key.to_string());
+        request.project_key = Some(project.to_string());
+        remember_memory(&path, &request)
+            .expect("support memory")
+            .memory
+            .id
+    };
+    let subject = remember_for("Steve routing anchor", "person:steve", "eligible");
+    let target_specs = [
+        ("org:generic", "generic endpoint", "eligible"),
+        ("org:inactive", "inactive endpoint", "eligible"),
+        ("org:expired", "expired endpoint", "eligible"),
+        ("org:filtered", "filtered endpoint", "other-project"),
+    ];
+    let targets = target_specs
+        .iter()
+        .map(|(entity, content, project)| (*entity, remember_for(content, entity, project)))
+        .collect::<Vec<_>>();
+    for (index, (entity, target)) in targets.iter().enumerate() {
+        let (relation_type, status, valid_to) = match index {
+            0 => ("related_to", None, None),
+            1 => ("works_at", Some("tombstoned".to_string()), None),
+            2 => (
+                "works_at",
+                None,
+                Some("2000-01-01T00:00:00.000Z".to_string()),
+            ),
+            _ => ("works_at", None, None),
+        };
+        upsert_relationship(
+            &path,
+            &RelationshipUpsertRequest {
+                subject_entity_key: Some("person:steve".to_string()),
+                relation_type: relation_type.to_string(),
+                object_entity_key: Some((*entity).to_string()),
+                memory_id: Some(subject.clone()),
+                status,
+                valid_to,
+                metadata_json: Some(routing_metadata(target)),
+                confidence: 1.0,
+                ..relationship_upsert_request_defaults()
+            },
+        )
+        .expect("relationship upsert");
+    }
+
+    let request = PackRequest {
+        title: "route eligibility".to_string(),
+        queries: vec!["Where does Steve work?".to_string()],
+        filters: SearchFilters {
+            projects: vec!["eligible".to_string()],
+            ..SearchFilters::default()
+        },
+        max_memories: 5,
+        max_chars: 4_000,
+        format: "markdown".to_string(),
+        min_score: 0.0,
+        rerank_candidates: 0,
+        query_embeddings: None,
+        query_token_embeddings: None,
+        token_model_id: None,
+    };
+    let pool = build_hybrid_rerank_pool_with_evidence_options(
+        &path,
+        &request,
+        5,
+        EvidenceJoinOptions {
+            max_graph_seeds: 4,
+            max_graph_neighbors: 4,
+            ..EvidenceJoinOptions::default()
+        },
+    )
+    .expect("ineligible routes abstain");
+    assert_eq!(
+        pool.graph_outcome.as_deref(),
+        Some("no_eligible_seed_route")
+    );
+    for (_, target) in &targets {
+        assert!(!pool
+            .candidates
+            .iter()
+            .any(|candidate| candidate.memory_id == *target));
+    }
+    cleanup_store(&path);
+}
+
+#[test]
+fn evidence_graph_join_invalid_routing_record_fails_visibly() {
+    let path = temp_store_path("evidence_graph_join_invalid_route");
+    cleanup_store(&path);
+    init_store(&path).expect("init succeeds");
+    upsert_entity(&path, &entity_upsert_request("person:steve", "Steve")).expect("Steve entity");
+    upsert_entity(&path, &entity_upsert_request("org:acme", "Acme")).expect("Acme entity");
+    let mut subject = basic_request("Steve profile support");
+    subject.entity_key = Some("person:steve".to_string());
+    let subject_id = remember_memory(&path, &subject)
+        .expect("subject support")
+        .memory
+        .id;
+    upsert_relationship(
+        &path,
+        &RelationshipUpsertRequest {
+            subject_entity_key: Some("person:steve".to_string()),
+            relation_type: "works_at".to_string(),
+            object_entity_key: Some("org:acme".to_string()),
+            memory_id: Some(subject_id),
+            metadata_json: Some(serde_json::json!({"routing": true}).to_string()),
+            confidence: 1.0,
+            ..relationship_upsert_request_defaults()
+        },
+    )
+    .expect("malformed routing relationship is storable for degradation test");
+    let request = PackRequest {
+        title: "invalid route".to_string(),
+        queries: vec!["Where does Steve work?".to_string()],
+        filters: SearchFilters::default(),
+        max_memories: 5,
+        max_chars: 4_000,
+        format: "markdown".to_string(),
+        min_score: 0.0,
+        rerank_candidates: 0,
+        query_embeddings: None,
+        query_token_embeddings: None,
+        token_model_id: None,
+    };
+    let error = build_hybrid_rerank_pool_with_evidence_options(
+        &path,
+        &request,
+        5,
+        EvidenceJoinOptions {
+            ..EvidenceJoinOptions::default()
+        },
+    )
+    .expect_err("invalid routing record must not silently degrade");
+    assert!(
+        error.to_string().contains("missing object_memory_id"),
+        "{error}"
+    );
     cleanup_store(&path);
 }
 
@@ -5075,32 +5597,15 @@ fn rc(id: &str, content: &str, score: f32) -> RerankCandidate {
         content: content.to_string(),
         rerank_score: score,
         activation: None,
-        graph_pulled: false,
     }
 }
 
-/// A graph-pulled rerank candidate carrying an activation (the reserved-slot path).
-/// `graph_pulled` is true: it models a below-pool addition, so it is quarantined
-/// from the normal fill and can land only via a reserved slot.
-fn rc_graph(id: &str, content: &str, score: f32, activation: f64) -> RerankCandidate {
-    RerankCandidate {
-        memory_id: id.to_string(),
-        content: content.to_string(),
-        rerank_score: score,
-        activation: Some(activation),
-        graph_pulled: true,
-    }
-}
-
-/// An ordinary pool candidate that is also graph-reachable. Unlike
-/// [`rc_graph`], it competed in the baseline pool and is never quarantined.
 fn rc_reachable(id: &str, content: &str, score: f32, activation: f64) -> RerankCandidate {
     RerankCandidate {
         memory_id: id.to_string(),
         content: content.to_string(),
         rerank_score: score,
         activation: Some(activation),
-        graph_pulled: false,
     }
 }
 
@@ -5113,7 +5618,7 @@ fn assemble_reranked_pack_budget_fallback_keeps_scores_aligned() {
     let request = rerank_pack_request(5, 20, 0.0);
     let long = "x".repeat(200);
     let candidates = vec![rc("only", &long, 0.8)];
-    let report = assemble_reranked_pack(&request, 0.0, 0.0, &candidates);
+    let report = assemble_reranked_pack(&request, &candidates);
     assert_eq!(
         report.memory_ids.len(),
         1,
@@ -5139,8 +5644,7 @@ fn assemble_reranked_pack_orders_by_rerank_and_caps_memories() {
         rc("b", "high", 0.9),
         rc("c", "mid", 0.5),
     ];
-    // cosine_gate == 0.0 => legacy path, min_score floor is 0.0 (keeps all).
-    let report = assemble_reranked_pack(&request, 0.0, 0.0, &candidates);
+    let report = assemble_reranked_pack(&request, &candidates);
     assert_eq!(report.memory_ids, vec!["b".to_string(), "c".to_string()]);
     assert_eq!(report.content, "- high\n- mid\n");
     assert!(report.truncated, "3 candidates, 2 injected => truncated");
@@ -5155,7 +5659,7 @@ fn assemble_reranked_pack_uses_activation_only_for_exact_rerank_ties() {
         rc("higher_rerank", "higher", 0.51),
     ];
 
-    let report = assemble_reranked_pack(&request, 0.0, 0.0, &candidates);
+    let report = assemble_reranked_pack(&request, &candidates);
     assert_eq!(
         report.memory_ids,
         vec!["higher_rerank", "high_activation", "low_activation"],
@@ -5164,42 +5668,37 @@ fn assemble_reranked_pack_uses_activation_only_for_exact_rerank_ties() {
 }
 
 #[test]
-fn assemble_reranked_pack_gate_blocks_off_topic() {
+fn assemble_reranked_pack_top_score_gate_blocks_off_topic() {
     let request = rerank_pack_request(5, 10_000, 0.2);
     let candidates = vec![rc("a", "x", 0.05), rc("b", "y", 0.10)];
-    // cos_top below the gate AND rr_top (0.10) below min_score (0.2) => empty.
-    let report = assemble_reranked_pack(&request, 0.30, 0.10, &candidates);
+    // The top rerank score (0.10) is below min_score (0.2), so the whole pack abstains.
+    let report = assemble_reranked_pack(&request, &candidates);
     assert!(report.memory_ids.is_empty());
     assert!(report.content.is_empty());
     assert!(!report.truncated);
 }
 
 #[test]
-fn assemble_reranked_pack_gate_emits_on_cosine_without_item_floor() {
-    let request = rerank_pack_request(5, 10_000, 0.5);
-    let candidates = vec![rc("a", "x", 0.01), rc("b", "y", 0.02)];
-    // cos_top (0.80) clears the gate, so injection proceeds and the low
-    // cross-encoder scores are NOT floored on the gated path.
-    let report = assemble_reranked_pack(&request, 0.30, 0.80, &candidates);
-    assert_eq!(report.memory_ids, vec!["b".to_string(), "a".to_string()]);
-}
-
-#[test]
-fn assemble_reranked_pack_gate_emits_on_reranker_confidence() {
+fn assemble_reranked_pack_top_score_gate_emits_on_confidence() {
     let request = rerank_pack_request(5, 10_000, 0.4);
     let candidates = vec![rc("a", "x", 0.45), rc("b", "y", 0.10)];
-    // cos_top (0.05) below the gate, but rr_top (0.45) >= min_score (0.4) => emit.
-    let report = assemble_reranked_pack(&request, 0.30, 0.05, &candidates);
+    // The top rerank score (0.45) clears min_score (0.4), so the whole ordered
+    // pack remains eligible.
+    let report = assemble_reranked_pack(&request, &candidates);
     assert_eq!(report.memory_ids, vec!["a".to_string(), "b".to_string()]);
 }
 
 #[test]
-fn assemble_reranked_pack_legacy_applies_per_item_floor() {
+fn assemble_reranked_pack_min_score_is_a_pack_gate_not_an_item_floor() {
     let request = rerank_pack_request(5, 10_000, 0.4);
     let candidates = vec![rc("a", "x", 0.9), rc("b", "y", 0.5), rc("c", "z", 0.2)];
-    // No gate (0.0): min_score is a per-item floor; c (0.2 < 0.4) is dropped.
-    let report = assemble_reranked_pack(&request, 0.0, 0.0, &candidates);
-    assert_eq!(report.memory_ids, vec!["a".to_string(), "b".to_string()]);
+    // The top score clears the pack gate, so lower-ranked evidence remains
+    // eligible instead of being filtered a second time.
+    let report = assemble_reranked_pack(&request, &candidates);
+    assert_eq!(
+        report.memory_ids,
+        vec!["a".to_string(), "b".to_string(), "c".to_string()]
+    );
 }
 
 #[test]
@@ -5208,7 +5707,7 @@ fn assemble_reranked_pack_respects_char_budget() {
     // exceed it.
     let request = rerank_pack_request(5, 8, 0.0);
     let candidates = vec![rc("a", "high", 0.9), rc("b", "more", 0.5)];
-    let report = assemble_reranked_pack(&request, 0.0, 0.0, &candidates);
+    let report = assemble_reranked_pack(&request, &candidates);
     assert_eq!(report.memory_ids, vec!["a".to_string()]);
     assert_eq!(report.content, "- high\n");
     assert!(report.truncated);
@@ -5223,143 +5722,59 @@ fn assemble_reranked_pack_sets_top_score_to_max_rerank() {
             content: "alpha".into(),
             rerank_score: 0.20,
             activation: None,
-            graph_pulled: false,
         },
         RerankCandidate {
             memory_id: "b".into(),
             content: "beta".into(),
             rerank_score: 0.70,
             activation: None,
-            graph_pulled: false,
         },
         RerankCandidate {
             memory_id: "c".into(),
             content: "gamma".into(),
             rerank_score: 0.40,
             activation: None,
-            graph_pulled: false,
         },
     ];
-    let report = assemble_reranked_pack(&request, 0.0, 0.0, &candidates);
+    let report = assemble_reranked_pack(&request, &candidates);
     assert_eq!(report.top_score, Some(f64::from(0.70_f32)));
 }
 
-/// v0.3.1: a graph-pulled candidate the cross-encoder scored BELOW the cut still
-/// lands when a reserved slot is granted and its activation clears the floor —
-/// while flag-off (slots=0) buries it, the activation floor gates it out, and the
-/// slot count bounds how many graph candidates can claim a slot (precision).
 #[test]
-fn graph_reserved_slots_land_hop_candidate_only_when_granted_and_floored() {
+fn graph_candidates_compete_in_the_unified_rerank_pool() {
     let request = rerank_pack_request(3, 4000, 0.0);
-    // Three strong direct hits; one hop-reached candidate the reranker scored low.
     let candidates = vec![
         rc("a", "alpha", 0.90),
         rc("b", "beta", 0.80),
         rc("c", "gamma", 0.70),
-        rc_graph("g", "graph-hop answer", 0.10, 0.40),
+        rc_reachable("graph_only", "graph-only evidence", 0.85, 0.40),
     ];
 
-    // slots=0: identical to the plain assembler — the reranker buries the hop item.
-    let off = assemble_reranked_pack_with_graph_slots(&request, 0.0, 0.0, &candidates, 0, 0.0);
-    assert_eq!(off.memory_ids, vec!["a", "b", "c"]);
-    assert!(!off.memory_ids.contains(&"g".to_string()));
+    let report = assemble_reranked_pack(&request, &candidates);
 
-    // slots=1, floor below the activation: the hop item claims a reserved slot,
-    // displacing the weakest direct hit ("c"); precision-bounded to one slot.
-    let on = assemble_reranked_pack_with_graph_slots(&request, 0.0, 0.0, &candidates, 1, 0.0);
-    assert!(
-        on.memory_ids.contains(&"g".to_string()),
-        "hop candidate lands via reserved slot"
-    );
     assert_eq!(
-        on.memory_ids.len(),
-        3,
-        "reserved slot comes out of the budget, not on top of it"
+        report.memory_ids,
+        vec!["a", "graph_only", "b"],
+        "graph-added evidence receives the same cross-encoder ordering as every other candidate"
     );
-    assert!(on.memory_ids.contains(&"a".to_string()) && on.memory_ids.contains(&"b".to_string()));
-    assert!(
-        !on.memory_ids.contains(&"c".to_string()),
-        "weakest direct hit displaced"
-    );
-
-    // floor above the activation: the hop item is NOT admitted (precision floor).
-    let floored = assemble_reranked_pack_with_graph_slots(&request, 0.0, 0.0, &candidates, 1, 0.5);
-    assert_eq!(floored.memory_ids, vec!["a", "b", "c"]);
 }
 
-/// Only the highest-activation graph candidate claims the single reserved slot;
-/// a second, lower-activation graph neighbor stays out (slot bound + ordering).
 #[test]
-fn graph_reserved_slots_admit_highest_activation_only() {
+fn graph_activation_does_not_reserve_or_force_a_pack_slot() {
     let request = rerank_pack_request(3, 4000, 0.0);
     let candidates = vec![
-        rc("a", "alpha", 0.90),
-        rc("b", "beta", 0.80),
-        rc("c", "gamma", 0.70),
-        rc_graph("g_lo", "weaker hop", 0.10, 0.30),
-        rc_graph("g_hi", "stronger hop", 0.10, 0.45),
-    ];
-    let on = assemble_reranked_pack_with_graph_slots(&request, 0.0, 0.0, &candidates, 1, 0.0);
-    assert!(
-        on.memory_ids.contains(&"g_hi".to_string()),
-        "higher activation wins the slot"
-    );
-    assert!(
-        !on.memory_ids.contains(&"g_lo".to_string()),
-        "lower activation stays out"
-    );
-    assert_eq!(on.memory_ids.len(), 3);
-}
-
-/// The relative gate: a below-pool graph addition is quarantined from the normal
-/// rerank fill even when its cross-encoder score would otherwise place it in the
-/// top-`k`. Without this, graph expansion reorders the pack on nearly every query
-/// (measured 92% churn on real data); with it, `slots == 0` is byte-identical to
-/// graph-off and churn is bounded to `graph_rerank_slots`.
-#[test]
-fn graph_pulled_candidate_is_quarantined_from_normal_fill_until_a_slot_is_granted() {
-    let request = rerank_pack_request(3, 4000, 0.0);
-    // The hop-reached candidate now OUTSCORES a direct hit on the cross-encoder
-    // (rerank 0.75 > "c" at 0.70). Pre-gate it would have displaced "c" in normal
-    // fill, churning the pack with no slot granted.
-    let candidates = vec![
-        rc("a", "alpha", 0.90),
-        rc("b", "beta", 0.80),
-        rc("c", "gamma", 0.70),
-        rc_graph("g", "high-rerank hop answer", 0.75, 0.40),
+        rc("semantic_high", "semantic high", 0.90),
+        rc("semantic_mid", "semantic mid", 0.80),
+        rc("semantic_low", "semantic low", 0.70),
+        rc_reachable("graph_low", "graph evidence", 0.10, 100.0),
     ];
 
-    // slots=0: the graph addition is quarantined; the pack is exactly the three
-    // direct hits, identical to graph-off despite "g" out-reranking "c".
-    let off = assemble_reranked_pack_with_graph_slots(&request, 0.0, 0.0, &candidates, 0, 0.0);
-    assert_eq!(
-        off.memory_ids,
-        vec!["a", "b", "c"],
-        "graph addition must not enter normal fill on rerank merit alone"
-    );
+    let report = assemble_reranked_pack(&request, &candidates);
 
-    // A non-graph candidate with the SAME high rerank score WOULD displace "c" —
-    // proving the quarantine keys off `graph_pulled`, not the score.
-    let normal_equiv = vec![
-        rc("a", "alpha", 0.90),
-        rc("b", "beta", 0.80),
-        rc("c", "gamma", 0.70),
-        rc("g", "high-rerank ordinary answer", 0.75),
-    ];
-    let normal = assemble_reranked_pack_with_graph_slots(&request, 0.0, 0.0, &normal_equiv, 0, 0.0);
     assert_eq!(
-        normal.memory_ids,
-        vec!["a", "b", "g"],
-        "an ordinary candidate at the same score competes and displaces 'c'"
-    );
-
-    // slots=1: the quarantined graph addition is admitted via the reserved slot.
-    let on = assemble_reranked_pack_with_graph_slots(&request, 0.0, 0.0, &candidates, 1, 0.0);
-    assert!(on.memory_ids.contains(&"g".to_string()));
-    assert_eq!(
-        on.memory_ids.len(),
-        3,
-        "bounded: one slot, out of the budget"
+        report.memory_ids,
+        vec!["semantic_high", "semantic_mid", "semantic_low"],
+        "activation cannot override a higher cross-encoder score"
     );
 }
 
@@ -5370,17 +5785,12 @@ fn empty_pack_has_no_top_score() {
 }
 
 #[test]
-fn empty_pack_and_cosine_gate_helpers() {
+fn empty_pack_preserves_request_shape() {
     let request = rerank_pack_request(5, 10_000, 0.0);
     let empty = empty_pack(&request);
     assert!(empty.memory_ids.is_empty());
     assert!(empty.content.is_empty());
     assert_eq!(empty.title, "rr");
-
-    assert!(pack_blocked_by_cosine_gate(0.10, 0.30));
-    assert!(!pack_blocked_by_cosine_gate(0.40, 0.30));
-    // A disabled gate (0.0) never blocks.
-    assert!(!pack_blocked_by_cosine_gate(0.0, 0.0));
 }
 
 #[test]
@@ -6142,99 +6552,6 @@ fn relationship_confidence_rises_with_evidence_multiplicity() {
 }
 
 #[test]
-fn graph_neighbor_allocation_diversifies_entities_before_filling() {
-    let candidates = vec![
-        (
-            "a-second".to_string(),
-            "workspace-memory".to_string(),
-            "entity:a".to_string(),
-            0.80,
-        ),
-        (
-            "entity-c".to_string(),
-            "workspace-memory".to_string(),
-            "entity:c".to_string(),
-            0.60,
-        ),
-        (
-            "a-first".to_string(),
-            "workspace-memory".to_string(),
-            "entity:a".to_string(),
-            0.90,
-        ),
-        (
-            "entity-b".to_string(),
-            "workspace-memory".to_string(),
-            "entity:b".to_string(),
-            0.70,
-        ),
-    ];
-
-    let first_pass = diversify_graph_neighbors(candidates.clone(), 3);
-    assert_eq!(
-        first_pass
-            .iter()
-            .map(|(memory_id, _)| memory_id.as_str())
-            .collect::<Vec<_>>(),
-        vec!["a-first", "entity-b", "entity-c"],
-        "the first pass admits at most one memory per neighbor entity"
-    );
-
-    let filled = diversify_graph_neighbors(candidates, 4);
-    assert_eq!(
-        filled
-            .iter()
-            .map(|(memory_id, _)| memory_id.as_str())
-            .collect::<Vec<_>>(),
-        vec!["a-first", "entity-b", "entity-c", "a-second"],
-        "remaining slots preserve the original global activation order"
-    );
-
-    let same_key_across_spaces = vec![
-        (
-            "workspace-shared".to_string(),
-            "workspace-memory".to_string(),
-            "entity:shared".to_string(),
-            0.90,
-        ),
-        (
-            "trading-shared".to_string(),
-            "trading".to_string(),
-            "entity:shared".to_string(),
-            0.80,
-        ),
-        (
-            "workspace-second".to_string(),
-            "workspace-memory".to_string(),
-            "entity:shared".to_string(),
-            0.70,
-        ),
-    ];
-    assert_eq!(
-        diversify_graph_neighbors(same_key_across_spaces, 2)
-            .iter()
-            .map(|(memory_id, _)| memory_id.as_str())
-            .collect::<Vec<_>>(),
-        vec!["workspace-shared", "trading-shared"],
-        "entity identity is scoped by space"
-    );
-
-    assert!(
-        diversify_graph_neighbors(
-            vec![(
-                "memory".to_string(),
-                "workspace-memory".to_string(),
-                "entity:a".to_string(),
-                1.0,
-            )],
-            0,
-        )
-        .is_empty(),
-        "a zero limit admits no graph memories"
-    );
-}
-
-#[test]
 fn graph_cap_drops_remain_visible_without_changing_admitted_pool() {
     let mut merged = vec![super::PackPoolItem {
         memory_id: "selected".to_string(),
@@ -6246,7 +6563,13 @@ fn graph_cap_drops_remain_visible_without_changing_admitted_pool() {
 
     let allocation_ranks =
         BTreeMap::from([("selected".to_string(), 1), ("dropped".to_string(), 2)]);
-    apply_graph_admission_observations(&mut merged, &activations, &allocation_ranks, &mut observed);
+    apply_graph_admission_observations(
+        &mut merged,
+        &activations,
+        &allocation_ranks,
+        &BTreeMap::new(),
+        &mut observed,
+    );
 
     assert_eq!(
         merged
@@ -6270,198 +6593,6 @@ fn graph_cap_drops_remain_visible_without_changing_admitted_pool() {
 }
 
 #[test]
-fn graph_within_entity_maxsim_selects_highest_score_and_preserves_ties() {
-    let ids = vec!["newer-first".to_string(), "older-relevant".to_string()];
-    let scores = BTreeMap::from([
-        ("newer-first".to_string(), 0.2),
-        ("older-relevant".to_string(), 0.9),
-    ]);
-    assert_eq!(
-        select_graph_entity_memory(ids.clone(), &scores).expect("scores complete"),
-        vec!["older-relevant"]
-    );
-
-    let ties = BTreeMap::from([
-        ("newer-first".to_string(), 0.9),
-        ("older-relevant".to_string(), 0.9),
-    ]);
-    assert_eq!(
-        select_graph_entity_memory(ids, &ties).expect("ties deterministic"),
-        vec!["newer-first"]
-    );
-}
-
-#[test]
-fn graph_within_entity_maxsim_requires_complete_scores() {
-    let error = select_graph_entity_memory(
-        vec!["scored".to_string(), "missing".to_string()],
-        &BTreeMap::from([("scored".to_string(), 0.8)]),
-    )
-    .expect_err("missing token score must fail loudly");
-    assert!(error.to_string().contains("missing token embedding"));
-}
-
-#[test]
-fn graph_within_entity_maxsim_scores_only_considered_memories() {
-    let scores = score_graph_entity_memories(
-        &["considered".to_string()],
-        &[vec![1.0, 0.0]],
-        &[
-            ("considered".to_string(), vec![vec![0.8, 0.2]]),
-            ("unrelated".to_string(), vec![vec![1.0, 0.0]]),
-        ],
-    )
-    .expect("considered memory has tokens");
-    assert_eq!(
-        scores.keys().cloned().collect::<Vec<_>>(),
-        vec!["considered"]
-    );
-}
-
-#[test]
-fn graph_within_entity_maxsim_rejects_missing_prerequisites() {
-    let request = associative_recall_request();
-    let path = temp_store_path("graph_maxsim_prerequisites");
-    for expansion in [
-        PackExpansionOptions {
-            graph_within_entity_selection: super::GraphWithinEntitySelection::Maxsim,
-            ..PackExpansionOptions::default()
-        },
-        PackExpansionOptions {
-            graph_expansion: true,
-            graph_within_entity_selection: super::GraphWithinEntitySelection::Maxsim,
-            ..PackExpansionOptions::default()
-        },
-    ] {
-        let error = build_hybrid_rerank_pool_with_expansion(&path, &request, 10, expansion)
-            .expect_err("invalid prerequisites fail before store access");
-        assert!(matches!(error, super::Error::InvalidRequest { .. }));
-    }
-
-    let expansion = PackExpansionOptions {
-        graph_expansion: true,
-        graph_within_entity_selection: super::GraphWithinEntitySelection::Maxsim,
-        ..PackExpansionOptions::default()
-    };
-    let tokens_without_model = PackRequest {
-        query_token_embeddings: Some(vec![vec![vec![1.0, 0.0]]]),
-        ..request.clone()
-    };
-    let model_without_tokens = PackRequest {
-        token_model_id: Some("graph-maxsim-test".to_string()),
-        ..request
-    };
-    for incomplete in [&tokens_without_model, &model_without_tokens] {
-        let error = build_hybrid_rerank_pool_with_expansion(&path, incomplete, 10, expansion)
-            .expect_err("each missing token prerequisite fails before store access");
-        assert!(matches!(error, super::Error::InvalidRequest { .. }));
-    }
-}
-
-#[test]
-fn graph_within_entity_maxsim_changes_only_entity_memory_choice() {
-    let path = temp_store_path("graph_within_entity_maxsim");
-    cleanup_store(&path);
-    init_store(&path).expect("init");
-    upsert_entity(&path, &entity_upsert_request("ent:seed", "Seed")).expect("seed entity");
-    upsert_entity(&path, &entity_upsert_request("ent:target", "Target")).expect("target entity");
-    upsert_relationship(
-        &path,
-        &RelationshipUpsertRequest {
-            subject_entity_key: Some("ent:seed".to_string()),
-            relation_type: "related_to".to_string(),
-            object_entity_key: Some("ent:target".to_string()),
-            confidence: 1.0,
-            ..relationship_upsert_request_defaults()
-        },
-    )
-    .expect("relationship");
-    insert_graph_synthesis_run(&path);
-
-    let mut seed = basic_request("orchard anchor");
-    seed.entity_key = Some("ent:seed".to_string());
-    let seed_id = remember_memory(&path, &seed).expect("seed").memory.id;
-    let mut older = basic_request("answer-bearing older memory");
-    older.entity_key = Some("ent:target".to_string());
-    let older_id = remember_memory(&path, &older).expect("older").memory.id;
-    let mut newer = basic_request("recent but irrelevant memory");
-    newer.entity_key = Some("ent:target".to_string());
-    let newer_id = remember_memory(&path, &newer).expect("newer").memory.id;
-
-    let model = "graph-maxsim-test";
-    let connection = Connection::open(&path).expect("open");
-    for (memory_id, vector) in [
-        (&seed_id, vec![vec![1.0, 0.0]]),
-        (&older_id, vec![vec![0.9, 0.1]]),
-        (&newer_id, vec![vec![0.0, 1.0]]),
-    ] {
-        upsert_memory_token_embedding(&connection, memory_id, model, &vector).expect("tokens");
-    }
-    drop(connection);
-
-    let request = PackRequest {
-        title: "graph maxsim".to_string(),
-        queries: vec!["orchard anchor".to_string()],
-        filters: SearchFilters::default(),
-        max_memories: 1,
-        max_chars: 1_000,
-        format: "markdown".to_string(),
-        min_score: 0.0,
-        rerank_candidates: 0,
-        query_embeddings: None,
-        query_token_embeddings: Some(vec![vec![vec![1.0, 0.0]]]),
-        token_model_id: Some(model.to_string()),
-    };
-    let expansion = PackExpansionOptions {
-        graph_expansion: true,
-        max_graph_seeds: 1,
-        max_graph_neighbors: 1,
-        ..PackExpansionOptions::default()
-    };
-    let recency = build_hybrid_rerank_pool_with_expansion(&path, &request, 1, expansion)
-        .expect("recency pool");
-    let semantic = build_hybrid_rerank_pool_with_expansion(
-        &path,
-        &request,
-        1,
-        PackExpansionOptions {
-            graph_within_entity_selection: super::GraphWithinEntitySelection::Maxsim,
-            ..expansion
-        },
-    )
-    .expect("maxsim pool");
-    let graph_id = |pool: &RerankPool| {
-        pool.candidates
-            .iter()
-            .find(|candidate| candidate.graph_pulled)
-            .map(|candidate| candidate.memory_id.clone())
-    };
-    assert_eq!(graph_id(&recency), Some(newer_id.clone()));
-    assert_eq!(graph_id(&semantic), Some(older_id));
-
-    let connection = Connection::open(&path).expect("reopen");
-    connection
-        .execute(
-            "DELETE FROM memory_token_embeddings WHERE memory_id = ?1",
-            [&newer_id],
-        )
-        .expect("remove one considered token row");
-    drop(connection);
-    let error = build_hybrid_rerank_pool_with_expansion(
-        &path,
-        &request,
-        1,
-        PackExpansionOptions {
-            graph_within_entity_selection: super::GraphWithinEntitySelection::Maxsim,
-            ..expansion
-        },
-    )
-    .expect_err("missing considered token row fails loudly");
-    assert!(error.to_string().contains("missing token embedding"));
-    cleanup_store(&path);
-}
-
-#[test]
 fn hybrid_dropped_candidate_retains_graph_activation_observation() {
     let mut merged = Vec::new();
     let activations = BTreeMap::from([("shared".to_string(), 0.8)]);
@@ -6477,11 +6608,18 @@ fn hybrid_dropped_candidate_retains_graph_activation_observation() {
             source_rank: 6,
             seed_memory_id: None,
             activation: None,
+            graph_route: None,
         }],
     }];
 
     let allocation_ranks = BTreeMap::from([("shared".to_string(), 1)]);
-    apply_graph_admission_observations(&mut merged, &activations, &allocation_ranks, &mut observed);
+    apply_graph_admission_observations(
+        &mut merged,
+        &activations,
+        &allocation_ranks,
+        &BTreeMap::new(),
+        &mut observed,
+    );
 
     assert_eq!(
         observed.len(),
@@ -6513,7 +6651,13 @@ fn production_observation_mode_does_not_materialize_graph_cap_drops() {
         .collect::<Vec<_>>();
     let mut observed = Vec::new();
 
-    apply_graph_admission_observations(&mut merged, &activations, &BTreeMap::new(), &mut observed);
+    apply_graph_admission_observations(
+        &mut merged,
+        &activations,
+        &BTreeMap::new(),
+        &BTreeMap::new(),
+        &mut observed,
+    );
 
     assert_eq!(
         merged
@@ -6532,15 +6676,14 @@ fn production_observation_mode_does_not_materialize_graph_cap_drops() {
 }
 
 #[test]
-fn pool_trace_rejects_unbounded_graph_expansion_limits() {
-    let error = build_hybrid_rerank_pool_trace_with_expansion(
+fn pool_trace_rejects_unbounded_evidence_join_limits() {
+    let error = build_hybrid_rerank_pool_trace_with_evidence_options(
         temp_store_path("trace_graph_bounds"),
-        &associative_recall_request(),
+        &rerank_pack_request(5, 4_000, 0.0),
         10,
-        PackExpansionOptions {
-            graph_expansion: true,
+        EvidenceJoinOptions {
             max_graph_seeds: super::MAX_PACK_MEMORIES + 1,
-            ..associative_recall_on()
+            ..EvidenceJoinOptions::default()
         },
     )
     .expect_err("trace graph limits must fail before opening the store");
@@ -6560,13 +6703,20 @@ fn canonical_graph_observation_replaces_provisional_rank() {
             source_rank: 99,
             seed_memory_id: None,
             activation: Some(0.9),
+            graph_route: None,
         }],
     }];
     let activations = BTreeMap::from([("selected".to_string(), 0.9)]);
     let allocation_ranks = BTreeMap::from([("selected".to_string(), 1)]);
     let mut observed = Vec::new();
 
-    apply_graph_admission_observations(&mut merged, &activations, &allocation_ranks, &mut observed);
+    apply_graph_admission_observations(
+        &mut merged,
+        &activations,
+        &allocation_ranks,
+        &BTreeMap::new(),
+        &mut observed,
+    );
 
     let graph_sources = merged[0]
         .admissions
@@ -6575,267 +6725,6 @@ fn canonical_graph_observation_replaces_provisional_rank() {
         .collect::<Vec<_>>();
     assert_eq!(graph_sources.len(), 1);
     assert_eq!(graph_sources[0].source_rank, 1);
-}
-
-/// v0.3.1 / mem_...3cc end-to-end: a graph edge backed by MORE co-occurring
-/// `memory_links` earns higher confidence (via `dream --tasks graph`), and that
-/// confidence flows through `edge_weight` so the densely-associated neighbor gets
-/// strictly HIGHER graph-expansion activation than an incidental single-link
-/// neighbor — the signal the reserved rerank slot needs to pick the relevant hop.
-#[test]
-fn graph_edge_multiplicity_differentiates_neighbor_activation() {
-    let path = temp_store_path("graph_edge_multiplicity_activation");
-    cleanup_store(&path);
-    init_store(&path).expect("init succeeds");
-    for (key, name) in [
-        ("ent:seed", "Seed"),
-        ("ent:dense", "Dense"),
-        ("ent:sparse", "Sparse"),
-        ("ent:overlap", "Overlap"),
-    ] {
-        upsert_entity(&path, &entity_upsert_request(key, name)).expect("entity upsert");
-    }
-
-    // Seed memory matches the query; neighbors share no query vocabulary (graph-only).
-    let mut seed = basic_request("decision: orchard pipeline retrieval anchor point");
-    seed.entity_key = Some("ent:seed".to_string());
-    let seed_id = remember_memory(&path, &seed).expect("seed").memory.id;
-
-    // Dense neighbor: three distinct memories, each linked from the seed (3 links).
-    let mut dense_ids = Vec::new();
-    for i in 0..3 {
-        let mut m = basic_request(&format!("ztech detail номер {i} for the dense neighbor"));
-        m.entity_key = Some("ent:dense".to_string());
-        dense_ids.push(remember_memory(&path, &m).expect("dense").memory.id);
-    }
-    // Sparse neighbor: one memory, one link.
-    let mut sparse = basic_request("yfact unrelated trivia for the sparse neighbor");
-    sparse.entity_key = Some("ent:sparse".to_string());
-    let sparse_id = remember_memory(&path, &sparse).expect("sparse").memory.id;
-    let mut overlap = basic_request("orchard pipeline retrieval anchor point overlap memory");
-    overlap.entity_key = Some("ent:overlap".to_string());
-    let overlap_id = remember_memory(&path, &overlap).expect("overlap").memory.id;
-
-    let now = "2026-05-28T00:00:00.000Z";
-    let connection = Connection::open(&path).expect("open store");
-    for dst in dense_ids.iter().chain([&sparse_id, &overlap_id]) {
-        connection
-            .execute(
-                "INSERT INTO memory_links (src_memory_id, dst_memory_id, link_type, status, confidence, created_at) \
-                 VALUES (?1, ?2, 'related_to', 'active', 1.0, ?3)",
-                params![seed_id, dst, now],
-            )
-            .expect("insert link");
-    }
-    drop(connection);
-
-    // Materialize the graph (also records a succeeded graph dream run => readiness ok).
-    dream_store(
-        &path,
-        &DreamRequest {
-            tasks: vec!["graph".to_string()],
-            max_memories: 50,
-            dry_run: false,
-            ..dream_request_defaults()
-        },
-    )
-    .expect("graph apply");
-
-    let request = PackRequest {
-        title: "t".to_string(),
-        queries: vec!["orchard pipeline retrieval anchor point".to_string()],
-        filters: SearchFilters::default(),
-        max_memories: 50,
-        max_chars: 10_000,
-        format: "markdown".to_string(),
-        min_score: 0.0,
-        rerank_candidates: 0,
-        query_embeddings: None,
-        query_token_embeddings: None,
-        token_model_id: None,
-    };
-    let pool = build_hybrid_rerank_pool_with_expansion(
-        &path,
-        &request,
-        50,
-        PackExpansionOptions {
-            graph_expansion: true,
-            max_graph_seeds: 3,
-            max_graph_neighbors: 10,
-            graph_decay: 0.5,
-            ..PackExpansionOptions::default()
-        },
-    )
-    .expect("pool");
-
-    let activation = |id: &str| {
-        pool.candidates
-            .iter()
-            .find(|c| c.memory_id == id)
-            .and_then(|c| c.activation)
-    };
-    let dense_act = activation(&dense_ids[0]).expect("dense neighbor pulled by graph");
-    let sparse_act = activation(&sparse_id).expect("sparse neighbor pulled by graph");
-    assert!(
-        dense_act > sparse_act,
-        "denser edge (3 links -> conf 0.75) out-activates the single-link edge \
-         (conf 0.5): dense={dense_act} sparse={sparse_act}"
-    );
-
-    assert_graph_trace_is_neutral_and_excludes_hybrid_overlap(&path, &request, &overlap_id);
-
-    cleanup_store(&path);
-}
-
-fn assert_graph_trace_is_neutral_and_excludes_hybrid_overlap(
-    path: &Path,
-    request: &PackRequest,
-    overlap_id: &str,
-) {
-    let expansion = PackExpansionOptions {
-        graph_expansion: true,
-        max_graph_seeds: 3,
-        max_graph_neighbors: 1,
-        graph_decay: 0.5,
-        ..PackExpansionOptions::default()
-    };
-    let production_pool = build_hybrid_rerank_pool_with_expansion(path, request, 50, expansion)
-        .expect("production pool");
-    let trace_pool = build_hybrid_rerank_pool_trace_with_expansion(path, request, 50, expansion)
-        .expect("trace pool");
-    assert_eq!(
-        production_pool
-            .candidates
-            .iter()
-            .map(|candidate| candidate.memory_id.as_str())
-            .collect::<Vec<_>>(),
-        trace_pool
-            .candidates
-            .iter()
-            .map(|candidate| candidate.memory_id.as_str())
-            .collect::<Vec<_>>(),
-        "diagnostic observations preserve admitted order"
-    );
-    let overlap_record = trace_pool
-        .observed
-        .iter()
-        .find(|candidate| candidate.memory_id == overlap_id)
-        .expect("hybrid-overlap record");
-    assert_eq!(overlap_record.graph_allocation_rank, None);
-    assert!(
-        overlap_record
-            .admissions
-            .iter()
-            .any(|source| source.source == super::AdmissionSource::Graph),
-        "hybrid overlap keeps graph provenance without consuming allocation"
-    );
-    let allocation_records = trace_pool
-        .observed
-        .iter()
-        .filter(|candidate| candidate.graph_allocation_rank.is_some())
-        .collect::<Vec<_>>();
-    assert_eq!(allocation_records.len(), 2);
-    assert_eq!(
-        allocation_records
-            .iter()
-            .filter(|candidate| candidate.admitted)
-            .count(),
-        1
-    );
-    assert_eq!(
-        allocation_records
-            .iter()
-            .filter(|candidate| !candidate.admitted)
-            .count(),
-        1
-    );
-    for candidate in trace_pool
-        .candidates
-        .iter()
-        .filter(|candidate| candidate.graph_pulled)
-    {
-        assert_eq!(
-            candidate
-                .admissions
-                .iter()
-                .filter(|source| source.source == super::AdmissionSource::Graph)
-                .count(),
-            1,
-            "selected graph additions have one canonical graph rank"
-        );
-    }
-}
-
-/// A graph-reachable memory that ALSO landed in the base retrieval pool (so it is
-/// already a candidate, just possibly rerank-buried) must still receive a graph
-/// activation, so a reserved rerank slot can promote it. Regression guard for the
-/// in-pool-tagging fix: the original code skipped pool members, leaving a buried
-/// hop target with no activation and no way to be promoted.
-#[test]
-fn graph_activation_tags_in_pool_reachable_neighbor() {
-    let path = temp_store_path("graph_activation_in_pool_neighbor");
-    cleanup_store(&path);
-    init_store(&path).expect("init succeeds");
-    upsert_entity(&path, &entity_upsert_request("ent:a", "A")).expect("entity A");
-    upsert_entity(&path, &entity_upsert_request("ent:b", "B")).expect("entity B");
-    upsert_relationship(
-        &path,
-        &RelationshipUpsertRequest {
-            subject_entity_key: Some("ent:a".to_string()),
-            relation_type: "related_to".to_string(),
-            object_entity_key: Some("ent:b".to_string()),
-            confidence: 1.0,
-            ..relationship_upsert_request_defaults()
-        },
-    )
-    .expect("relationship");
-
-    // Both seed and target match the query, so BOTH are in the base BM25 pool.
-    let mut seed = basic_request("orchard pipeline retrieval anchor seed memory");
-    seed.entity_key = Some("ent:a".to_string());
-    remember_memory(&path, &seed).expect("seed");
-    let mut target = basic_request("orchard pipeline retrieval downstream target memory");
-    target.entity_key = Some("ent:b".to_string());
-    let t_id = remember_memory(&path, &target).expect("target").memory.id;
-    insert_graph_synthesis_run(&path);
-
-    let request = PackRequest {
-        title: "t".to_string(),
-        queries: vec!["orchard pipeline retrieval".to_string()],
-        filters: SearchFilters::default(),
-        max_memories: 50,
-        max_chars: 10_000,
-        format: "markdown".to_string(),
-        min_score: 0.0,
-        rerank_candidates: 0,
-        query_embeddings: None,
-        query_token_embeddings: None,
-        token_model_id: None,
-    };
-    let pool = build_hybrid_rerank_pool_with_expansion(
-        &path,
-        &request,
-        50,
-        PackExpansionOptions {
-            graph_expansion: true,
-            max_graph_seeds: 3,
-            max_graph_neighbors: 5,
-            graph_decay: 0.5,
-            ..PackExpansionOptions::default()
-        },
-    )
-    .expect("pool");
-    let target_cand = pool
-        .candidates
-        .iter()
-        .find(|c| c.memory_id == t_id)
-        .expect("target is in the base retrieval pool");
-    assert!(
-        target_cand.activation.is_some(),
-        "an in-pool graph-reachable neighbor is tagged with activation for reserved-slot promotion"
-    );
-
-    cleanup_store(&path);
 }
 
 #[test]
@@ -9230,6 +9119,131 @@ fn candidate_submit_validates_enums_and_dry_run() {
 }
 
 #[test]
+fn adjudication_guard_decides_ok_degraded_refuse() {
+    use super::{adjudication_guard, AdjudicationGuard};
+    // Verdict present -> promote regardless of requirement.
+    assert_eq!(adjudication_guard(true, true), AdjudicationGuard::Ok);
+    assert_eq!(adjudication_guard(true, false), AdjudicationGuard::Ok);
+    // No verdict + required -> fail closed.
+    assert_eq!(adjudication_guard(false, true), AdjudicationGuard::Refuse);
+    // No verdict + not required -> promote but degraded (warn).
+    assert_eq!(
+        adjudication_guard(false, false),
+        AdjudicationGuard::Degraded
+    );
+}
+
+#[test]
+fn approve_promotes_capture_candidate_with_adjudication_verdict() {
+    let path = temp_store_path("candidate_capture_adjudicated");
+    cleanup_store(&path);
+    init_store(&path).expect("init succeeds");
+
+    let mut request = candidate_submit_request("fact: the sky was clear on 3 May");
+    request.source_type = Some("capture".to_string());
+    request.source_json = Some(r#"{"adjudication":{"overall":"clean"}}"#.to_string());
+    let submitted = submit_candidate(&path, &request).expect("submit succeeds");
+
+    // A capture candidate carrying an adjudication verdict promotes (guard = Ok).
+    let report = approve_candidate(
+        &path,
+        &CandidateApproveRequest {
+            id: submitted.candidate.id.clone(),
+            embedding: None,
+            embedding_model_id: None,
+            dry_run: false,
+        },
+    )
+    .expect("adjudicated capture candidate approves");
+    assert_eq!(report.candidate.status, "approved");
+    assert!(report.candidate.resulting_memory_id.is_some());
+
+    cleanup_store(&path);
+}
+
+#[test]
+fn approve_promotes_unadjudicated_capture_when_not_required() {
+    // Default posture (MEMKEEPER_CAPTURE_REQUIRE_ADJUDICATION unset): a capture
+    // candidate with no verdict still promotes (Degraded), so the gate is opt-in.
+    let path = temp_store_path("candidate_capture_degraded");
+    cleanup_store(&path);
+    init_store(&path).expect("init succeeds");
+
+    let mut request = candidate_submit_request("fact: unadjudicated but allowed by default");
+    request.source_type = Some("capture".to_string());
+    let submitted = submit_candidate(&path, &request).expect("submit succeeds");
+
+    let report = approve_candidate(
+        &path,
+        &CandidateApproveRequest {
+            id: submitted.candidate.id.clone(),
+            embedding: None,
+            embedding_model_id: None,
+            dry_run: false,
+        },
+    )
+    .expect("unadjudicated capture approves when not required");
+    assert_eq!(report.candidate.status, "approved");
+
+    cleanup_store(&path);
+}
+
+#[test]
+fn quarantine_candidate_transitions_pending_and_blocks_decided() {
+    use super::{quarantine_candidate, CandidateQuarantineRequest};
+    let path = temp_store_path("candidate_quarantine");
+    cleanup_store(&path);
+    init_store(&path).expect("init succeeds");
+
+    let mut request = candidate_submit_request("fact: adjudicator flagged this as unsupported");
+    request.source_type = Some("capture".to_string());
+    let submitted = submit_candidate(&path, &request).expect("submit succeeds");
+
+    let report = quarantine_candidate(
+        &path,
+        &CandidateQuarantineRequest {
+            id: submitted.candidate.id.clone(),
+            reason: Some("unsupported edge; no source quote".to_string()),
+            dry_run: false,
+        },
+    )
+    .expect("quarantine succeeds");
+    assert_eq!(report.candidate.status, "quarantined");
+    assert_eq!(
+        report.candidate.decided_reason.as_deref(),
+        Some("unsupported edge; no source quote")
+    );
+
+    // Quarantined is a terminal state -> a second decision is refused.
+    assert!(matches!(
+        quarantine_candidate(
+            &path,
+            &CandidateQuarantineRequest {
+                id: submitted.candidate.id.clone(),
+                reason: None,
+                dry_run: false,
+            },
+        ),
+        Err(Error::InvalidRequest { .. })
+    ));
+
+    // And a quarantined candidate is listable under its status.
+    let listed = list_candidates(
+        &path,
+        &CandidateListRequest {
+            status: Some("quarantined".to_string()),
+            space: None,
+            limit: 50,
+            offset: 0,
+        },
+    )
+    .expect("list quarantined");
+    assert_eq!(listed.total, 1);
+
+    cleanup_store(&path);
+}
+
+#[test]
 fn remember_mode_append_coexists() {
     let path = temp_store_path("remember_mode_append");
     cleanup_store(&path);
@@ -10131,12 +10145,9 @@ fn build_hybrid_rerank_pool_fetches_contents_on_one_snapshot() {
 }
 
 #[test]
-fn rerank_pool_uses_retrieval_companion() {
-    // LI mode must NOT concatenate summary into the rerank/pack text: on
-    // prefix-duplicate summaries the concat corrupts cross-encoder ordering
-    // (2026-06-12 adversarial diagnosis, -0.066 LoCoMo MRR). The summary is
-    // carried as a separate alternate rerank text instead; flag-off candidates
-    // carry no summary so legacy behavior stays byte-identical.
+fn rerank_pool_always_materializes_canonical_content() {
+    // Contextual representations and summaries may improve candidate admission,
+    // but the cross-encoder always receives canonical evidence-bearing content.
     use super::build_hybrid_rerank_pool;
     let path = temp_store_path("hybrid_rerank_pool_li_split");
     cleanup_store(&path);
@@ -10144,6 +10155,8 @@ fn rerank_pool_uses_retrieval_companion() {
 
     let mut with_summary = basic_request("gamma retrieval probe content");
     with_summary.summary = Some("gamma summary line".to_string());
+    with_summary.embedding = Some(vec![1.0, 0.0]);
+    with_summary.embedding_model_id = Some("dense-li-split-test".to_string());
     with_summary.retrieval_representation = Some(RetrievalRepresentationInput {
         kind: "contextual-card-v1".to_string(),
         text: "gamma contextual card".to_string(),
@@ -10151,6 +10164,8 @@ fn rerank_pool_uses_retrieval_companion() {
     let first = remember_memory(&path, &with_summary).expect("remember with summary");
     let mut identity = basic_request("delta retrieval probe content");
     identity.summary = Some("delta identity summary".to_string());
+    identity.embedding = Some(vec![0.0, 1.0]);
+    identity.embedding_model_id = Some("dense-li-split-test".to_string());
     let second = remember_memory(&path, &identity).expect("remember identity summary");
 
     let model = "colbert-li-split-test";
@@ -10163,7 +10178,7 @@ fn rerank_pool_uses_retrieval_companion() {
             .expect("upsert tokens second");
     }
 
-    let request = |li: bool| PackRequest {
+    let request = |li: bool, dense: bool| PackRequest {
         title: "rerank pool".to_string(),
         queries: vec!["gamma retrieval".to_string()],
         filters: SearchFilters::default(),
@@ -10172,12 +10187,12 @@ fn rerank_pool_uses_retrieval_companion() {
         format: "markdown".to_string(),
         min_score: 0.0,
         rerank_candidates: 0,
-        query_embeddings: None,
+        query_embeddings: dense.then(|| vec![vec![1.0, 0.0]]),
         query_token_embeddings: li.then(|| vec![vec![vec![1.0, 0.0]]]),
         token_model_id: li.then(|| model.to_string()),
     };
 
-    let pool = build_hybrid_rerank_pool(&path, &request(true), 5).expect("LI pool builds");
+    let pool = build_hybrid_rerank_pool(&path, &request(true, true), 5).expect("LI pool builds");
     let by_id = |id: &str| {
         pool.candidates
             .iter()
@@ -10194,21 +10209,27 @@ fn rerank_pool_uses_retrieval_companion() {
         "LI content must stay content-only (no summary concat)"
     );
     assert_eq!(
-        cand.summary.as_deref(),
-        Some("gamma contextual card"),
-        "LI candidate carries the representation as its alternate rerank text"
-    );
-    assert_eq!(
-        by_id(&second.memory.id).summary.as_deref(),
-        Some("delta identity summary"),
-        "identity candidate carries its persisted summary"
+        by_id(&second.memory.id).content,
+        "delta retrieval probe content"
     );
 
-    let legacy = build_hybrid_rerank_pool(&path, &request(false), 5).expect("legacy pool builds");
-    assert!(
-        legacy.candidates.iter().all(|c| c.summary.is_none()),
-        "flag-off candidates must carry no summary"
+    let optimized = build_hybrid_rerank_pool(&path, &request(true, false), 5)
+        .expect("optimized LI pool builds");
+    assert_eq!(
+        optimized.candidates, pool.candidates,
+        "late interaction without a cosine gate must not need dense ANN to preserve MaxSim plus BM25 candidates"
     );
+    assert!(
+        optimized.cos_top.is_nan(),
+        "the optimized path has no dense cosine statistic"
+    );
+
+    let lexical =
+        build_hybrid_rerank_pool(&path, &request(false, false), 5).expect("lexical pool builds");
+    assert!(lexical
+        .candidates
+        .iter()
+        .all(|candidate| !candidate.content.contains("summary")));
     cleanup_store(&path);
 }
 
@@ -10336,116 +10357,6 @@ fn semantic_maxsim_applies_entity_filter_before_selection() {
         "MaxSim selection must retain the requested entity before SQL projection"
     );
     cleanup_store(&path);
-}
-
-#[test]
-fn record_reranker_shadow_writes_grouped_batches() {
-    let path = temp_store_path("record_reranker_shadow");
-    cleanup_store(&path);
-    init_store(&path).expect("init succeeds");
-
-    let batch = ShadowRerankBatch {
-        query: Some("why did we reject zep".to_string()),
-        prod_model_id: Some("mxbai-rerank-base".to_string()),
-        shadow_model_id: Some("mxbai-xsmall-int8".to_string()),
-        rows: vec![
-            ShadowRerankRow {
-                memory_id: "m1".to_string(),
-                prod_rank: 1,
-                prod_score: 0.9,
-                shadow_rank: 2,
-                shadow_score: 0.7,
-            },
-            ShadowRerankRow {
-                memory_id: "m2".to_string(),
-                prod_rank: 2,
-                prod_score: 0.6,
-                shadow_rank: 1,
-                shadow_score: 0.8,
-            },
-        ],
-    };
-    assert_eq!(
-        record_reranker_shadow(&path, &batch).expect("first shadow write"),
-        2
-    );
-    assert_eq!(
-        record_reranker_shadow(&path, &batch).expect("second shadow write"),
-        2
-    );
-
-    let conn = Connection::open(&path).unwrap();
-    let rows: i64 = conn
-        .query_row("SELECT COUNT(*) FROM reranker_shadow_events", [], |row| {
-            row.get(0)
-        })
-        .unwrap();
-    assert_eq!(rows, 4, "all rows from both calls persisted");
-    let batches: i64 = conn
-        .query_row(
-            "SELECT COUNT(DISTINCT batch) FROM reranker_shadow_events",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap();
-    assert_eq!(
-        batches, 2,
-        "each call groups under its own monotonic batch id"
-    );
-
-    // An empty batch is a no-op, not an error.
-    let empty = record_reranker_shadow(
-        &path,
-        &ShadowRerankBatch {
-            query: None,
-            prod_model_id: None,
-            shadow_model_id: None,
-            rows: vec![],
-        },
-    )
-    .expect("empty batch ok");
-    assert_eq!(empty, 0);
-
-    cleanup_store(&path);
-}
-
-#[test]
-fn rerank_candidate_ranks_match_authoritative_tie_breakers() {
-    let candidates = vec![
-        RerankCandidate {
-            memory_id: "memory-c".to_string(),
-            content: "third by id".to_string(),
-            rerank_score: f32::INFINITY,
-            activation: Some(0.5),
-            graph_pulled: false,
-        },
-        RerankCandidate {
-            memory_id: "memory-b".to_string(),
-            content: "first by activation".to_string(),
-            rerank_score: f32::INFINITY,
-            activation: Some(0.9),
-            graph_pulled: false,
-        },
-        RerankCandidate {
-            memory_id: "memory-a".to_string(),
-            content: "second by id".to_string(),
-            rerank_score: f32::INFINITY,
-            activation: Some(0.5),
-            graph_pulled: false,
-        },
-        RerankCandidate {
-            memory_id: "memory-z".to_string(),
-            content: "last by score".to_string(),
-            rerank_score: f32::NEG_INFINITY,
-            activation: Some(1.0),
-            graph_pulled: false,
-        },
-    ];
-
-    let production_ranks = rerank_candidate_ranks(&candidates);
-    assert_eq!(production_ranks, vec![3, 1, 2, 4]);
-    let shadow_ranks = rerank_candidate_ranks(&candidates.clone());
-    assert_eq!(shadow_ranks, production_ranks);
 }
 
 #[test]

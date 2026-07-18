@@ -21,14 +21,7 @@ const DEFAULT_AUTO_RETRIEVE_MAX_CHARS = 3_000;
 const DEFAULT_AUTO_RETRIEVE_RERANK_CANDIDATES = 12;
 const DEFAULT_AUTO_RETRIEVE_MIN_PROMPT_CHARS = 20;
 const DEFAULT_AUTO_RETRIEVE_MAX_QUERY_CHARS = 500;
-const DEFAULT_AUTO_RETRIEVE_QUERY_EXPANSION = true;
-const DEFAULT_AUTO_RETRIEVE_THREAD_EXPANSION = true;
-const DEFAULT_AUTO_RETRIEVE_MAX_QUERY_VARIANTS = 8;
-const DEFAULT_AUTO_RETRIEVE_MAX_THREAD_SEEDS = 3;
-const DEFAULT_AUTO_RETRIEVE_MAX_THREAD_NEIGHBORS = 3;
-// Option-3 gate defaults (see pack `cosine_gate`): inject when the embedding
-// pool's top cosine clears the gate, OR the cross-encoder is confident.
-const DEFAULT_AUTO_RETRIEVE_COSINE_GATE = 0.62;
+// The pack abstains when its top final score is below this threshold.
 const DEFAULT_AUTO_RETRIEVE_RERANK_CONFIDENCE = 0.05;
 
 const PREFIX_CAPTURE_RULES = [
@@ -598,37 +591,11 @@ function buildAutoRetrievePackRequest(query) {
 			max_chars: envInt("MEMKEEPER_HOOK_MAX_CHARS", DEFAULT_AUTO_RETRIEVE_MAX_CHARS, 200, 20_000),
 			format: "markdown",
 			rerank_candidates: envInt("MEMKEEPER_HOOK_RERANK_CANDIDATES", DEFAULT_AUTO_RETRIEVE_RERANK_CANDIDATES, 0, 50),
-			query_expansion: envBool("MEMKEEPER_HOOK_QUERY_EXPANSION", DEFAULT_AUTO_RETRIEVE_QUERY_EXPANSION),
-			thread_expansion: envBool("MEMKEEPER_HOOK_THREAD_EXPANSION", DEFAULT_AUTO_RETRIEVE_THREAD_EXPANSION),
-			max_query_variants: envInt(
-				"MEMKEEPER_HOOK_MAX_QUERY_VARIANTS",
-				DEFAULT_AUTO_RETRIEVE_MAX_QUERY_VARIANTS,
-				1,
-				64,
-			),
-			max_thread_seeds: envInt(
-				"MEMKEEPER_HOOK_MAX_THREAD_SEEDS",
-				DEFAULT_AUTO_RETRIEVE_MAX_THREAD_SEEDS,
-				0,
-				20,
-			),
-			max_thread_neighbors: envInt(
-				"MEMKEEPER_HOOK_MAX_THREAD_NEIGHBORS",
-				DEFAULT_AUTO_RETRIEVE_MAX_THREAD_NEIGHBORS,
-				0,
-				20,
-			),
 			// NOTE: the `pack` command does not accept `include_source` (it errors
 			// `unknown field`). pack output is source-hidden by design, so we must not
 		// send it here — doing so makes every auto-retrieve fail (fail-open => no
 		// injection). See memory_search/pack: include_source is search-only.
-		//
-		// Option-3 gating (see pack `cosine_gate`): the query-level cosine gate
-		// decides whether to inject at all; `min_score` is the cross-encoder
-		// OR-confidence (a memory with rerank >= min_score forces injection even
-		// when cos_top is below the gate). It is NOT a per-item floor on this path.
-		cosine_gate: envFloat("MEMKEEPER_HOOK_COSINE_GATE", DEFAULT_AUTO_RETRIEVE_COSINE_GATE, 0, 1),
-		min_score: envFloat("MEMKEEPER_HOOK_MIN_SCORE", DEFAULT_AUTO_RETRIEVE_RERANK_CONFIDENCE, 0, 1),
+			min_score: envFloat("MEMKEEPER_HOOK_MIN_SCORE", DEFAULT_AUTO_RETRIEVE_RERANK_CONFIDENCE, 0, 1),
 	});
 }
 

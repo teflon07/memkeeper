@@ -758,60 +758,40 @@ pub(crate) fn batch_queries_from_json(
     }
 }
 
-/// Parse the optional query-level cosine OR-gate from a pack request payload.
-/// `0.0` (the default) preserves legacy per-item rerank-floor behavior.
-pub(crate) fn pack_cosine_gate_from_json(input: &str) -> Result<f64, CliError> {
-    let value = parse_json(input)?;
-    let object = value.as_object().ok_or_else(|| {
-        CliError::InvalidRequest("pack request must be a JSON object".to_string())
-    })?;
-    Ok(optional_number_field(object, "cosine_gate")?.unwrap_or(0.0))
-}
-
-pub(crate) fn pack_expansion_options_from_json(
+pub(crate) fn evidence_join_options_from_json(
     input: &str,
-) -> Result<PackExpansionOptions, CliError> {
+) -> Result<EvidenceJoinOptions, CliError> {
     let value = parse_json(input)?;
     let object = value.as_object().ok_or_else(|| {
         CliError::InvalidRequest("pack request must be a JSON object".to_string())
     })?;
-    Ok(PackExpansionOptions {
-        query_expansion: optional_bool_field(object, "query_expansion")?.unwrap_or(false),
-        thread_expansion: optional_bool_field(object, "thread_expansion")?.unwrap_or(false),
-        graph_expansion: optional_bool_field(object, "graph_expansion")?.unwrap_or(false),
-        graph_within_entity_selection: if optional_bool_field(object, "graph_within_entity_maxsim")?
-            .unwrap_or(false)
-        {
-            memkeeper_store::GraphWithinEntitySelection::Maxsim
-        } else {
-            memkeeper_store::GraphWithinEntitySelection::Recency
-        },
-        max_query_variants: optional_usize_field(object, "max_query_variants")?
-            .unwrap_or(PackExpansionOptions::default().max_query_variants),
-        max_thread_seeds: optional_usize_field(object, "max_thread_seeds")?
-            .unwrap_or(PackExpansionOptions::default().max_thread_seeds),
-        max_thread_neighbors: optional_usize_field(object, "max_thread_neighbors")?
-            .unwrap_or(PackExpansionOptions::default().max_thread_neighbors),
+    Ok(EvidenceJoinOptions {
         max_graph_seeds: optional_usize_field(object, "max_graph_seeds")?
-            .unwrap_or(PackExpansionOptions::default().max_graph_seeds),
+            .unwrap_or(EvidenceJoinOptions::default().max_graph_seeds),
         max_graph_neighbors: optional_usize_field(object, "max_graph_neighbors")?
-            .unwrap_or(PackExpansionOptions::default().max_graph_neighbors),
+            .unwrap_or(EvidenceJoinOptions::default().max_graph_neighbors),
         graph_decay: optional_number_field(object, "graph_decay")?
-            .unwrap_or(PackExpansionOptions::default().graph_decay),
-        graph_rerank_slots: optional_usize_field(object, "graph_rerank_slots")?
-            .unwrap_or(PackExpansionOptions::default().graph_rerank_slots),
-        graph_activation_floor: optional_number_field(object, "graph_activation_floor")?
-            .unwrap_or(PackExpansionOptions::default().graph_activation_floor),
+            .unwrap_or(EvidenceJoinOptions::default().graph_decay),
     })
 }
 
 pub(crate) fn pack_request_from_json(input: &str) -> Result<PackRequest, CliError> {
+    pack_request_from_json_inner(input, false)
+}
+
+pub(crate) fn pool_trace_pack_request_from_json(input: &str) -> Result<PackRequest, CliError> {
+    pack_request_from_json_inner(input, true)
+}
+
+fn pack_request_from_json_inner(
+    input: &str,
+    allow_evidence_join_options: bool,
+) -> Result<PackRequest, CliError> {
     let value = parse_json(input)?;
     let object = value.as_object().ok_or_else(|| {
         CliError::InvalidRequest("pack request must be a JSON object".to_string())
     })?;
-    reject_unknown_fields(
-        object,
+    let allowed_fields: &[&str] = if allow_evidence_join_options {
         &[
             "title",
             "queries",
@@ -820,23 +800,26 @@ pub(crate) fn pack_request_from_json(input: &str) -> Result<PackRequest, CliErro
             "max_chars",
             "format",
             "min_score",
-            "cosine_gate",
             "rerank_candidates",
             "query_embeddings",
-            "query_expansion",
-            "thread_expansion",
-            "graph_expansion",
-            "graph_within_entity_maxsim",
-            "max_query_variants",
-            "max_thread_seeds",
-            "max_thread_neighbors",
             "max_graph_seeds",
             "max_graph_neighbors",
             "graph_decay",
-            "graph_rerank_slots",
-            "graph_activation_floor",
-        ],
-    )?;
+        ]
+    } else {
+        &[
+            "title",
+            "queries",
+            "filters",
+            "max_memories",
+            "max_chars",
+            "format",
+            "min_score",
+            "rerank_candidates",
+            "query_embeddings",
+        ]
+    };
+    reject_unknown_fields(object, allowed_fields)?;
     let filters = match object.get("filters") {
         None | Some(JsonValue::Null) => SearchFilters::default(),
         Some(JsonValue::Object(filters)) => search_filters_from_json(filters)?,
@@ -1193,6 +1176,21 @@ pub(crate) fn candidate_reject_request_from_json(
     })?;
     reject_unknown_fields(object, &["id", "reason", "dry_run"])?;
     Ok(CandidateRejectRequest {
+        id: required_string_field(object, "id")?,
+        reason: optional_string_field(object, "reason")?,
+        dry_run: optional_bool_field(object, "dry_run")?.unwrap_or(false),
+    })
+}
+
+pub(crate) fn candidate_quarantine_request_from_json(
+    input: &str,
+) -> Result<CandidateQuarantineRequest, CliError> {
+    let value = parse_json(input)?;
+    let object = value.as_object().ok_or_else(|| {
+        CliError::InvalidRequest("candidate-quarantine request must be a JSON object".to_string())
+    })?;
+    reject_unknown_fields(object, &["id", "reason", "dry_run"])?;
+    Ok(CandidateQuarantineRequest {
         id: required_string_field(object, "id")?,
         reason: optional_string_field(object, "reason")?,
         dry_run: optional_bool_field(object, "dry_run")?.unwrap_or(false),

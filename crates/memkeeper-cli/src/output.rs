@@ -684,7 +684,6 @@ pub(crate) fn pool_trace_result_json(pool: &memkeeper_store::RerankPool) -> Stri
                 memkeeper_store::AdmissionSource::Ann => "ann",
                 memkeeper_store::AdmissionSource::Maxsim => "maxsim",
                 memkeeper_store::AdmissionSource::Bm25 => "bm25",
-                memkeeper_store::AdmissionSource::Thread => "thread",
                 memkeeper_store::AdmissionSource::Graph => "graph",
             };
             let activation = observation.activation.map_or_else(
@@ -697,14 +696,45 @@ pub(crate) fn pool_trace_result_json(pool: &memkeeper_store::RerankPool) -> Stri
                     }
                 },
             );
+            let route = observation.graph_route.as_ref().map_or_else(
+                || "null".to_string(),
+                |route| {
+                    let seed_source = match route.seed_source {
+                        memkeeper_store::GraphSeedSource::Memory => "memory",
+                        memkeeper_store::GraphSeedSource::Entity => "entity",
+                    };
+                    let evidence_class = match route.evidence_class {
+                        memkeeper_store::GraphEvidenceClass::EndpointSupport => "endpoint_support",
+                        memkeeper_store::GraphEvidenceClass::EntityFallback => "entity_fallback",
+                    };
+                    format!(
+                        "{{\"seed_source\":{},\"seed_memory_id\":{},\"seed_entity_id\":{},\"matched_query_index\":{},\"matched_query_span\":{},\"hop_depth\":{},\"relationship_ids\":{},\"predicate_names\":{},\"traversal_directions\":{},\"evidence_class\":{},\"route_outcome\":{}}}",
+                        json_string(seed_source),
+                        optional_string_json(route.seed_memory_id.as_deref()),
+                        json_string(&route.seed_entity_id),
+                        route.matched_query_index.map_or_else(
+                            || "null".to_string(),
+                            |index| index.to_string(),
+                        ),
+                        optional_string_json(route.matched_query_span.as_deref()),
+                        route.hop_depth,
+                        string_array_json(&route.relationship_ids),
+                        string_array_json(&route.predicate_names),
+                        string_array_json(&route.traversal_directions),
+                        json_string(evidence_class),
+                        json_string(&route.route_outcome),
+                    )
+                },
+            );
             let _ = write!(
                 sources,
-                "{{\"source\":{},\"query_index\":{},\"source_rank\":{},\"seed_memory_id\":{},\"activation\":{}}}",
+                "{{\"source\":{},\"query_index\":{},\"source_rank\":{},\"seed_memory_id\":{},\"activation\":{},\"graph_route\":{}}}",
                 json_string(source),
                 observation.query_index,
                 observation.source_rank,
                 optional_string_json(observation.seed_memory_id.as_deref()),
                 activation,
+                route,
             );
         }
         sources.push(']');
@@ -729,11 +759,12 @@ pub(crate) fn pool_trace_result_json(pool: &memkeeper_store::RerankPool) -> Stri
         "null".to_string()
     };
     format!(
-        "{{\"pool_trace\":{{\"pool_width\":{},\"cos_top\":{},\"candidate_count\":{},\"observed_count\":{},\"candidates\":{}}}}}",
+        "{{\"pool_trace\":{{\"pool_width\":{},\"cos_top\":{},\"candidate_count\":{},\"observed_count\":{},\"graph_outcome\":{},\"candidates\":{}}}}}",
         pool.pool_width,
         cos_top,
         pool.candidates.len(),
         pool.observed.len(),
+        optional_string_json(pool.graph_outcome.as_deref()),
         candidates,
     )
 }
@@ -1922,6 +1953,14 @@ pub(crate) fn candidate_approve_result_json(report: &CandidateApproveReport) -> 
 }
 
 pub(crate) fn candidate_reject_result_json(report: &CandidateRejectReport) -> String {
+    format!(
+        "{{\"candidate\":{},\"dry_run\":{}}}",
+        candidate_record_json(&report.candidate),
+        report.dry_run
+    )
+}
+
+pub(crate) fn candidate_quarantine_result_json(report: &CandidateQuarantineReport) -> String {
     format!(
         "{{\"candidate\":{},\"dry_run\":{}}}",
         candidate_record_json(&report.candidate),

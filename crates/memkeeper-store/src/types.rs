@@ -6,8 +6,6 @@
 
 use std::path::PathBuf;
 
-use crate::MAX_BATCH_QUERIES;
-
 /// Result of initializing a store.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InitReport {
@@ -1142,40 +1140,12 @@ pub struct PackRequest {
     pub token_model_id: Option<String>,
 }
 
-/// Within-entity memory-selection policy for graph expansion.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum GraphWithinEntitySelection {
-    /// Existing pinned/recency order.
-    Recency,
-    /// First-query late-interaction `MaxSim` order.
-    Maxsim,
-}
-
-/// Optional retrieval-expansion behavior for pack construction.
+/// Diagnostic evidence-join allocation controls.
 ///
 /// `PartialEq` only (not `Eq`): `graph_decay` is an `f64` knob, so the struct
 /// cannot derive `Eq`.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct PackExpansionOptions {
-    /// Expand each user query into deterministic subqueries before retrieval.
-    pub query_expansion: bool,
-    /// Add same-entity / same-claim neighbors from top pack-pool anchors.
-    pub thread_expansion: bool,
-    /// v0.3 associative recall: graph-expand the merged rerank candidate pool by
-    /// traversing the entity/relationship graph one hop from the top anchored
-    /// seeds, so a relationship-reachable memory below the ANN/BM25 threshold can
-    /// still enter the candidate set. Applied AFTER `cos_top` is computed from the
-    /// raw ANN pool, so graph-pulled items never influence the cosine gate. The
-    /// cross-encoder still gates what lands in the pack. Strategy: `hybrid_assoc_v0`.
-    pub graph_expansion: bool,
-    /// Within-entity memory-selection policy for graph expansion.
-    pub graph_within_entity_selection: GraphWithinEntitySelection,
-    /// Maximum total query variants after deterministic expansion.
-    pub max_query_variants: usize,
-    /// Maximum anchor memories used for same-thread expansion.
-    pub max_thread_seeds: usize,
-    /// Maximum neighbor memories considered per anchor.
-    pub max_thread_neighbors: usize,
+pub struct EvidenceJoinOptions {
     /// Maximum top-of-pool seeds anchored for graph expansion.
     pub max_graph_seeds: usize,
     /// Maximum graph-reachable neighbor memories unioned into the candidate pool
@@ -1185,31 +1155,14 @@ pub struct PackExpansionOptions {
     /// edge_weight`). Bounds/orders which graph-reachable memories get fetched and
     /// reranked; it is a candidate-budget allocator, never a relevance score.
     pub graph_decay: f64,
-    /// v0.3.1 associative recall: reserve up to this many pack slots for the
-    /// highest-activation graph-pulled candidates, letting a hop-reached memory the
-    /// cross-encoder scored below the cut still land. `0` (default) keeps graph
-    /// expansion recall-widening-only — byte-identical packs to graph-off ranking.
-    pub graph_rerank_slots: usize,
-    /// Minimum activation a graph candidate must reach to claim a reserved slot.
-    /// Bounds precision so low-activation graph noise cannot take a slot.
-    pub graph_activation_floor: f64,
 }
 
-impl Default for PackExpansionOptions {
+impl Default for EvidenceJoinOptions {
     fn default() -> Self {
         Self {
-            query_expansion: false,
-            thread_expansion: false,
-            graph_expansion: false,
-            graph_within_entity_selection: GraphWithinEntitySelection::Recency,
-            max_query_variants: MAX_BATCH_QUERIES,
-            max_thread_seeds: 3,
-            max_thread_neighbors: 3,
-            max_graph_seeds: 3,
-            max_graph_neighbors: 5,
+            max_graph_seeds: 4,
+            max_graph_neighbors: 4,
             graph_decay: 0.5,
-            graph_rerank_slots: 0,
-            graph_activation_floor: 0.0,
         }
     }
 }
@@ -1457,7 +1410,7 @@ pub struct DreamDedupeReport {
 
 /// Result of the `link` dream task: cross-entity `memory_links` written between
 /// memories that share discriminative tags, so the graph projection (`graph` task)
-/// can bridge curated memories for associative recall.
+/// can bridge curated memories for evidence-backed retrieval.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DreamLinkReport {
     /// Whether the task ran.

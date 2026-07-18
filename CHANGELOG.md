@@ -6,6 +6,33 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html) once it reache
 1.0. Until then, minor releases may include breaking changes to the storage
 schema and wire protocol.
 
+## [0.4.0] - 2026-07-18
+
+### Changed
+- **One evidence-join retrieval path.** Semantic and lexical results seed a
+  bounded evidence-backed graph traversal, then every canonical memory ID
+  competes in the same cross-encoder rerank pool. Graph candidates receive no
+  reserved slots or automatic demotion.
+- `min_score` now gates the whole pack on its top reranker score. It no longer
+  removes lower-ranked supporting evidence after the best candidate clears the
+  gate.
+- Pack execution builds one candidate pool and reranks it once. Late
+  interaction supplies semantic seeds without a redundant dense query
+  embedding when available.
+- Normal `pack` requests no longer accept query expansion, thread expansion,
+  cosine-gate, or graph-tuning controls. Graph bounds remain available only on
+  the diagnostic `pool-trace` command.
+
+### Fixed
+- `MEMKEEPER_REQUIRE_RERANK=1` now fails closed when the reranker fails during a
+  request, not only when the model is absent at startup. Optional fallback is
+  visible and packs the same unified semantic, lexical, and graph pool in
+  retrieval order.
+
+### Compatibility
+- No storage schema, embedding model, reranker model, or provider default
+  changed in this release.
+
 ## [0.3.1] - 2026-07-14
 
 ### Fixed
@@ -325,6 +352,7 @@ Initial public release. A local-first memory engine for AI agents.
 - **Adapters**: an MCP bridge and a thin extension client.
 - Dual-licensed **MIT OR Apache-2.0**.
 
+[0.4.0]: https://github.com/teflon07/memkeeper/compare/v0.3.1...v0.4.0
 [0.3.1]: https://github.com/teflon07/memkeeper/compare/v0.3.0...v0.3.1
 [0.2.11]: https://github.com/teflon07/memkeeper/releases/tag/v0.2.11
 [0.2.10]: https://github.com/teflon07/memkeeper/releases/tag/v0.2.10

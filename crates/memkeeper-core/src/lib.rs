@@ -164,7 +164,11 @@ pub mod derive {
                 break;
             }
         }
-        slug.truncate(SLUG_MAX_LEN);
+        let mut end = SLUG_MAX_LEN.min(slug.len());
+        while end > 0 && !slug.is_char_boundary(end) {
+            end -= 1;
+        }
+        slug.truncate(end);
         while slug.ends_with('-') {
             slug.pop();
         }
@@ -278,6 +282,14 @@ mod derive_tests {
             derive::entity_slug("alpha beta gamma delta epsilon zeta eta theta iota kappa lambda")
                 .unwrap();
         assert_eq!(slug, "alpha-beta-gamma-delta-epsilon-zeta");
+    }
+
+    #[test]
+    fn entity_slug_truncates_multibyte_text_on_a_char_boundary() {
+        let slug = derive::entity_slug(&"界".repeat(30)).unwrap();
+
+        assert!(slug.len() <= 80);
+        assert!(slug.chars().all(|ch| ch == '界'));
     }
 
     #[test]

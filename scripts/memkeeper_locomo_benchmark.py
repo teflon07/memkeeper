@@ -29,6 +29,9 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import harness_lib as hl  # noqa: E402
 from typing import Any
 
 WORKSPACE = Path(__file__).resolve().parents[3]
@@ -336,6 +339,20 @@ def turn_content(turn: DialogueTurn) -> str:
     return " ".join(parts)
 
 
+def dialogue_context_card(
+    turn: DialogueTurn,
+    previous: DialogueTurn | None,
+) -> str:
+    """Build one bounded, deterministic current-plus-previous-turn retrieval card."""
+    current = f"{turn.speaker}: {turn.text}"
+    if previous is None:
+        return f"Current: {current}"[:512]
+    return (
+        f"Previous: {previous.speaker}: {previous.text} "
+        f"Current: {current}"
+    )[:512]
+
+
 def _socket_request(sock_path: str, store: Path, command: str, payload: dict[str, Any] | None) -> dict[str, Any]:
     """Send one protocol envelope to a warm `serve --socket` daemon and return the response."""
     import socket
@@ -430,6 +447,336 @@ def seed_store(binary: Path, store: Path, samples: list[PreparedSample]) -> tupl
     return memory_to_turn, dia_to_memory
 
 
+def _load_capture_module(name: str):
+    import importlib.util
+
+    path = Path(__file__).resolve().parent / f"{name}.py"
+    spec = importlib.util.spec_from_file_location(name, path)
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def _load_capture_generator():
+    return _load_capture_module("capture_generator")
+
+
+def _session_source_and_map(turns: list[DialogueTurn]) -> tuple[str, list[tuple[int, int, DialogueTurn]]]:
+    """Concatenate a session's turns into one source passage and return, per turn, the
+    [start, end) char range it occupies — so a generated atom's verbatim source_span can be
+    mapped back to the exact turn (and thus dia_id) it was decomposed from."""
+    parts: list[str] = []
+    spans: list[tuple[int, int, DialogueTurn]] = []
+    pos = 0
+    for turn in turns:
+        line = f"{turn.speaker}: {turn.text}"
+        spans.append((pos, pos + len(line), turn))
+        parts.append(line)
+        pos += len(line) + 1  # +1 for the "\n" join
+    return "\n".join(parts), spans
+
+
+def _turn_for_span(source_span: str, source: str, spans: list[tuple[int, int, DialogueTurn]]) -> DialogueTurn | None:
+    """The turn whose char range contains the atom's source_span (by its start offset)."""
+    idx = source.find(source_span)
+    if idx < 0:
+        return None
+    for start, end, turn in spans:
+        if start <= idx < end:
+            return turn
+    return None
+
+
+def seed_capture_store(
+    binary: Path, store: Path, samples: list[PreparedSample], *, invoke=None, generate=None
+) -> tuple[dict[str, TurnRef], dict[str, str]]:
+    """Capture-pipeline seeding (generator-only, precision-biased): decompose each SESSION into
+    atomic facts via the capture generator, map each atom back to its origin turn's dia_id via the
+    atom's verbatim source_span, and remember the atoms (one memory per atom).
+
+    Mirrors seed_store's return contract (memory_id -> TurnRef, qualified_dia_id -> a representative
+    memory) so the same pack_dia_ids scoring works unchanged. Generator-only is the smallest probe:
+    the generator already drops ungrounded atoms, and atom-quarantine by the adjudicator was ~0 on
+    the fidelity fixture, so adjudication is approximated for the atom-retrieval question. LoCoMo
+    is EVAL-ONLY. Unmappable atoms (span not resolvable to a turn) are skipped and counted in stderr.
+    """
+    cg = _load_capture_generator()
+    invoke = invoke or cg.claude_invoke
+    generate = generate or cg.generate
+    run_memkeeper(binary, store, "init")
+    memory_to_turn: dict[str, TurnRef] = {}
+    dia_to_memory: dict[str, str] = {}
+    dropped = 0
+    for sample in samples:
+        by_session: dict[int, list[DialogueTurn]] = defaultdict(list)
+        for turn in iter_dialogue_turns(sample):
+            by_session[turn.session_index].append(turn)
+        for sidx in sorted(by_session):
+            source, spans = _session_source_and_map(by_session[sidx])
+            capture = generate(source, invoke)
+            for i, atom in enumerate(capture.atoms):
+                turn = _turn_for_span(atom["source_span"], source, spans)
+                if turn is None:
+                    dropped += 1
+                    continue
+                payload = {
+                    "space": "workspace-memory",
+                    "silo": "durable",
+                    "scope": "workspace",
+                    "project": "LoCoMo",
+                    "kind": "fact",
+                    "content": atom["text"],
+                    "summary": f"LoCoMo {sample.sample_id} {turn.dia_id} atom: {atom['text'][:140]}",
+                    "tags": ["locomo", sample.sample_id, f"session-{sidx}", "capture"],
+                    "entity_key": f"locomo:{sample.sample_id}",
+                    "claim_key": f"locomo.cap.{sample.sample_id}.{turn.dia_id.replace(':', '_')}.{i}",
+                    "confidence": 1.0,
+                    "observed_at": observed_at_for_turn(turn),
+                    "source": {
+                        "type": "benchmark",
+                        "adapter": "memkeeper-locomo-capture",
+                        "source_description": f"{sample.sample_id} {turn.dia_id}",
+                    },
+                }
+                response = run_memkeeper(binary, store, "remember", payload)
+                memory_id = response["result"]["memory"]["id"]
+                memory_to_turn[memory_id] = TurnRef(sample_id=sample.sample_id, dia_id=turn.dia_id)
+                dia_to_memory.setdefault(qualified_dia_id(sample.sample_id, turn.dia_id), memory_id)
+    if dropped:
+        print(f"[capture-seed] WARN: {dropped} atoms unmappable to a turn (skipped)", file=sys.stderr)
+    return memory_to_turn, dia_to_memory
+
+
+def capture_routing_relationship_payload(
+    *,
+    subject_key: str,
+    relation: str,
+    object_key: str,
+    subject_memory_id: str,
+    object_memory_id: str,
+) -> dict[str, Any]:
+    """Build the evidence-backed relationship written by full capture seeding."""
+    return {
+        "subject_entity_key": subject_key,
+        "relation_type": relation,
+        "object_entity_key": object_key,
+        "space": "workspace-memory",
+        "memory_id": subject_memory_id,
+        "metadata": {
+            "routing": True,
+            "origin": "adjudicated_capture",
+            "routing_contract": "evidence_join_v1",
+            "routing_contract_version": 1,
+            "object_memory_id": object_memory_id,
+        },
+    }
+
+
+def seed_capture_full_store(
+    binary: Path, store: Path, samples: list[PreparedSample], *,
+    invoke=None, generate=None, resolve=None, project_graph: bool = True,
+    canonical_sidecars: bool = False,
+) -> tuple[dict[str, TurnRef], dict[str, str]]:
+    """FULL capture-pipeline seed (exercises #3 adjudication + #4 graph): per session, generate ->
+    adjudicate -> promote only supported/repaired atoms -> project promoted edges to the graph.
+
+    Generator-local atom slugs are resolved against the store's canonical entity catalog before
+    promoted memories or edges are written. dia_id provenance still comes from each atom's verbatim
+    source_span, so pack_dia_ids scoring is unchanged. remember (not candidate submit/approve) is
+    used — the require-mode gate is orthogonal to retrieval. LoCoMo is EVAL-ONLY.
+    """
+    cg = _load_capture_generator()
+    ca = _load_capture_module("capture_adjudicator")
+    cd = _load_capture_module("capture_disposition")
+    orch = _load_capture_module("capture_adjudication_orchestrator")
+    cer = _load_capture_module("capture_entity_resolution")
+    invoke = invoke or cg.claude_invoke
+    generate = generate or cg.generate
+    resolve = resolve or cer.resolve_entities
+    run_memkeeper(binary, store, "init")
+    memory_to_turn: dict[str, TurnRef] = {}
+    dia_to_memory: dict[str, str] = {}
+    pending_routes: list[tuple[str, str, str, str, str]] = []
+    unmapped = 0
+    for sample in samples:
+        by_session: dict[int, list[DialogueTurn]] = defaultdict(list)
+        for turn in iter_dialogue_turns(sample):
+            by_session[turn.session_index].append(turn)
+        for sidx in sorted(by_session):
+            source, spans = _session_source_and_map(by_session[sidx])
+            capture = generate(source, invoke)
+
+            def search_entities(query: str) -> list[dict]:
+                response = run_memkeeper(binary, store, "entity-search", {
+                    "query": query, "space": "workspace-memory", "limit": 20,
+                })
+                return [
+                    row["entity"]
+                    for row in response.get("result", {}).get("results", [])
+                ]
+
+            resolution = resolve(source, capture.atoms, search_entities, invoke)
+            verdict = ca.adjudicate(source, capture.atoms, capture.edges, invoke)
+            reverify = orch.make_reverify(source, capture.atoms, invoke)
+            plan = cd.plan_disposition(verdict, reverify)
+            atoms_by_id = {a["id"]: a for a in capture.atoms}
+            edge_triples = {f'{e["subject"]} {e["relation"]} {e["object"]}':
+                            (e["subject"], e["relation"], e["object"]) for e in verdict.edges}
+            promoted_ekey: dict[str, str] = {}  # atom id -> entity_key (promoted only)
+            promoted_memory_id: dict[str, str] = {}
+            promoted_turn_key: dict[str, str] = {}
+            projected_entities: set[str] = set()
+            for item in plan.items:
+                if item.kind != "atom" or item.action not in (cd.PROMOTE, cd.REPAIR_PROMOTE):
+                    continue
+                atom = atoms_by_id.get(item.ref)
+                if atom is None:
+                    continue
+                turn = _turn_for_span(atom["source_span"], source, spans)
+                if turn is None:
+                    unmapped += 1
+                    continue
+                ekey = resolution.atom_entity_keys[item.ref]
+                entity = resolution.entities[ekey]
+                text = item.text or atom["text"]
+                promoted_ekey[item.ref] = ekey
+                turn_key = qualified_dia_id(sample.sample_id, turn.dia_id)
+                promoted_turn_key[item.ref] = turn_key
+                if not canonical_sidecars:
+                    payload = {
+                        "space": "workspace-memory", "silo": "durable", "scope": "workspace",
+                        "project": "LoCoMo", "kind": "fact", "content": text,
+                        "summary": f"LoCoMo {sample.sample_id} {turn.dia_id} atom: {text[:140]}",
+                        "tags": ["locomo", sample.sample_id, f"session-{sidx}", "capture-full"],
+                        "entity_key": ekey,
+                        "claim_key": f"locomo.capf.{sample.sample_id}.{turn.dia_id.replace(':', '_')}.{item.ref}",
+                        "confidence": 1.0, "observed_at": observed_at_for_turn(turn),
+                        "source": {"type": "benchmark", "adapter": "memkeeper-locomo-capture-full",
+                                   "source_description": f"{sample.sample_id} {turn.dia_id}"},
+                    }
+                    response = run_memkeeper(binary, store, "remember", payload)
+                    memory_id = response["result"]["memory"]["id"]
+                    memory_to_turn[memory_id] = TurnRef(
+                        sample_id=sample.sample_id,
+                        dia_id=turn.dia_id,
+                    )
+                    dia_to_memory.setdefault(turn_key, memory_id)
+                    promoted_memory_id[item.ref] = memory_id
+                if project_graph and ekey not in projected_entities:
+                    run_memkeeper(binary, store, "entity-upsert", {
+                        "entity_key": ekey,
+                        "canonical_name": entity.canonical_name,
+                        "entity_type": entity.entity_type,
+                        "aliases": list(entity.aliases),
+                        "space": "workspace-memory",
+                    })
+                    projected_entities.add(ekey)
+            if project_graph:
+                for item in plan.items:
+                    if item.kind not in ("edge", "sweep_edge") or item.action not in (cd.PROMOTE, cd.REPAIR_PROMOTE):
+                        continue
+                    trip = edge_triples.get(item.ref)
+                    if trip is None:
+                        continue
+                    subj, rel, obj = trip
+                    sk, ok = promoted_ekey.get(subj), promoted_ekey.get(obj)
+                    if not sk or not ok or sk == ok:
+                        continue  # both endpoints must be promoted, distinct nodes
+                    if canonical_sidecars:
+                        subject_turn_key = promoted_turn_key.get(subj)
+                        object_turn_key = promoted_turn_key.get(obj)
+                        if not subject_turn_key or not object_turn_key:
+                            continue
+                        pending_routes.append(
+                            (sk, rel, ok, subject_turn_key, object_turn_key)
+                        )
+                        continue
+                    subject_memory_id = promoted_memory_id.get(subj)
+                    object_memory_id = promoted_memory_id.get(obj)
+                    if not subject_memory_id or not object_memory_id:
+                        continue
+                    run_memkeeper(
+                        binary,
+                        store,
+                        "relationship-upsert",
+                        capture_routing_relationship_payload(
+                            subject_key=sk,
+                            relation=rel,
+                            object_key=ok,
+                            subject_memory_id=subject_memory_id,
+                            object_memory_id=object_memory_id,
+                        ),
+                    )
+    if canonical_sidecars:
+        for sample in samples:
+            previous_by_session: dict[str, DialogueTurn] = {}
+            for turn in iter_dialogue_turns(sample):
+                turn_key = qualified_dia_id(sample.sample_id, turn.dia_id)
+                previous = previous_by_session.get(turn.session_key)
+                payload = {
+                    "space": "workspace-memory",
+                    "silo": "durable",
+                    "scope": "workspace",
+                    "project": "LoCoMo",
+                    "kind": "fact",
+                    "content": turn_content(turn),
+                    "summary": (
+                        f"LoCoMo {turn.sample_id} {turn.dia_id}: "
+                        f"{turn.speaker}: {turn.text[:160]}"
+                    ),
+                    "tags": [
+                        "locomo",
+                        turn.sample_id,
+                        f"session-{turn.session_index}",
+                        "capture-sidecar",
+                    ],
+                    "entity_key": f"locomo:{turn.sample_id}",
+                    "claim_key": f"locomo.{turn.sample_id}.{turn.dia_id.replace(':', '_')}",
+                    "confidence": 1.0,
+                    "observed_at": observed_at_for_turn(turn),
+                    "source": {
+                        "type": "benchmark",
+                        "adapter": "memkeeper-locomo-capture-sidecar",
+                        "source_description": f"{turn.sample_id} {turn.dia_id}",
+                    },
+                    "retrieval_representation": {
+                        "kind": "contextual-card-v1",
+                        "text": dialogue_context_card(turn, previous),
+                    },
+                }
+                response = run_memkeeper(binary, store, "remember", payload)
+                memory_id = response["result"]["memory"]["id"]
+                memory_to_turn[memory_id] = TurnRef(
+                    sample_id=sample.sample_id,
+                    dia_id=turn.dia_id,
+                )
+                dia_to_memory[turn_key] = memory_id
+                previous_by_session[turn.session_key] = turn
+        if project_graph:
+            seen_routes: set[tuple[str, str, str, str, str]] = set()
+            for route in pending_routes:
+                if route in seen_routes:
+                    continue
+                seen_routes.add(route)
+                sk, rel, ok, subject_turn_key, object_turn_key = route
+                run_memkeeper(
+                    binary,
+                    store,
+                    "relationship-upsert",
+                    capture_routing_relationship_payload(
+                        subject_key=sk,
+                        relation=rel,
+                        object_key=ok,
+                        subject_memory_id=dia_to_memory[subject_turn_key],
+                        object_memory_id=dia_to_memory[object_turn_key],
+                    ),
+                )
+    if unmapped:
+        print(f"[capture-full-seed] WARN: {unmapped} atoms unmappable to a turn (skipped)", file=sys.stderr)
+    return memory_to_turn, dia_to_memory
+
+
 def keyword_query(text: str, limit: int = 10) -> str:
     """Build a simple deterministic keyword query from a question."""
     words = [w.strip(".,?!:;()[]{}\"'`)./\\").lower() for w in text.split()]
@@ -478,11 +825,6 @@ def build_pack_payload(
     sample_filter: str,
     rerank_candidates: int = 0,
     min_score: float = 0.0,
-    query_expansion: bool = False,
-    thread_expansion: bool = False,
-    max_query_variants: int = 8,
-    max_thread_seeds: int = 3,
-    max_thread_neighbors: int = 3,
 ) -> dict[str, Any]:
     """Build the shared request used by pack execution and candidate tracing."""
     category = category_name(qa.category)
@@ -493,11 +835,6 @@ def build_pack_payload(
         "max_chars": max_chars,
         "format": "markdown",
         "min_score": min_score,
-        "query_expansion": query_expansion,
-        "thread_expansion": thread_expansion,
-        "max_query_variants": max_query_variants,
-        "max_thread_seeds": max_thread_seeds,
-        "max_thread_neighbors": max_thread_neighbors,
     }
     if rerank_candidates > 0:
         payload["rerank_candidates"] = rerank_candidates
@@ -518,11 +855,6 @@ def run_pack(
     sample_filter: str,
     rerank_candidates: int = 0,
     min_score: float = 0.0,
-    query_expansion: bool = False,
-    thread_expansion: bool = False,
-    max_query_variants: int = 8,
-    max_thread_seeds: int = 3,
-    max_thread_neighbors: int = 3,
 ) -> tuple[dict[str, Any], float]:
     payload = build_pack_payload(
         qa,
@@ -532,11 +864,6 @@ def run_pack(
         sample_filter=sample_filter,
         rerank_candidates=rerank_candidates,
         min_score=min_score,
-        query_expansion=query_expansion,
-        thread_expansion=thread_expansion,
-        max_query_variants=max_query_variants,
-        max_thread_seeds=max_thread_seeds,
-        max_thread_neighbors=max_thread_neighbors,
     )
     started = time.perf_counter()
     data = run_memkeeper(binary, store, "pack", payload)
@@ -556,11 +883,6 @@ def run_pool_trace(
     sample_filter: str,
     rerank_candidates: int = 0,
     min_score: float = 0.0,
-    query_expansion: bool = False,
-    thread_expansion: bool = False,
-    max_query_variants: int = 8,
-    max_thread_seeds: int = 3,
-    max_thread_neighbors: int = 3,
 ) -> dict[str, Any]:
     """Return the ID-only pre-rerank pool for the exact pack request."""
     payload = build_pack_payload(
@@ -571,11 +893,6 @@ def run_pool_trace(
         sample_filter=sample_filter,
         rerank_candidates=rerank_candidates,
         min_score=min_score,
-        query_expansion=query_expansion,
-        thread_expansion=thread_expansion,
-        max_query_variants=max_query_variants,
-        max_thread_seeds=max_thread_seeds,
-        max_thread_neighbors=max_thread_neighbors,
     )
     data = run_memkeeper(binary, store, "pool-trace", payload)
     return (((data.get("result") or {}).get("pool_trace")) or {})
@@ -851,11 +1168,55 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
         inspect_semantic_flag=not args.no_semantic_inspect,
         rerank_candidates=args.rerank_candidates,
     )
+    checkpointing = args.results is not None
+    if args.resume and not checkpointing:
+        raise SystemExit("--resume requires --results")
+    prior_results: list[RetrievalResult] = []
+    if checkpointing or args.offset or args.limit is not None:
+        # Canonical order so --offset/--limit and --resume partition runs
+        # identically across invocations.
+        qa_items = sorted(qa_items, key=lambda qa: qa.qa_id)
+    handle = None
+    if checkpointing:
+        if args.resume:
+            best = hl.latest_records(hl.iter_jsonl_records(args.results), key="qa_id")
+            done = {rid for rid, rec in best.items() if rec.get("status") == "ok"}
+            prior_results = [RetrievalResult(**rec["result"])
+                             for rec in best.values() if rec.get("status") == "ok"]
+        elif args.results.exists():
+            raise SystemExit(
+                f"results file exists; pass --resume to continue it: {args.results}")
+        else:
+            done = set()
+    qa_items = hl.slice_items(qa_items, offset=args.offset, limit=args.limit)
+    if checkpointing:
+        qa_items = [qa for qa in qa_items if qa.qa_id not in done]
+        args.results.parent.mkdir(parents=True, exist_ok=True)
+        handle = args.results.open("a", encoding="utf-8")
+
+    def record_one(qa) -> RetrievalResult | None:
+        # Checkpointed evaluation: a failure becomes an error record to retry
+        # under --resume instead of killing the whole run.
+        try:
+            result = evaluate_one(binary, store, qa, memory_to_turn, **eval_kwargs)
+        except Exception as exc:  # noqa: BLE001 - error record, retried on resume
+            hl.append_result(handle, {"qa_id": qa.qa_id, "status": "error",
+                                      "error": f"{type(exc).__name__}: {exc}"})
+            return None
+        hl.append_result(handle, {"qa_id": qa.qa_id, "status": "ok",
+                                  "result": asdict(result)})
+        return result
+
     results = []
     try:
         if args.workers <= 1:
             for qa in qa_items:
-                results.append(evaluate_one(binary, store, qa, memory_to_turn, **eval_kwargs))
+                if checkpointing:
+                    result = record_one(qa)
+                    if result is not None:
+                        results.append(result)
+                else:
+                    results.append(evaluate_one(binary, store, qa, memory_to_turn, **eval_kwargs))
         else:
             with ThreadPoolExecutor(max_workers=args.workers) as pool:
                 futs = {
@@ -863,8 +1224,23 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
                     for qa in qa_items
                 }
                 for fut in as_completed(futs):
-                    results.append(fut.result())
+                    if checkpointing:
+                        qa = futs[fut]
+                        try:
+                            result = fut.result()
+                        except Exception as exc:  # noqa: BLE001 - error record
+                            hl.append_result(handle, {"qa_id": qa.qa_id, "status": "error",
+                                                      "error": f"{type(exc).__name__}: {exc}"})
+                            continue
+                        hl.append_result(handle, {"qa_id": qa.qa_id, "status": "ok",
+                                                  "result": asdict(result)})
+                        results.append(result)
+                    else:
+                        results.append(fut.result())
+        results = prior_results + results
     finally:
+        if handle is not None:
+            handle.close()
         if temp_dir is not None:
             temp_dir.cleanup()
 
@@ -973,6 +1349,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--exclude-adversarial", action="store_true", help="Skip LoCoMo category 5")
     parser.add_argument("--category", default=None, help="Only run questions whose category name matches (e.g. adversarial)")
     parser.add_argument("--emit-results", action="store_true", help="Include every per-question record in the JSON report")
+    parser.add_argument("--results", type=Path, default=None,
+                        help="Append per-question records to this JSONL as they complete (kill-safe checkpointing)")
+    parser.add_argument("--resume", action="store_true",
+                        help="With --results, skip already-successful qa_ids and retry errored ones")
+    parser.add_argument("--offset", type=int, default=0,
+                        help="Skip the first N questions of the canonical qa_id-sorted order")
+    parser.add_argument("--limit", type=int, default=None,
+                        help="Run at most N questions of the canonical qa_id-sorted order")
     parser.add_argument("--no-semantic-inspect", action="store_true", help="Skip batch-search semantic metadata check")
     parser.add_argument("--store", type=Path, default=None, help="Optional explicit output store; default is temp store")
     parser.add_argument("--reuse-store", action="store_true", help="Reserved for future cached-store runs")
