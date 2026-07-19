@@ -19,7 +19,8 @@
 //! * **Regression half** (`regression_fingerprint_frozen`): a deterministic FNV
 //!   fingerprint over a sweep of cases where the top item already fits (and the
 //!   top-score-blocked / empty-pool cases that must stay empty). The fix
-//!   MUST keep this byte-identical — proof it is surgical.
+//!   MUST keep this byte-identical — proof it is surgical. The frozen output
+//!   includes the source-time marker added to every pack line in July 2026.
 //! * **Target half** (`target_*`): the pre-registered post-fix behaviour for the
 //!   defect case. These assertions are RED against the pre-fix engine and turn
 //!   GREEN only when the fix lands. They pin: the top eligible candidate is
@@ -37,10 +38,11 @@ use memkeeper_store::{
     assemble_reranked_pack, PackReport, PackRequest, RerankCandidate, SearchFilters,
 };
 
-// Frozen regression fingerprint over `regression_scenarios()`, captured from the
-// pre-fix engine. A value of 0 means "capture mode": the test prints the computed
-// fingerprint and passes, so the baseline can be read once and pinned here.
-const REGRESSION_FINGERPRINT: u64 = 0x1913_6440_302b_2e14;
+// Frozen regression fingerprint over `regression_scenarios()`, captured after
+// the source-time pack contract. A value of 0 means "capture mode": the test
+// prints the computed fingerprint and passes, so the baseline can be read once
+// and pinned here.
+const REGRESSION_FINGERPRINT: u64 = 0xd922_d4e0_7dff_6d0c;
 
 // --- self-contained FNV-1a (matches bench_oracle.rs conventions) ------------
 struct Fnv(u64);
@@ -106,9 +108,15 @@ fn rc(id: &str, content: &str, score: f32) -> RerankCandidate {
     RerankCandidate {
         memory_id: id.to_string(),
         content: content.to_string(),
+        observed_at: "2026-07-19T00:00:00.000Z".to_string(),
         rerank_score: score,
         activation: None,
+        consensus: false,
     }
+}
+
+fn rendered_len(content: &str) -> usize {
+    format!("- [Observed at: 2026-07-19T00:00:00.000Z] {content}\n").len()
 }
 
 /// One scenario: `(request, candidates)`.
@@ -138,11 +146,14 @@ fn regression_scenarios() -> Vec<Scenario> {
         // whole-item budget truncation: first fits, second too big for remaining
         // budget but the FIRST item fits whole (top item NOT oversized)
         (
-            req(5, 14, 0.0),
+            req(5, rendered_len("aaaa"), 0.0),
             vec![rc("a", "aaaa", 0.9), rc("b", "bbbbbbbbbb", 0.5)],
         ),
-        // exact-boundary fit: "- aaaa\n" == 7 bytes == max_chars
-        (req(5, 7, 0.0), vec![rc("a", "aaaa", 0.9)]),
+        // exact-boundary fit for the complete source-time line.
+        (
+            req(5, rendered_len("aaaa"), 0.0),
+            vec![rc("a", "aaaa", 0.9)],
+        ),
         // Top-score gate blocks the pack.
         (req(5, 1500, 0.2), vec![rc("a", &"x".repeat(2000), 0.05)]),
         // The top-score gate passes, so lower-ranked evidence remains eligible.

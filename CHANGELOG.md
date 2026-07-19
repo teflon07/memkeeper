@@ -6,6 +6,33 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html) once it reache
 1.0. Until then, minor releases may include breaking changes to the storage
 schema and wire protocol.
 
+## [0.5.0] - 2026-07-19
+
+### Added
+- **Atomic evidence-backed graph capture.** Native MCP `remember` accepts bounded
+  entities, exact aliases, and typed relationships alongside one confirmed
+  memory. Memkeeper validates and commits the memory and graph projection in one
+  transaction, and the canonical memory ID is the relationship's sole evidence.
+- **Source time in context packs.** Every injected memory line includes its
+  stored `observed_at` timestamp. The timestamp is not sent to the reranker, so
+  it improves temporal answerability without changing ranking.
+
+### Changed
+- `evidence_join_v2` is the normal semantic pack path. Exact entity and alias
+  matches join semantic and lexical seeds on canonical memory IDs before one
+  shared rerank.
+- Direct and graph agreement breaks exact reranker ties only. It never promotes
+  a lower-scoring candidate over a higher cross-encoder score.
+- Generic `dream graph` `related_to` rows remain available for visualization and
+  graph browsing, but only typed relationships backed by a memory participate
+  in evidence retrieval.
+
+### Compatibility
+- No storage schema, embedding model, reranker model, provider default, or local
+  model requirement changed in this release. Graph structure is supplied by the
+  MCP host agent in the existing `remember` call; Memkeeper does not add a
+  separate LLM or extraction service.
+
 ## [0.4.0] - 2026-07-18
 
 ### Changed

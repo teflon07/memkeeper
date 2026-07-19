@@ -541,6 +541,12 @@ pub(crate) fn build_serve_call(
         }
         "remember" => {
             let content = require_str(args, "content")?;
+            let graph = args.get("graph").and_then(Value::as_object).map(|value| {
+                let mut graph = value.clone();
+                graph.insert("extractor".into(), json!("mcp-agent"));
+                graph.insert("extractor_version".into(), json!(mcp_adapter()));
+                Value::Object(graph)
+            });
             let mut source = Map::new();
             source.insert("type".into(), json!("mcp"));
             source.insert("adapter".into(), json!(mcp_adapter()));
@@ -557,7 +563,7 @@ pub(crate) fn build_serve_call(
             payload.insert("pinned".into(), json!(arg_bool(args, "pinned", false)));
             payload.insert(
                 "derive_keys".into(),
-                json!(arg_bool(args, "derive_keys", true)),
+                json!(arg_bool(args, "derive_keys", graph.is_none())),
             );
             payload.insert(
                 "mode".into(),
@@ -565,6 +571,9 @@ pub(crate) fn build_serve_call(
             );
             payload.insert("dry_run".into(), json!(arg_bool(args, "dry_run", false)));
             payload.insert("source".into(), Value::Object(source));
+            if let Some(graph) = graph {
+                payload.insert("graph".into(), graph);
+            }
             for key in [
                 "space",
                 "silo",
@@ -939,7 +948,7 @@ pub(crate) fn tool_definitions() -> Vec<Value> {
         ),
         tool(
             "remember",
-            "Write one durable memory the agent should be able to recall later. Mutating: persists a memory (set dry_run to validate without writing). Store exactly one atomic, self-contained fact, decision, preference, or lesson per call — include enough context that it stands alone (\"the user deploys from the release branch, never main\", not just \"release branch\"). Do not store secrets or raw transcripts. For a plausible-but-unverified inference, use `candidate_submit` instead so a human approves it first.",
+            "Write one durable memory the agent should be able to recall later. Mutating: persists one atomic, self-contained fact, decision, preference, or lesson. When the fact names entities or states a typed relationship, include graph entities, aliases, and relationships in the same call; the memory and graph projection commit atomically and that one memory is the relationship evidence. Do not store secrets or raw transcripts. For a plausible-but-unverified inference, use `candidate_submit`.",
             json!({
                 "content": { "type": "string", "description": "The memory text: one atomic, self-contained claim with enough context to stand on its own. Required." },
                 "space": { "type": "string", "description": "Memory space (namespace) to write into. Omit for the default space." },
@@ -952,6 +961,45 @@ pub(crate) fn tool_definitions() -> Vec<Value> {
                 "entity_key": { "type": "string", "description": "Stable key of the entity this memory is about (groups related memories in the graph)." },
                 "claim_key": { "type": "string", "description": "Stable key identifying the claim, used to group versions for supersession." },
                 "derive_keys": { "type": "boolean", "description": "Auto-derive entity_key/claim_key from the content when not provided. Default true." },
+                "graph": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "description": "Machine-extracted graph projection supported by this same memory.",
+                    "properties": {
+                        "entities": {
+                            "type": "array",
+                            "minItems": 1,
+                            "maxItems": 32,
+                            "items": {
+                                "type": "object",
+                                "additionalProperties": false,
+                                "properties": {
+                                    "entity_key": { "type": "string" },
+                                    "entity_type": { "type": "string" },
+                                    "canonical_name": { "type": "string" },
+                                    "aliases": { "type": "array", "items": { "type": "string" } }
+                                },
+                                "required": ["entity_key", "entity_type", "canonical_name"]
+                            }
+                        },
+                        "relationships": {
+                            "type": "array",
+                            "maxItems": 64,
+                            "items": {
+                                "type": "object",
+                                "additionalProperties": false,
+                                "properties": {
+                                    "subject_entity_key": { "type": "string" },
+                                    "relation_type": { "type": "string", "description": "Specific typed predicate; never related_to." },
+                                    "object_entity_key": { "type": "string" },
+                                    "confidence": { "type": "number", "minimum": 0, "maximum": 1 }
+                                },
+                                "required": ["subject_entity_key", "relation_type", "object_entity_key"]
+                            }
+                        }
+                    },
+                    "required": ["entities", "relationships"]
+                },
                 "confidence": { "type": "number", "description": "Confidence in the memory, 0.0–1.0. Default 1.0." },
                 "observed_at": { "type": "string", "description": "RFC 3339 timestamp of when this was observed. Defaults to now." },
                 "valid_from": { "type": "string", "description": "RFC 3339 timestamp the fact starts being true." },
@@ -1225,6 +1273,42 @@ mod tests {
         let metadata: Value =
             serde_json::from_str(value["metadata_json"].as_str().unwrap()).unwrap();
         assert_eq!(metadata["verified_against"], json!("env:X"));
+    }
+
+    #[test]
+    fn remember_graph_is_machine_attributed_and_disables_legacy_key_derivation() {
+        let value = payload(
+            "remember",
+            json!({
+                "content": "Steve works at Memkeeper.",
+                "graph": {
+                    "entities": [
+                        {
+                            "entity_key": "person:steve",
+                            "entity_type": "person",
+                            "canonical_name": "Steve",
+                            "aliases": ["Stephen", "I"]
+                        },
+                        {
+                            "entity_key": "org:memkeeper",
+                            "entity_type": "organization",
+                            "canonical_name": "Memkeeper",
+                            "aliases": []
+                        }
+                    ],
+                    "relationships": [{
+                        "subject_entity_key": "person:steve",
+                        "relation_type": "works_at",
+                        "object_entity_key": "org:memkeeper",
+                        "confidence": 0.98
+                    }]
+                }
+            }),
+        );
+        assert_eq!(value["derive_keys"], json!(false));
+        assert_eq!(value["graph"]["extractor"], json!("mcp-agent"));
+        assert_eq!(value["graph"]["extractor_version"], json!(mcp_adapter()));
+        assert_eq!(value["graph"]["entities"][0]["aliases"][0], "Stephen");
     }
 
     #[test]

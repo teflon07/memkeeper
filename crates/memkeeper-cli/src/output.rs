@@ -1362,6 +1362,16 @@ pub(crate) fn remember_result_json(report: &RememberReport) -> String {
         output.push_str(&representation_status_json(representation));
         output.push('}');
     }
+    if let Some(graph) = &report.graph_capture {
+        output.pop();
+        let _ = write!(
+            output,
+            ",\"graph_capture\":{{\"routing_contract\":{},\"entities\":{},\"relationships\":{}}}}}",
+            json_string(graph.routing_contract),
+            graph.entities,
+            graph.relationships,
+        );
+    }
     output
 }
 

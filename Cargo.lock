@@ -260,9 +260,9 @@ checksum = "7360491ce676a36bf9bb3c56c1aa791658183a54d2744120f27285738d90465a"
 
 [[package]]
 name = "fastrand"
-version = "2.4.1"
+version = "2.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9f1f227452a390804cdb637b74a86990f2a7d7ba4b7d5693aac9b4dd6defd8d6"
+checksum = "da7c62ceae207dd37ea5b845da6a0696c799f85e97da1ab5b7910be3c1c80223"
 
 [[package]]
 name = "find-msvc-tools"
@@ -602,7 +602,7 @@ checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 
 [[package]]
 name = "memkeeper-cli"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "memkeeper-core",
  "memkeeper-embed",
@@ -616,11 +616,11 @@ dependencies = [
 
 [[package]]
 name = "memkeeper-core"
-version = "0.4.0"
+version = "0.5.0"
 
 [[package]]
 name = "memkeeper-embed"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "ndarray",
@@ -634,11 +634,11 @@ dependencies = [
 
 [[package]]
 name = "memkeeper-protocol"
-version = "0.4.0"
+version = "0.5.0"
 
 [[package]]
 name = "memkeeper-store"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "memkeeper-core",
  "rusqlite",
@@ -917,18 +917,18 @@ dependencies = [
 
 [[package]]
 name = "proc-macro2"
-version = "1.0.106"
+version = "1.0.107"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8fd00f0bb2e90d81d1044c2b32617f68fcb9fa3bb7640c23e9c748e53fb30934"
+checksum = "985e7ec9bb745e6ce6535b544d84d6cd6f7ad8bd711c398938ae983b91a766d9"
 dependencies = [
  "unicode-ident",
 ]
 
 [[package]]
 name = "quote"
-version = "1.0.46"
+version = "1.0.47"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dfbc457d0c7a0759a614551b11a6409e5951f6c7537be1f1b7682b9ae9230368"
+checksum = "1fbf4db142a473a8d80c26bbf18454ed458bf8d26c8219c331daecfdbd079001"
 dependencies = [
  "proc-macro2",
 ]

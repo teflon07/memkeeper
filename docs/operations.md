@@ -63,6 +63,11 @@ proposals), and `graph` (reconcile projection drift **and** materialize
 link-derived relationship edges into the entity graph). It is **dry-run by
 default**; pass `--apply` (or `--commit`) to write.
 
+The link-derived `related_to` rows support dashboard visualization and generic
+graph browsing only. They are not routing evidence and never participate in
+`evidence_join_v2`. Typed routing edges are written atomically by `remember`
+with one supporting memory ID.
+
 Preview, then apply:
 
 ```
@@ -140,6 +145,9 @@ pinned by the CLI test `pack_result_json_contract_is_stable`.
 ```
 
 Notes:
+- Each injected memory line includes its stored `observed_at` timestamp before
+  the memory text. On the reranked path, the cross-encoder still scores only
+  canonical memory content; the timestamp does not affect ranking.
 - `scores` is aligned 1:1 with `memory_ids` (same order). Entries are the
   cross-encoder rerank score on the rerank path, otherwise the retrieval score.
 - `top_score` is the highest final relevance score in the candidate pool before

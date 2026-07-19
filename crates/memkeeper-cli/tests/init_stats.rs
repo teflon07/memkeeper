@@ -1226,14 +1226,18 @@ fn pack_without_reranker_returns_content_but_empty_scores() {
     cleanup_store(&path);
 }
 
-/// Spawn the memkeeper binary with model discovery pinned to cargo's empty
-/// integration-test tmpdir. These tests assert the no-models posture (lexical
-/// search, `reranked:false`, empty pack scores); without the pin, model-dir
-/// discovery finds a populated `models/` checkout near the workspace and
-/// silently activates semantic + rerank, so the suite passes in CI but fails
-/// on any machine that has pulled models.
+/// Spawn the memkeeper binary without inheriting the caller's Memkeeper runtime.
+/// These tests assert the no-models posture (lexical search, `reranked:false`,
+/// empty pack scores). Explicit model paths take precedence over
+/// `MEMKEEPER_MODELS_DIR`, so clear every inherited `MEMKEEPER_*` variable before
+/// pinning discovery to cargo's empty integration-test tmpdir.
 fn memkeeper_command() -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_memkeeper"));
+    for (key, _) in std::env::vars_os() {
+        if key.as_encoded_bytes().starts_with(b"MEMKEEPER_") {
+            command.env_remove(key);
+        }
+    }
     command.env("MEMKEEPER_MODELS_DIR", env!("CARGO_TARGET_TMPDIR"));
     command
 }

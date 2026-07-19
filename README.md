@@ -136,7 +136,14 @@ transcript logger. Memories get in two ways:
   script.
 - **From an agent** — the native [MCP server](#use-it-from-your-agent-mcp) lets an MCP
   client (Claude and other agents) call `remember` during a session, so durable facts
-  are captured as they come up.
+  are captured as they come up. When a confirmed memory names entities or states a
+  relationship, the MCP tool asks the agent to include a bounded graph projection
+  in the same call. memkeeper validates and commits the memory, exact aliases, and
+  typed relationships atomically. The one memory ID is the relationship evidence.
+
+memkeeper does not run a second LLM or background extractor for this. The MCP host
+agent supplies the structured graph fields while making the normal `remember`
+call. Raw CLI callers can supply the same `graph` object explicitly.
 
 On the *retrieval* side, `memkeeper hook retrieve` is a Claude Code
 UserPromptSubmit hook client that injects relevant memories into the prompt — so an
@@ -305,11 +312,13 @@ differently:
 
 - The **memory list** fills as you `remember`.
 - The **graph** visualizes *entities and relationships*, which are a separate layer
-  from raw memories. They accrue from memories that carry an entity, from the
-  `dream` synthesis pipeline extracting them over time, or from explicit
-  `entity-upsert` / `relationship-upsert`. So a handful of plain memories fill the
-  list but leave the **Graph** tab empty until entities and links exist — add a few
-  connected memories (or run `dream`) and it builds out.
+  from raw memories. Native MCP `remember` captures bounded entities, aliases, and
+  typed relationships with a confirmed memory when the host agent supplies them.
+  Raw CLI callers can pass the same graph structure, or curate it with
+  `entity-upsert` / `relationship-upsert`. The `dream graph` task may add generic
+  `related_to` links for visualization, but those links are not retrieval
+  evidence. Plain memories without graph fields still fill the list without
+  adding graph edges.
 
 ## Benchmarks
 

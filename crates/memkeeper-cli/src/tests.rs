@@ -106,7 +106,9 @@ fn rerank_documents_use_bounded_canonical_content_only() {
     let pool = vec![memkeeper_store::RerankPoolCandidate {
         memory_id: "mem-represented".to_string(),
         content: content.clone(),
+        observed_at: "2026-07-19T00:00:00.000Z".to_string(),
         activation: None,
+        consensus: false,
         admissions: Vec::new(),
     }];
 
@@ -133,8 +135,10 @@ fn rerank_documents_use_bounded_canonical_content_only() {
         &[memkeeper_store::RerankCandidate {
             memory_id: "mem-represented".to_string(),
             content: content.clone(),
+            observed_at: "2026-07-19T00:00:00.000Z".to_string(),
             rerank_score: 1.0,
             activation: None,
+            consensus: false,
         }],
     );
     assert!(report.content.contains(&content));
@@ -333,7 +337,9 @@ fn retrieval_only_fallback_preserves_the_unified_pool_order() {
             RerankPoolCandidate {
                 memory_id: "direct".to_string(),
                 content: "Steve profile seed.".to_string(),
+                observed_at: "2026-07-19T00:00:00.000Z".to_string(),
                 activation: None,
+                consensus: false,
                 admissions: vec![AdmissionObservation {
                     source: AdmissionSource::Bm25,
                     query_index: 0,
@@ -346,7 +352,9 @@ fn retrieval_only_fallback_preserves_the_unified_pool_order() {
             RerankPoolCandidate {
                 memory_id: "graph".to_string(),
                 content: "Steve works at Acme Labs.".to_string(),
+                observed_at: "2026-07-19T00:00:00.000Z".to_string(),
                 activation: Some(0.5),
+                consensus: false,
                 admissions: vec![AdmissionObservation {
                     source: AdmissionSource::Graph,
                     query_index: 0,
@@ -769,6 +777,31 @@ fn remember_json_explicitly_disables_key_derivation() {
     .expect("parse succeeds");
     assert_eq!(request.entity_key, None);
     assert_eq!(request.claim_key, None);
+}
+
+#[test]
+fn remember_json_parses_structured_graph_without_deriving_an_entity_key() {
+    let request = remember_request_from_json(
+        r#"{
+            "content":"Steve works at Memkeeper.",
+            "graph":{
+                "extractor":"test",
+                "extractor_version":"1",
+                "entities":[
+                    {"entity_key":"person:steve","entity_type":"person","canonical_name":"Steve","aliases":["Stephen","I"]},
+                    {"entity_key":"org:memkeeper","entity_type":"organization","canonical_name":"Memkeeper","aliases":[]}
+                ],
+                "relationships":[
+                    {"subject_entity_key":"person:steve","relation_type":"works_at","object_entity_key":"org:memkeeper","confidence":0.98}
+                ]
+            }
+        }"#,
+    )
+    .expect("structured graph parses");
+    assert_eq!(request.entity_key, None);
+    let graph = request.graph.expect("graph capture");
+    assert_eq!(graph.entities[0].aliases, vec!["Stephen", "I"]);
+    assert_eq!(graph.relationships[0].relation_type, "works_at");
 }
 
 #[test]
@@ -1614,6 +1647,17 @@ fn dummy_for_mcp_property(name: &str, key: &str, spec: &serde_json::Value) -> se
     use serde_json::json;
     // Engine parsers validate a handful of fields beyond their JSON type.
     match (name, key) {
+        ("remember", "graph") => {
+            return json!({
+                "entities": [{
+                    "entity_key": "person:steve",
+                    "entity_type": "person",
+                    "canonical_name": "Steve",
+                    "aliases": ["Stephen"]
+                }],
+                "relationships": []
+            });
+        }
         ("remember", "mode") => return json!("supersede"),
         ("remember", "source_type") => return json!("explicit-user"),
         _ => {}

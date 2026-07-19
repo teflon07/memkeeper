@@ -20,6 +20,7 @@ import json
 import os
 import re
 import shutil
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -116,6 +117,13 @@ class DialogueTurn:
 class TurnRef:
     sample_id: str
     dia_id: str
+
+
+@dataclass(frozen=True)
+class FrozenCapturedEntity:
+    canonical_name: str
+    entity_type: str
+    aliases: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -548,35 +556,259 @@ def seed_capture_store(
     return memory_to_turn, dia_to_memory
 
 
-def capture_routing_relationship_payload(
-    *,
-    subject_key: str,
-    relation: str,
-    object_key: str,
-    subject_memory_id: str,
-    object_memory_id: str,
+def capture_graph_payload(
+    entities: dict[str, Any],
+    relationships: dict[tuple[str, str, str], float],
 ) -> dict[str, Any]:
-    """Build the evidence-backed relationship written by full capture seeding."""
+    """Build one atomic evidence_join_v2 graph payload for ``remember``."""
     return {
-        "subject_entity_key": subject_key,
-        "relation_type": relation,
-        "object_entity_key": object_key,
-        "space": "workspace-memory",
-        "memory_id": subject_memory_id,
-        "metadata": {
-            "routing": True,
-            "origin": "adjudicated_capture",
-            "routing_contract": "evidence_join_v1",
-            "routing_contract_version": 1,
-            "object_memory_id": object_memory_id,
-        },
+        "extractor": "locomo-capture-adjudicator",
+        "extractor_version": "evidence_join_v2",
+        "entities": [
+            {
+                "entity_key": key,
+                "canonical_name": entity.canonical_name,
+                "entity_type": entity.entity_type,
+                "aliases": list(entity.aliases),
+            }
+            for key, entity in sorted(entities.items())
+        ],
+        "relationships": [
+            {
+                "subject_entity_key": subject,
+                "relation_type": relation,
+                "object_entity_key": object_key,
+                "confidence": confidence,
+            }
+            for (subject, relation, object_key), confidence in sorted(
+                relationships.items()
+            )
+        ],
     }
+
+
+def load_frozen_graph_replay(
+    source_store: Path,
+    sample_id: str,
+) -> tuple[
+    dict[str, dict[str, Any]],
+    dict[str, dict[tuple[str, str, str], float]],
+]:
+    """Load frozen adjudicated routes, grouped by their evidence turn.
+
+    The source store is read-only. Its graph rows provide frozen extraction
+    evidence only; the target store is rebuilt through atomic V2 ``remember``.
+    """
+    uri = f"file:{source_store.resolve()}?mode=ro"
+    with sqlite3.connect(uri, uri=True) as conn:
+        conn.row_factory = sqlite3.Row
+        entity_rows = conn.execute(
+            """
+            SELECT e.id, e.entity_key, e.entity_type, e.canonical_name, a.alias
+            FROM entities e
+            LEFT JOIN entity_aliases a ON a.entity_id = e.id
+            WHERE e.space_name = 'workspace-memory' AND e.status = 'active'
+            ORDER BY e.entity_key, a.normalized_alias
+            """
+        ).fetchall()
+        relationship_rows = conn.execute(
+            """
+            SELECT
+              se.entity_key AS subject_key,
+              r.relation_type,
+              oe.entity_key AS object_key,
+              r.confidence,
+              json_extract(v.source_ref_json, '$.source_description') AS source_description
+            FROM relationships r
+            JOIN entities se ON se.id = r.subject_entity_id
+            JOIN entities oe ON oe.id = r.object_entity_id
+            JOIN memories m ON m.id = r.memory_id
+            JOIN memory_versions v ON v.id = m.active_version_id
+            WHERE r.space_name = 'workspace-memory'
+              AND r.status = 'active'
+              AND json_extract(r.metadata_json, '$.routing') = 1
+              AND json_extract(r.metadata_json, '$.routing_contract')
+                    IN ('evidence_join_v1', 'evidence_join_v2')
+            ORDER BY r.id
+            """
+        ).fetchall()
+
+    aliases_by_id: dict[str, list[str]] = defaultdict(list)
+    entity_base: dict[str, tuple[str, str, str]] = {}
+    for row in entity_rows:
+        entity_base[row["id"]] = (
+            row["entity_key"],
+            row["canonical_name"],
+            row["entity_type"],
+        )
+        if row["alias"] is not None and row["alias"] != row["canonical_name"]:
+            aliases_by_id[row["id"]].append(row["alias"])
+    alias_owners: dict[str, set[str]] = defaultdict(set)
+    for entity_id, aliases in aliases_by_id.items():
+        entity_key = entity_base[entity_id][0]
+        for alias in aliases:
+            alias_owners[alias.casefold().strip()].add(entity_key)
+    ambiguous_aliases = {
+        alias for alias, owners in alias_owners.items() if len(owners) > 1
+    }
+    entities = {
+        key: FrozenCapturedEntity(
+            canonical_name=canonical_name,
+            entity_type=entity_type,
+            aliases=tuple(
+                alias
+                for alias in aliases_by_id[entity_id]
+                if alias.casefold().strip() not in ambiguous_aliases
+            ),
+        )
+        for entity_id, (key, canonical_name, entity_type) in entity_base.items()
+    }
+
+    entities_by_turn: dict[str, dict[str, Any]] = defaultdict(dict)
+    relationships_by_turn: dict[
+        str, dict[tuple[str, str, str], float]
+    ] = defaultdict(dict)
+    expected_prefix = f"{sample_id} "
+    for row in relationship_rows:
+        source_description = row["source_description"]
+        if not source_description or not source_description.startswith(expected_prefix):
+            raise ValueError(
+                "frozen route evidence is missing the expected LoCoMo turn provenance"
+            )
+        dia_id = source_description[len(expected_prefix):]
+        turn_key = qualified_dia_id(sample_id, dia_id)
+        subject_key = row["subject_key"]
+        object_key = row["object_key"]
+        relation = row["relation_type"]
+        if relation == "related_to":
+            raise ValueError("generic related_to is not valid V2 routing evidence")
+        entities_by_turn[turn_key][subject_key] = entities[subject_key]
+        entities_by_turn[turn_key][object_key] = entities[object_key]
+        relationships_by_turn[turn_key][
+            (subject_key, relation, object_key)
+        ] = float(row["confidence"])
+    return dict(entities_by_turn), dict(relationships_by_turn)
+
+
+def seed_frozen_v2_replay_store(
+    binary: Path,
+    store: Path,
+    samples: list[PreparedSample],
+    source_store: Path,
+    *,
+    include_graph: bool = True,
+    include_contextual_cards: bool = True,
+) -> tuple[dict[str, TurnRef], dict[str, str]]:
+    """Re-seed canonical turns with optional frozen graph evidence."""
+    if len(samples) != 1:
+        raise ValueError("frozen V2 replay requires exactly one conversation")
+    sample = samples[0]
+    entities_by_turn, relationships_by_turn = load_frozen_graph_replay(
+        source_store,
+        sample.sample_id,
+    )
+    run_memkeeper(binary, store, "init")
+    memory_to_turn: dict[str, TurnRef] = {}
+    dia_to_memory: dict[str, str] = {}
+    previous_by_session: dict[str, DialogueTurn] = {}
+    written_relationships = 0
+    if include_graph:
+        adapter = (
+            "memkeeper-locomo-atomic-v2-replay"
+            if include_contextual_cards
+            else "memkeeper-locomo-atomic-v2-raw-replay"
+        )
+        mode_tag = (
+            "atomic-v2-replay"
+            if include_contextual_cards
+            else "atomic-v2-raw-replay"
+        )
+    else:
+        adapter = (
+            "memkeeper-locomo-contextual-replay"
+            if include_contextual_cards
+            else "memkeeper-locomo-raw-replay"
+        )
+        mode_tag = "contextual-replay" if include_contextual_cards else "raw-replay"
+    for turn in iter_dialogue_turns(sample):
+        turn_key = qualified_dia_id(sample.sample_id, turn.dia_id)
+        previous = previous_by_session.get(turn.session_key)
+        payload = {
+            "space": "workspace-memory",
+            "silo": "durable",
+            "scope": "workspace",
+            "project": "LoCoMo",
+            "kind": "fact",
+            "content": turn_content(turn),
+            "summary": (
+                f"LoCoMo {turn.sample_id} {turn.dia_id}: "
+                f"{turn.speaker}: {turn.text[:160]}"
+            ),
+            "tags": [
+                "locomo",
+                turn.sample_id,
+                f"session-{turn.session_index}",
+                "capture-sidecar",
+                mode_tag,
+            ],
+            "entity_key": f"locomo:{turn.sample_id}",
+            "claim_key": f"locomo.{turn.sample_id}.{turn.dia_id.replace(':', '_')}",
+            "confidence": 1.0,
+            "observed_at": observed_at_for_turn(turn),
+            "source": {
+                "type": "benchmark",
+                "adapter": adapter,
+                "source_description": f"{turn.sample_id} {turn.dia_id}",
+            },
+        }
+        if include_contextual_cards:
+            payload["retrieval_representation"] = {
+                "kind": "contextual-card-v1",
+                "text": dialogue_context_card(turn, previous),
+            }
+        graph_entities = entities_by_turn.get(turn_key)
+        graph_relationships = relationships_by_turn.get(turn_key, {})
+        if include_graph and graph_entities:
+            payload["graph"] = capture_graph_payload(
+                graph_entities,
+                graph_relationships,
+            )
+        response = run_memkeeper(binary, store, "remember", payload)
+        memory_id = response["result"]["memory"]["id"]
+        if include_graph and graph_entities:
+            status = response["result"].get("graph_capture")
+            if (
+                not status
+                or status.get("routing_contract") != "evidence_join_v2"
+                or status.get("relationships") != len(graph_relationships)
+            ):
+                raise RuntimeError(
+                    f"atomic V2 graph capture was not confirmed for {turn_key}"
+                )
+            written_relationships += status["relationships"]
+        memory_to_turn[memory_id] = TurnRef(
+            sample_id=sample.sample_id,
+            dia_id=turn.dia_id,
+        )
+        dia_to_memory[turn_key] = memory_id
+        previous_by_session[turn.session_key] = turn
+    expected_relationships = (
+        sum(len(rows) for rows in relationships_by_turn.values())
+        if include_graph
+        else 0
+    )
+    if written_relationships != expected_relationships:
+        raise RuntimeError(
+            "atomic V2 graph capture count mismatch: "
+            f"expected {expected_relationships}, wrote {written_relationships}"
+        )
+    return memory_to_turn, dia_to_memory
 
 
 def seed_capture_full_store(
     binary: Path, store: Path, samples: list[PreparedSample], *,
     invoke=None, generate=None, resolve=None, project_graph: bool = True,
-    canonical_sidecars: bool = False,
+    canonical_sidecars: bool = False, initialize_store: bool = True,
 ) -> tuple[dict[str, TurnRef], dict[str, str]]:
     """FULL capture-pipeline seed (exercises #3 adjudication + #4 graph): per session, generate ->
     adjudicate -> promote only supported/repaired atoms -> project promoted edges to the graph.
@@ -594,10 +826,14 @@ def seed_capture_full_store(
     invoke = invoke or cg.claude_invoke
     generate = generate or cg.generate
     resolve = resolve or cer.resolve_entities
-    run_memkeeper(binary, store, "init")
+    if initialize_store:
+        run_memkeeper(binary, store, "init")
     memory_to_turn: dict[str, TurnRef] = {}
     dia_to_memory: dict[str, str] = {}
-    pending_routes: list[tuple[str, str, str, str, str]] = []
+    graph_entities_by_turn: dict[str, dict[str, Any]] = defaultdict(dict)
+    graph_relationships_by_turn: dict[
+        str, dict[tuple[str, str, str], float]
+    ] = defaultdict(dict)
     unmapped = 0
     for sample in samples:
         by_session: dict[int, list[DialogueTurn]] = defaultdict(list)
@@ -623,10 +859,7 @@ def seed_capture_full_store(
             atoms_by_id = {a["id"]: a for a in capture.atoms}
             edge_triples = {f'{e["subject"]} {e["relation"]} {e["object"]}':
                             (e["subject"], e["relation"], e["object"]) for e in verdict.edges}
-            promoted_ekey: dict[str, str] = {}  # atom id -> entity_key (promoted only)
-            promoted_memory_id: dict[str, str] = {}
-            promoted_turn_key: dict[str, str] = {}
-            projected_entities: set[str] = set()
+            promoted: dict[str, tuple[DialogueTurn, str, Any, str]] = {}
             for item in plan.items:
                 if item.kind != "atom" or item.action not in (cd.PROMOTE, cd.REPAIR_PROMOTE):
                     continue
@@ -640,74 +873,92 @@ def seed_capture_full_store(
                 ekey = resolution.atom_entity_keys[item.ref]
                 entity = resolution.entities[ekey]
                 text = item.text or atom["text"]
-                promoted_ekey[item.ref] = ekey
-                turn_key = qualified_dia_id(sample.sample_id, turn.dia_id)
-                promoted_turn_key[item.ref] = turn_key
-                if not canonical_sidecars:
-                    payload = {
-                        "space": "workspace-memory", "silo": "durable", "scope": "workspace",
-                        "project": "LoCoMo", "kind": "fact", "content": text,
-                        "summary": f"LoCoMo {sample.sample_id} {turn.dia_id} atom: {text[:140]}",
-                        "tags": ["locomo", sample.sample_id, f"session-{sidx}", "capture-full"],
-                        "entity_key": ekey,
-                        "claim_key": f"locomo.capf.{sample.sample_id}.{turn.dia_id.replace(':', '_')}.{item.ref}",
-                        "confidence": 1.0, "observed_at": observed_at_for_turn(turn),
-                        "source": {"type": "benchmark", "adapter": "memkeeper-locomo-capture-full",
-                                   "source_description": f"{sample.sample_id} {turn.dia_id}"},
-                    }
-                    response = run_memkeeper(binary, store, "remember", payload)
-                    memory_id = response["result"]["memory"]["id"]
-                    memory_to_turn[memory_id] = TurnRef(
-                        sample_id=sample.sample_id,
-                        dia_id=turn.dia_id,
-                    )
-                    dia_to_memory.setdefault(turn_key, memory_id)
-                    promoted_memory_id[item.ref] = memory_id
-                if project_graph and ekey not in projected_entities:
-                    run_memkeeper(binary, store, "entity-upsert", {
-                        "entity_key": ekey,
-                        "canonical_name": entity.canonical_name,
-                        "entity_type": entity.entity_type,
-                        "aliases": list(entity.aliases),
-                        "space": "workspace-memory",
-                    })
-                    projected_entities.add(ekey)
+                promoted[item.ref] = (turn, ekey, entity, text)
+
+            relationships_by_atom: dict[
+                str, dict[tuple[str, str, str], float]
+            ] = defaultdict(dict)
+            promoted_atom_by_turn: dict[str, str] = {}
+            for atom_id, (turn, _ekey, _entity, _text) in promoted.items():
+                promoted_atom_by_turn.setdefault(
+                    qualified_dia_id(sample.sample_id, turn.dia_id),
+                    atom_id,
+                )
             if project_graph:
                 for item in plan.items:
-                    if item.kind not in ("edge", "sweep_edge") or item.action not in (cd.PROMOTE, cd.REPAIR_PROMOTE):
+                    if item.kind not in ("edge", "sweep_edge") or item.action not in (
+                        cd.PROMOTE,
+                        cd.REPAIR_PROMOTE,
+                    ):
                         continue
                     trip = edge_triples.get(item.ref)
                     if trip is None:
                         continue
                     subj, rel, obj = trip
-                    sk, ok = promoted_ekey.get(subj), promoted_ekey.get(obj)
-                    if not sk or not ok or sk == ok:
-                        continue  # both endpoints must be promoted, distinct nodes
-                    if canonical_sidecars:
-                        subject_turn_key = promoted_turn_key.get(subj)
-                        object_turn_key = promoted_turn_key.get(obj)
-                        if not subject_turn_key or not object_turn_key:
-                            continue
-                        pending_routes.append(
-                            (sk, rel, ok, subject_turn_key, object_turn_key)
+                    subject = promoted.get(subj)
+                    object_ = promoted.get(obj)
+                    if subject is None or object_ is None:
+                        continue
+                    subject_key = subject[1]
+                    object_key = object_[1]
+                    if subject_key == object_key or rel == "related_to":
+                        continue
+                    evidence_atom = subj
+                    if item.evidence_quote:
+                        evidence_turn = _turn_for_span(
+                            item.evidence_quote,
+                            source,
+                            spans,
                         )
-                        continue
-                    subject_memory_id = promoted_memory_id.get(subj)
-                    object_memory_id = promoted_memory_id.get(obj)
-                    if not subject_memory_id or not object_memory_id:
-                        continue
-                    run_memkeeper(
-                        binary,
-                        store,
-                        "relationship-upsert",
-                        capture_routing_relationship_payload(
-                            subject_key=sk,
-                            relation=rel,
-                            object_key=ok,
-                            subject_memory_id=subject_memory_id,
-                            object_memory_id=object_memory_id,
-                        ),
+                        if evidence_turn is not None:
+                            evidence_atom = promoted_atom_by_turn.get(
+                                qualified_dia_id(
+                                    sample.sample_id,
+                                    evidence_turn.dia_id,
+                                ),
+                                subj,
+                            )
+                    relationships_by_atom[evidence_atom][
+                        (subject_key, rel, object_key)
+                    ] = 1.0
+
+            for atom_id, (turn, ekey, entity, text) in promoted.items():
+                turn_key = qualified_dia_id(sample.sample_id, turn.dia_id)
+                graph_entities = {ekey: entity}
+                graph_relationships = relationships_by_atom.get(atom_id, {})
+                for subject_key, _relation, object_key in graph_relationships:
+                    graph_entities[subject_key] = resolution.entities[subject_key]
+                    graph_entities[object_key] = resolution.entities[object_key]
+                if canonical_sidecars:
+                    if project_graph:
+                        graph_entities_by_turn[turn_key].update(graph_entities)
+                        graph_relationships_by_turn[turn_key].update(
+                            graph_relationships
+                        )
+                    continue
+                payload = {
+                    "space": "workspace-memory", "silo": "durable", "scope": "workspace",
+                    "project": "LoCoMo", "kind": "fact", "content": text,
+                    "summary": f"LoCoMo {sample.sample_id} {turn.dia_id} atom: {text[:140]}",
+                    "tags": ["locomo", sample.sample_id, f"session-{sidx}", "capture-full"],
+                    "entity_key": ekey,
+                    "claim_key": f"locomo.capf.{sample.sample_id}.{turn.dia_id.replace(':', '_')}.{atom_id}",
+                    "confidence": 1.0, "observed_at": observed_at_for_turn(turn),
+                    "source": {"type": "benchmark", "adapter": "memkeeper-locomo-capture-full",
+                               "source_description": f"{sample.sample_id} {turn.dia_id}"},
+                }
+                if project_graph:
+                    payload["graph"] = capture_graph_payload(
+                        graph_entities,
+                        graph_relationships,
                     )
+                response = run_memkeeper(binary, store, "remember", payload)
+                memory_id = response["result"]["memory"]["id"]
+                memory_to_turn[memory_id] = TurnRef(
+                    sample_id=sample.sample_id,
+                    dia_id=turn.dia_id,
+                )
+                dia_to_memory.setdefault(turn_key, memory_id)
     if canonical_sidecars:
         for sample in samples:
             previous_by_session: dict[str, DialogueTurn] = {}
@@ -740,11 +991,17 @@ def seed_capture_full_store(
                         "adapter": "memkeeper-locomo-capture-sidecar",
                         "source_description": f"{turn.sample_id} {turn.dia_id}",
                     },
-                    "retrieval_representation": {
-                        "kind": "contextual-card-v1",
-                        "text": dialogue_context_card(turn, previous),
-                    },
                 }
+                payload["retrieval_representation"] = {
+                    "kind": "contextual-card-v1",
+                    "text": dialogue_context_card(turn, previous),
+                }
+                graph_entities = graph_entities_by_turn.get(turn_key)
+                if project_graph and graph_entities:
+                    payload["graph"] = capture_graph_payload(
+                        graph_entities,
+                        graph_relationships_by_turn.get(turn_key, {}),
+                    )
                 response = run_memkeeper(binary, store, "remember", payload)
                 memory_id = response["result"]["memory"]["id"]
                 memory_to_turn[memory_id] = TurnRef(
@@ -753,25 +1010,6 @@ def seed_capture_full_store(
                 )
                 dia_to_memory[turn_key] = memory_id
                 previous_by_session[turn.session_key] = turn
-        if project_graph:
-            seen_routes: set[tuple[str, str, str, str, str]] = set()
-            for route in pending_routes:
-                if route in seen_routes:
-                    continue
-                seen_routes.add(route)
-                sk, rel, ok, subject_turn_key, object_turn_key = route
-                run_memkeeper(
-                    binary,
-                    store,
-                    "relationship-upsert",
-                    capture_routing_relationship_payload(
-                        subject_key=sk,
-                        relation=rel,
-                        object_key=ok,
-                        subject_memory_id=dia_to_memory[subject_turn_key],
-                        object_memory_id=dia_to_memory[object_turn_key],
-                    ),
-                )
     if unmapped:
         print(f"[capture-full-seed] WARN: {unmapped} atoms unmappable to a turn (skipped)", file=sys.stderr)
     return memory_to_turn, dia_to_memory

@@ -1263,6 +1263,7 @@ fn remember_request_from_candidate(
         tags: candidate.tags.clone(),
         entity_key: candidate.entity_key.clone().or(derived_entity_key),
         claim_key: candidate.claim_key.clone().or(derived_claim_key),
+        graph: None,
         confidence: candidate.confidence,
         observed_at: None,
         valid_from: None,
@@ -1981,23 +1982,25 @@ impl PackPoolItem {
 pub struct RerankCandidate {
     /// Candidate memory id.
     pub memory_id: String,
-    /// Full memory content used both for reranking and pack injection.
+    /// Canonical memory content used for reranking and rendered after source
+    /// time in the final pack.
     pub content: String,
+    /// Source observation time rendered with the injected content.
+    pub observed_at: String,
     /// Cross-encoder relevance score for `(query, content)`.
     pub rerank_score: f32,
+    /// True when both direct retrieval and the graph reached this memory.
+    pub consensus: bool,
     /// Graph-expansion activation when this candidate was pulled through a
     /// relationship hop (`None` for ordinary ANN/BM25 candidates). It only
-    /// breaks exact cross-encoder score ties.
+    /// breaks remaining ordering ties.
     pub activation: Option<f64>,
 }
 
 fn compare_rerank_candidates(a: &RerankCandidate, b: &RerankCandidate) -> std::cmp::Ordering {
     b.rerank_score
-        .partial_cmp(&a.rerank_score)
-        .unwrap_or(std::cmp::Ordering::Equal)
-        // Activation never overrides a cross-encoder score. It only makes
-        // exact rerank ties deterministic and prefers the memory with more
-        // graph support when both candidates are otherwise equivalent.
+        .total_cmp(&a.rerank_score)
+        .then_with(|| b.consensus.cmp(&a.consensus))
         .then_with(|| {
             b.activation
                 .partial_cmp(&a.activation)
@@ -2049,6 +2052,13 @@ fn truncate_pack_entry(content: &str, max_chars: usize) -> Option<String> {
     Some(entry)
 }
 
+fn rerank_pack_line(candidate: &RerankCandidate) -> String {
+    format!(
+        "- [Observed at: {}] {}\n",
+        candidate.observed_at, candidate.content
+    )
+}
+
 /// Assemble the final pack from a reranked candidate pool, applying one
 /// pack-level top-score gate, rerank ordering, and the char/count budget.
 ///
@@ -2075,7 +2085,7 @@ pub fn assemble_reranked_pack(request: &PackRequest, candidates: &[RerankCandida
         if memory_ids.len() >= request.max_memories {
             break;
         }
-        let entry = format!("- {}\n", candidate.content);
+        let entry = rerank_pack_line(candidate);
         if content.len() + entry.len() > request.max_chars {
             break;
         }
@@ -2093,7 +2103,13 @@ pub fn assemble_reranked_pack(request: &PackRequest, candidates: &[RerankCandida
     let mut text_truncated = false;
     if memory_ids.is_empty() {
         if let Some(top) = ordered.first() {
-            if let Some(entry) = truncate_pack_entry(&top.content, request.max_chars) {
+            let line = rerank_pack_line(top);
+            if let Some(entry) = truncate_pack_entry(
+                line.strip_prefix("- ")
+                    .and_then(|value| value.strip_suffix('\n'))
+                    .unwrap_or(&line),
+                request.max_chars,
+            ) {
                 content.push_str(&entry);
                 memory_ids.push(top.memory_id.clone());
                 // Keep `scores` aligned 1:1 with `memory_ids` (PackReport invariant);
@@ -2336,8 +2352,6 @@ struct EvidenceRelationship {
 
 const MAX_EVIDENCE_ENTITY_SPANS: usize = 32;
 const MAX_EVIDENCE_ENTITY_SPAN_WORDS: usize = 5;
-const MAX_EVIDENCE_ENTITY_SEEDS: usize = 2;
-
 fn evidence_graph_expand_pool(
     connection: &Connection,
     request: &PackRequest,
@@ -2379,11 +2393,7 @@ fn evidence_graph_expand_pool(
         .filter(|(memory_id, _)| !pool_ids.contains(memory_id.as_str()))
         .map(|(memory_id, routes)| (memory_id.clone(), routes.clone()))
         .collect();
-    let allocation_order = evidence_candidate_order(
-        &new_candidate_routes,
-        expansion.max_graph_neighbors,
-        &request.queries,
-    );
+    let allocation_order = evidence_candidate_order(&new_candidate_routes);
     let selected_new: BTreeSet<&str> = allocation_order
         .iter()
         .take(expansion.max_graph_neighbors)
@@ -2491,18 +2501,11 @@ fn evidence_memory_seeds(
     let mut support_statement = connection.prepare_cached(
         "SELECT DISTINCT e.id, e.entity_key, e.space_name
            FROM relationships r
-           JOIN entities e
-             ON e.id = CASE
-                  WHEN r.memory_id = ?1 THEN r.subject_entity_id
-                  ELSE r.object_entity_id
-                END
+           JOIN entities e ON e.id IN (r.subject_entity_id, r.object_entity_id)
           WHERE r.status = 'active'
             AND e.status = 'active'
             AND json_extract(r.metadata_json, '$.routing') = 1
-            AND (
-              r.memory_id = ?1
-              OR json_extract(r.metadata_json, '$.object_memory_id') = ?1
-            )
+            AND r.memory_id = ?1
           ORDER BY e.id",
     )?;
     let mut attached_statement = connection.prepare_cached(
@@ -2618,63 +2621,6 @@ fn evidence_entity_stopword(value: &str) -> bool {
     )
 }
 
-fn evidence_relation_word(value: &str) -> Option<String> {
-    let mut normalized = value.to_ascii_lowercase();
-    if matches!(
-        normalized.as_str(),
-        "a" | "an"
-            | "and"
-            | "are"
-            | "at"
-            | "by"
-            | "did"
-            | "do"
-            | "does"
-            | "for"
-            | "from"
-            | "had"
-            | "has"
-            | "have"
-            | "how"
-            | "in"
-            | "is"
-            | "of"
-            | "on"
-            | "the"
-            | "to"
-            | "was"
-            | "were"
-            | "what"
-            | "when"
-            | "where"
-            | "which"
-            | "who"
-            | "why"
-            | "with"
-    ) {
-        return None;
-    }
-    if normalized.len() > 3 && normalized.ends_with('s') && !normalized.ends_with("ss") {
-        normalized.pop();
-    }
-    Some(normalized)
-}
-
-fn evidence_predicate_path_matches_queries(queries: &[String], predicate_names: &[String]) -> bool {
-    let query_words: BTreeSet<String> = queries
-        .iter()
-        .flat_map(|query| query_alias_words(query))
-        .filter_map(|word| evidence_relation_word(&word))
-        .collect();
-    predicate_names.iter().any(|predicate| {
-        predicate
-            .split(|character: char| !character.is_alphanumeric())
-            .filter(|word| !word.is_empty())
-            .filter_map(evidence_relation_word)
-            .any(|word| query_words.contains(&word))
-    })
-}
-
 fn evidence_entity_seeds(
     connection: &Connection,
     request: &PackRequest,
@@ -2712,9 +2658,6 @@ fn evidence_entity_seeds(
             matched_query_index: Some(span.query_index),
             matched_query_span: Some(span.normalized),
         });
-        if seeds.len() == MAX_EVIDENCE_ENTITY_SEEDS {
-            break;
-        }
     }
     Ok(seeds)
 }
@@ -2930,38 +2873,50 @@ fn qualified_evidence_relationship(
     if metadata.get("routing").and_then(serde_json::Value::as_bool) != Some(true) {
         return Ok(None);
     }
+    if metadata
+        .get("routing_contract")
+        .and_then(serde_json::Value::as_str)
+        != Some("evidence_join_v2")
+        || metadata
+            .get("routing_contract_version")
+            .and_then(serde_json::Value::as_u64)
+            != Some(2)
+    {
+        return Err(Error::InvalidRequest {
+            message: format!(
+                "routing relationship {} must use evidence_join_v2 contract version 2",
+                relationship.id
+            ),
+        });
+    }
+    if metadata.get("object_memory_id").is_some() {
+        return Err(Error::InvalidRequest {
+            message: format!(
+                "routing relationship {} uses removed object_memory_id; memory_id is the sole evidence id",
+                relationship.id
+            ),
+        });
+    }
     if relationship.relation_type == "related_to" {
         return Ok(None);
     }
-    let subject_memory_id =
+    let evidence_memory_id =
         relationship
             .memory_id
             .as_deref()
             .ok_or_else(|| Error::InvalidRequest {
                 message: format!(
-                    "routing relationship {} is missing subject memory_id",
+                    "routing relationship {} is missing evidence memory_id",
                     relationship.id
                 ),
             })?;
-    let object_memory_id = metadata
-        .get("object_memory_id")
-        .and_then(serde_json::Value::as_str)
-        .filter(|value| !value.trim().is_empty())
-        .ok_or_else(|| Error::InvalidRequest {
+    if !routing_support_memory_is_valid(connection, evidence_memory_id, space)? {
+        return Err(Error::InvalidRequest {
             message: format!(
-                "routing relationship {} is missing object_memory_id",
-                relationship.id
+                "routing relationship {} has invalid evidence memory {}",
+                relationship.id, evidence_memory_id
             ),
-        })?;
-    for memory_id in [subject_memory_id, object_memory_id] {
-        if !routing_support_memory_is_valid(connection, memory_id, space)? {
-            return Err(Error::InvalidRequest {
-                message: format!(
-                    "routing relationship {} has invalid endpoint support memory {}",
-                    relationship.id, memory_id
-                ),
-            });
-        }
+        });
     }
 
     let (neighbor_entity_id, neighbor_entity_key, target_memory_id, direction) =
@@ -2969,14 +2924,14 @@ fn qualified_evidence_relationship(
             (
                 relationship.object_entity_id,
                 relationship.object_entity_key,
-                object_memory_id.to_string(),
+                evidence_memory_id.to_string(),
                 "forward".to_string(),
             )
         } else if relationship.object_entity_id == current_entity_id {
             (
                 relationship.subject_entity_id,
                 relationship.subject_entity_key,
-                subject_memory_id.to_string(),
+                evidence_memory_id.to_string(),
                 "reverse".to_string(),
             )
         } else {
@@ -3124,165 +3079,35 @@ fn evidence_route_is_better(
                                 < existing.route.relationship_ids)))))
 }
 
-fn evidence_candidates_for_source(
-    candidates: &EvidenceCandidateRoutes,
-    source: GraphSeedSource,
-    evidence_class: GraphEvidenceClass,
-    depth_two_only: bool,
-    entity_query_aligned_only: bool,
-    queries: &[String],
-) -> Vec<String> {
+fn evidence_candidate_order(candidates: &EvidenceCandidateRoutes) -> Vec<String> {
     let mut ranked: Vec<(&String, &EvidenceCandidateRoute)> = candidates
         .iter()
         .filter_map(|(memory_id, routes)| {
-            let mut best = None;
-            for route in routes.values().filter(|route| {
-                route.route.seed_source == source
-                    && route.route.evidence_class == evidence_class
-                    && (!depth_two_only || route.route.hop_depth == 2)
-                    && (!entity_query_aligned_only
-                        || source != GraphSeedSource::Entity
-                        || evidence_predicate_path_matches_queries(
-                            queries,
-                            &route.route.predicate_names,
-                        ))
-            }) {
-                if best.is_none_or(|existing| evidence_route_is_better(route, existing)) {
-                    best = Some(route);
-                }
-            }
-            best.map(|route| (memory_id, route))
+            routes
+                .values()
+                .reduce(|best, candidate| {
+                    if evidence_route_is_better(candidate, best) {
+                        candidate
+                    } else {
+                        best
+                    }
+                })
+                .map(|route| (memory_id, route))
         })
         .collect();
     ranked.sort_by(|left, right| {
         left.1
             .route
-            .hop_depth
-            .cmp(&right.1.route.hop_depth)
-            .then_with(|| {
-                right
-                    .1
-                    .activation
-                    .partial_cmp(&left.1.activation)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            })
+            .evidence_class
+            .cmp(&right.1.route.evidence_class)
+            .then_with(|| left.1.route.hop_depth.cmp(&right.1.route.hop_depth))
+            .then_with(|| right.1.activation.total_cmp(&left.1.activation))
             .then_with(|| left.0.cmp(right.0))
     });
     ranked
         .into_iter()
         .map(|(memory_id, _)| memory_id.clone())
         .collect()
-}
-
-fn evidence_candidate_order(
-    candidates: &EvidenceCandidateRoutes,
-    reservation_budget: usize,
-    queries: &[String],
-) -> Vec<String> {
-    let endpoint_memory = evidence_candidates_for_source(
-        candidates,
-        GraphSeedSource::Memory,
-        GraphEvidenceClass::EndpointSupport,
-        false,
-        false,
-        queries,
-    );
-    let endpoint_entity = evidence_candidates_for_source(
-        candidates,
-        GraphSeedSource::Entity,
-        GraphEvidenceClass::EndpointSupport,
-        false,
-        true,
-        queries,
-    );
-    let both_sources = !endpoint_memory.is_empty() && !endpoint_entity.is_empty();
-    let mut selected = Vec::new();
-    let mut selected_ids = BTreeSet::new();
-    if reservation_budget >= 2 && both_sources {
-        push_first_evidence_unique(&endpoint_memory, &mut selected, &mut selected_ids);
-        push_first_evidence_unique(&endpoint_entity, &mut selected, &mut selected_ids);
-    }
-    let depth_threshold = if both_sources { 3 } else { 2 };
-    if reservation_budget >= depth_threshold {
-        let depth_two_memory = evidence_candidates_for_source(
-            candidates,
-            GraphSeedSource::Memory,
-            GraphEvidenceClass::EndpointSupport,
-            true,
-            false,
-            queries,
-        );
-        let depth_two_entity = evidence_candidates_for_source(
-            candidates,
-            GraphSeedSource::Entity,
-            GraphEvidenceClass::EndpointSupport,
-            true,
-            true,
-            queries,
-        );
-        push_first_evidence_unique(
-            &depth_two_memory
-                .into_iter()
-                .chain(depth_two_entity)
-                .collect::<Vec<_>>(),
-            &mut selected,
-            &mut selected_ids,
-        );
-    }
-    for evidence_class in [
-        GraphEvidenceClass::EndpointSupport,
-        GraphEvidenceClass::EntityFallback,
-    ] {
-        let memory = evidence_candidates_for_source(
-            candidates,
-            GraphSeedSource::Memory,
-            evidence_class,
-            false,
-            false,
-            queries,
-        );
-        let entity = evidence_candidates_for_source(
-            candidates,
-            GraphSeedSource::Entity,
-            evidence_class,
-            false,
-            false,
-            queries,
-        );
-        let max_len = memory.len().max(entity.len());
-        for index in 0..max_len {
-            if let Some(memory_id) = memory.get(index) {
-                push_evidence_unique(memory_id, &mut selected, &mut selected_ids);
-            }
-            if let Some(memory_id) = entity.get(index) {
-                push_evidence_unique(memory_id, &mut selected, &mut selected_ids);
-            }
-        }
-    }
-    selected
-}
-
-fn push_first_evidence_unique(
-    candidates: &[String],
-    selected: &mut Vec<String>,
-    selected_ids: &mut BTreeSet<String>,
-) {
-    if let Some(memory_id) = candidates
-        .iter()
-        .find(|memory_id| !selected_ids.contains(memory_id.as_str()))
-    {
-        push_evidence_unique(memory_id, selected, selected_ids);
-    }
-}
-
-fn push_evidence_unique(
-    memory_id: &str,
-    selected: &mut Vec<String>,
-    selected_ids: &mut BTreeSet<String>,
-) {
-    if selected_ids.insert(memory_id.to_string()) {
-        selected.push(memory_id.to_string());
-    }
 }
 
 /// Active memory ids attached to `entity_key`, passing the normalized pack filters
@@ -3324,6 +3149,12 @@ pub struct RerankPoolCandidate {
     pub memory_id: String,
     /// Full active-version content.
     pub content: String,
+    /// Source observation time. This is rendered into the final pack but is
+    /// not supplied to the cross-encoder, so temporal context does not alter
+    /// candidate ranking.
+    pub observed_at: String,
+    /// True when both a direct route and graph route observed this memory.
+    pub consensus: bool,
     /// Graph-expansion activation when this candidate was pulled through a
     /// relationship hop (`None` for ordinary ANN/BM25 candidates). It only
     /// breaks exact cross-encoder score ties.
@@ -3499,25 +3330,32 @@ fn materialize_expanded_rerank_candidates(
         ..
     } = expanded;
     let mut statement = connection.prepare_cached(
-        "SELECT v.content FROM memories m \
+        "SELECT v.content, m.observed_at FROM memories m \
          JOIN memory_versions v ON v.id = m.active_version_id \
          WHERE m.id = ?1",
     )?;
     let mut candidates = Vec::with_capacity(pool.len());
     for item in pool {
-        let content: Option<String> = statement
-            .query_row([&item.memory_id], |row| row.get(0))
+        let materialized: Option<(String, String)> = statement
+            .query_row([&item.memory_id], |row| Ok((row.get(0)?, row.get(1)?)))
             .optional()?;
-        let Some(content) = content else {
+        let Some((content, observed_at)) = materialized else {
             continue;
         };
         if content.is_empty() {
             continue;
         }
         let activation = activations.get(&item.memory_id).copied();
+        let consensus = activation.is_some()
+            && item
+                .admissions
+                .iter()
+                .any(|admission| admission.source != AdmissionSource::Graph);
         candidates.push(RerankPoolCandidate {
             memory_id: item.memory_id,
             content,
+            observed_at,
+            consensus,
             activation,
             admissions: item.admissions,
         });
@@ -12225,7 +12063,8 @@ fn format_pack_markdown(
         };
         let marker = freshness_marker(&result.silo, result.metadata_json.as_deref(), last_synth);
         format!(
-            "- [{}:{}] {} (space={}, silo={}, scope={}, tags={}){}\n",
+            "- [Observed at: {}] [{}:{}] {} (space={}, silo={}, scope={}, tags={}){}\n",
+            result.observed_at,
             result.kind,
             result.memory_id,
             text,
@@ -12559,6 +12398,7 @@ fn validate_remember_request(request: &RememberRequest) -> Result<()> {
     validate_optional_metadata_value("kind", request.kind.as_deref())?;
     validate_optional_metadata_value("entity_key", request.entity_key.as_deref())?;
     validate_optional_metadata_value("claim_key", request.claim_key.as_deref())?;
+    validate_graph_capture(request.graph.as_ref())?;
     validate_optional_metadata_value("source_episode_id", request.source_episode_id.as_deref())?;
     validate_optional_timestamp("observed_at", request.observed_at.as_deref())?;
     validate_optional_timestamp("valid_from", request.valid_from.as_deref())?;
@@ -12617,6 +12457,94 @@ fn validate_remember_request(request: &RememberRequest) -> Result<()> {
         return Err(Error::InvalidRequest {
             message: format!("unsupported kind: {kind}"),
         });
+    }
+    Ok(())
+}
+
+const MAX_CAPTURE_ENTITIES: usize = 32;
+const MAX_CAPTURE_RELATIONSHIPS: usize = 64;
+
+fn validate_graph_capture(graph: Option<&GraphCapture>) -> Result<()> {
+    let Some(graph) = graph else {
+        return Ok(());
+    };
+    if graph.entities.is_empty() || graph.entities.len() > MAX_CAPTURE_ENTITIES {
+        return Err(Error::InvalidRequest {
+            message: format!("graph.entities must contain 1..={MAX_CAPTURE_ENTITIES} values"),
+        });
+    }
+    if graph.relationships.len() > MAX_CAPTURE_RELATIONSHIPS {
+        return Err(Error::InvalidRequest {
+            message: format!(
+                "graph.relationships must contain at most {MAX_CAPTURE_RELATIONSHIPS} values"
+            ),
+        });
+    }
+    validate_optional_metadata_value("graph.extractor", Some(&graph.extractor))?;
+    validate_optional_metadata_value(
+        "graph.extractor_version",
+        graph.extractor_version.as_deref(),
+    )?;
+    let mut keys = BTreeSet::new();
+    for entity in &graph.entities {
+        let request = EntityUpsertRequest {
+            space: None,
+            entity_key: entity.entity_key.clone(),
+            entity_type: Some(entity.entity_type.clone()),
+            canonical_name: entity.canonical_name.clone(),
+            aliases: entity.aliases.clone(),
+            status: Some(status::ACTIVE.to_string()),
+            confidence: 1.0,
+            source_episode_id: None,
+            metadata_json: None,
+            include_source: false,
+        };
+        let prepared = prepare_entity_upsert_request(&request)?;
+        if !keys.insert(prepared.entity_key) {
+            return Err(Error::InvalidRequest {
+                message: format!(
+                    "graph.entities contains duplicate entity_key: {}",
+                    entity.entity_key
+                ),
+            });
+        }
+    }
+    let mut triples = BTreeSet::new();
+    for relationship in &graph.relationships {
+        if relationship.relation_type == "related_to" {
+            return Err(Error::InvalidRequest {
+                message: "graph relationships must use a typed predicate, not related_to"
+                    .to_string(),
+            });
+        }
+        if relationship.subject_entity_key == relationship.object_entity_key {
+            return Err(Error::InvalidRequest {
+                message: "graph relationship endpoints must be different entities".to_string(),
+            });
+        }
+        if !keys.contains(relationship.subject_entity_key.trim())
+            || !keys.contains(relationship.object_entity_key.trim())
+        {
+            return Err(Error::InvalidRequest {
+                message: "graph relationship endpoints must be declared in graph.entities"
+                    .to_string(),
+            });
+        }
+        if !relationship.confidence.is_finite() || !(0.0..=1.0).contains(&relationship.confidence) {
+            return Err(Error::InvalidRequest {
+                message: "graph relationship confidence must be between 0.0 and 1.0".to_string(),
+            });
+        }
+        let triple = (
+            relationship.subject_entity_key.trim(),
+            relationship.relation_type.trim(),
+            relationship.object_entity_key.trim(),
+        );
+        if !triples.insert(triple) {
+            return Err(Error::InvalidRequest {
+                message: "graph.relationships contains a duplicate typed edge".to_string(),
+            });
+        }
     }
     Ok(())
 }
@@ -13115,6 +13043,11 @@ fn remember_memory_tx(
             &now,
         )?;
     }
+    let graph_capture = request
+        .graph
+        .as_ref()
+        .map(|graph| apply_graph_capture(transaction, space, &memory_id, request, graph))
+        .transpose()?;
 
     let mut memory = load_memory(
         transaction,
@@ -13133,6 +13066,7 @@ fn remember_memory_tx(
     Ok(RememberReport {
         memory,
         event_id,
+        graph_capture,
         processing_status: if request.dry_run {
             "dry_run"
         } else {
@@ -13161,6 +13095,192 @@ fn remember_memory_tx(
         supersede_suggestions,
         dry_run: request.dry_run,
     })
+}
+
+fn apply_graph_capture(
+    transaction: &Transaction<'_>,
+    space: &str,
+    memory_id: &str,
+    remember: &RememberRequest,
+    graph: &GraphCapture,
+) -> Result<GraphCaptureStatus> {
+    let entity_metadata = serde_json::json!({
+        "origin": "automatic_capture",
+        "extractor": graph.extractor,
+        "extractor_version": graph.extractor_version,
+    })
+    .to_string();
+    let resolved_keys = resolve_graph_capture_keys(transaction, space, graph)?;
+    upsert_graph_capture_entities(
+        transaction,
+        space,
+        remember,
+        graph,
+        &resolved_keys,
+        &entity_metadata,
+    )?;
+    upsert_graph_capture_relationships(
+        transaction,
+        space,
+        memory_id,
+        remember,
+        graph,
+        &resolved_keys,
+    )?;
+    Ok(GraphCaptureStatus {
+        routing_contract: "evidence_join_v2",
+        entities: graph.entities.len(),
+        relationships: graph.relationships.len(),
+    })
+}
+
+fn resolve_graph_capture_keys(
+    transaction: &Transaction<'_>,
+    space: &str,
+    graph: &GraphCapture,
+) -> Result<BTreeMap<String, String>> {
+    let mut resolved_keys = BTreeMap::new();
+    let mut seen_resolved = BTreeSet::new();
+    for entity in &graph.entities {
+        let mut matches = BTreeSet::new();
+        for surface in std::iter::once(entity.entity_key.as_str())
+            .chain(std::iter::once(entity.canonical_name.as_str()))
+            .chain(entity.aliases.iter().map(String::as_str))
+        {
+            for (_, entity_key, _) in exact_entities_for_span(
+                transaction,
+                &[space.to_string()],
+                &normalized_alias(surface),
+            )? {
+                matches.insert(entity_key);
+            }
+        }
+        if matches.len() > 1 {
+            return Err(Error::InvalidRequest {
+                message: format!(
+                    "graph entity {} matches multiple canonical entities",
+                    entity.entity_key
+                ),
+            });
+        }
+        let resolved_key = matches
+            .into_iter()
+            .next()
+            .unwrap_or_else(|| entity.entity_key.clone());
+        if !seen_resolved.insert(resolved_key.clone()) {
+            return Err(Error::InvalidRequest {
+                message: format!(
+                    "multiple graph entities resolve to canonical entity {resolved_key}"
+                ),
+            });
+        }
+        resolved_keys.insert(entity.entity_key.clone(), resolved_key);
+    }
+    Ok(resolved_keys)
+}
+
+fn upsert_graph_capture_entities(
+    transaction: &Transaction<'_>,
+    space: &str,
+    remember: &RememberRequest,
+    graph: &GraphCapture,
+    resolved_keys: &BTreeMap<String, String>,
+    entity_metadata: &str,
+) -> Result<()> {
+    for entity in &graph.entities {
+        let resolved_key = &resolved_keys[&entity.entity_key];
+        let existing: Option<(Option<String>, String)> = transaction
+            .query_row(
+                "SELECT entity_type, canonical_name
+                   FROM entities
+                  WHERE space_name = ?1 AND entity_key = ?2 AND status = 'active'",
+                params![space, resolved_key],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        let (entity_type, canonical_name, aliases) =
+            if let Some((existing_type, existing_name)) = existing {
+                let mut aliases = entity.aliases.clone();
+                aliases.push(entity.canonical_name.clone());
+                (
+                    existing_type.or_else(|| Some(entity.entity_type.clone())),
+                    existing_name,
+                    aliases,
+                )
+            } else {
+                (
+                    Some(entity.entity_type.clone()),
+                    entity.canonical_name.clone(),
+                    entity.aliases.clone(),
+                )
+            };
+        let prepared = prepare_entity_upsert_request(&EntityUpsertRequest {
+            space: Some(space.to_string()),
+            entity_key: resolved_key.clone(),
+            entity_type,
+            canonical_name,
+            aliases,
+            status: Some(status::ACTIVE.to_string()),
+            confidence: remember.confidence,
+            source_episode_id: remember.source_episode_id.clone(),
+            metadata_json: Some(entity_metadata.to_string()),
+            include_source: false,
+        })?;
+        upsert_entity_tx(transaction, &prepared)?;
+    }
+    Ok(())
+}
+
+fn upsert_graph_capture_relationships(
+    transaction: &Transaction<'_>,
+    space: &str,
+    memory_id: &str,
+    remember: &RememberRequest,
+    graph: &GraphCapture,
+    resolved_keys: &BTreeMap<String, String>,
+) -> Result<()> {
+    for relationship in &graph.relationships {
+        let subject_entity_key = resolved_keys
+            .get(&relationship.subject_entity_key)
+            .expect("validated graph subject");
+        let object_entity_key = resolved_keys
+            .get(&relationship.object_entity_key)
+            .expect("validated graph object");
+        if subject_entity_key == object_entity_key {
+            return Err(Error::InvalidRequest {
+                message: "graph relationship endpoints resolve to the same canonical entity"
+                    .to_string(),
+            });
+        }
+        let metadata_json = serde_json::json!({
+            "routing": true,
+            "origin": "automatic_capture",
+            "routing_contract": "evidence_join_v2",
+            "routing_contract_version": 2,
+            "extractor": graph.extractor,
+            "extractor_version": graph.extractor_version,
+        })
+        .to_string();
+        let prepared = prepare_relationship_upsert_request(&RelationshipUpsertRequest {
+            space: Some(space.to_string()),
+            subject_entity_id: None,
+            subject_entity_key: Some(subject_entity_key.clone()),
+            relation_type: relationship.relation_type.clone(),
+            object_entity_id: None,
+            object_entity_key: Some(object_entity_key.clone()),
+            memory_id: Some(memory_id.to_string()),
+            source_episode_id: remember.source_episode_id.clone(),
+            status: Some(status::ACTIVE.to_string()),
+            confidence: relationship.confidence,
+            observed_at: remember.observed_at.clone(),
+            valid_from: remember.valid_from.clone(),
+            valid_to: remember.valid_to.clone(),
+            metadata_json: Some(metadata_json),
+            include_source: false,
+        })?;
+        upsert_relationship_tx(transaction, &prepared)?;
+    }
+    Ok(())
 }
 
 /// Pack per-token vectors into one little-endian f32 blob, `[n_tokens * dims]`.
