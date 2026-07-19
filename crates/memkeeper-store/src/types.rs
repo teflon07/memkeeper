@@ -175,6 +175,56 @@ pub struct RepresentationWriteStatus {
     pub status: String,
 }
 
+/// One canonical entity extracted from the memory being written.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CapturedEntity {
+    /// Space-local stable entity key.
+    pub entity_key: String,
+    /// Entity type label.
+    pub entity_type: String,
+    /// Human-readable canonical name.
+    pub canonical_name: String,
+    /// Alternate exact-match names for the same entity.
+    pub aliases: Vec<String>,
+}
+
+/// One typed relationship extracted from the memory being written.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CapturedRelationship {
+    /// Subject entity key from [`GraphCapture::entities`].
+    pub subject_entity_key: String,
+    /// Typed predicate. Generic `related_to` is not routable.
+    pub relation_type: String,
+    /// Object entity key from [`GraphCapture::entities`].
+    pub object_entity_key: String,
+    /// Extraction confidence from 0.0 to 1.0.
+    pub confidence: f64,
+}
+
+/// Optional structured graph projection written atomically with one memory.
+#[derive(Debug, Clone, PartialEq)]
+pub struct GraphCapture {
+    /// Extractor identity for provenance, such as `mcp-agent`.
+    pub extractor: String,
+    /// Optional extractor/model version.
+    pub extractor_version: Option<String>,
+    /// Canonical entities observed in the memory.
+    pub entities: Vec<CapturedEntity>,
+    /// Typed relationships supported by the same memory.
+    pub relationships: Vec<CapturedRelationship>,
+}
+
+/// Bounded graph-write status for a structured remember call.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GraphCaptureStatus {
+    /// Routing contract written by this capture.
+    pub routing_contract: &'static str,
+    /// Entities created or updated.
+    pub entities: usize,
+    /// Relationships created or updated.
+    pub relationships: usize,
+}
+
 /// Request to store one explicit memory.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RememberRequest {
@@ -200,6 +250,8 @@ pub struct RememberRequest {
     pub entity_key: Option<String>,
     /// Optional stable claim key.
     pub claim_key: Option<String>,
+    /// Optional machine-extracted graph projection committed with this memory.
+    pub graph: Option<GraphCapture>,
     /// Confidence score from 0.0 to 1.0.
     pub confidence: f64,
     /// Optional observation timestamp; defaults to storage time.
@@ -244,6 +296,8 @@ pub struct RememberReport {
     pub memory: MemoryRecord,
     /// Remember event id.
     pub event_id: String,
+    /// Present only when structured graph capture was requested.
+    pub graph_capture: Option<GraphCaptureStatus>,
     /// Processing status for this deterministic MVP path.
     pub processing_status: String,
     /// Bounded representation projection status when one was supplied.

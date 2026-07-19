@@ -18,18 +18,19 @@ use super::{
     source_tier_score, store_stats, store_stats_with_health, submit_candidate, upsert_entity,
     upsert_memory_token_embedding, upsert_relationship, validate_retrieval_representation,
     verify_memory, BackupRequest, BatchSearchQuery, BatchSearchRequest, CandidateApproveRequest,
-    CandidateListRequest, CandidateRejectRequest, CandidateSubmitRequest,
-    DocumentDuplicatesRequest, DocumentGetRequest, DocumentPruneRequest, DocumentSearchRequest,
-    DreamRequest, EntityMergeRequest, EntitySearchRequest, EntityUpsertRequest, Error,
-    EvidenceJoinOptions, ExportRequest, ForgetRequest, GetOptions, GraphContextRequest,
-    GraphNeighborsRequest, HistoryOptions, ImportRequest, IngestRequest, MarkExtractedRequest,
-    MemoryListRequest, PackRequest, PromotionCandidatesRequest, RecallEvent, RecallLogRequest,
-    RelationshipUpsertRequest, RememberRequest, RerankCandidate, RetrievalRepresentationInput,
-    SearchFilters, SearchRequest, SearchResult, SiloListRequest, SpaceCreateRequest, VerifyRequest,
-    DEFAULT_PROMOTE_RANK_CAP, DEFAULT_PROMOTE_SCORE_FLOOR, DEFAULT_PROMOTE_THRESHOLD,
-    DOCUMENTS_SPACE, MAX_CONTENT_CHARS, MAX_HISTORY_LIMIT, MAX_MEMORY_LINKS,
-    MAX_METADATA_VALUE_CHARS, MAX_SEARCH_LIMIT, MAX_TIMESTAMP_CHARS, PROJECT_STORE_RELATIVE_PATH,
-    SCHEMA_SQL, SCHEMA_VERSION, USER_STORE_PATH_HINT, VOLATILE_MAX_RECENCY_SCORE,
+    CandidateListRequest, CandidateRejectRequest, CandidateSubmitRequest, CapturedEntity,
+    CapturedRelationship, DocumentDuplicatesRequest, DocumentGetRequest, DocumentPruneRequest,
+    DocumentSearchRequest, DreamRequest, EntityMergeRequest, EntitySearchRequest,
+    EntityUpsertRequest, Error, EvidenceJoinOptions, ExportRequest, ForgetRequest, GetOptions,
+    GraphCapture, GraphContextRequest, GraphNeighborsRequest, HistoryOptions, ImportRequest,
+    IngestRequest, MarkExtractedRequest, MemoryListRequest, PackRequest,
+    PromotionCandidatesRequest, RecallEvent, RecallLogRequest, RelationshipUpsertRequest,
+    RememberRequest, RerankCandidate, RetrievalRepresentationInput, SearchFilters, SearchRequest,
+    SearchResult, SiloListRequest, SpaceCreateRequest, VerifyRequest, DEFAULT_PROMOTE_RANK_CAP,
+    DEFAULT_PROMOTE_SCORE_FLOOR, DEFAULT_PROMOTE_THRESHOLD, DOCUMENTS_SPACE, MAX_CONTENT_CHARS,
+    MAX_HISTORY_LIMIT, MAX_MEMORY_LINKS, MAX_METADATA_VALUE_CHARS, MAX_SEARCH_LIMIT,
+    MAX_TIMESTAMP_CHARS, PROJECT_STORE_RELATIVE_PATH, SCHEMA_SQL, SCHEMA_VERSION,
+    USER_STORE_PATH_HINT, VOLATILE_MAX_RECENCY_SCORE,
 };
 use memkeeper_core::DEFAULT_SPACE;
 use rusqlite::{params, Connection};
@@ -551,6 +552,7 @@ fn store_stats_health_rollup_reports_governance_signals() {
         tags: Vec::new(),
         entity_key: keys.map(|(entity, _)| entity.to_string()),
         claim_key: keys.map(|(_, claim)| claim.to_string()),
+        graph: None,
         confidence: 1.0,
         observed_at: Some("2026-05-25T21:00:00.000Z".to_string()),
         valid_from: None,
@@ -1166,6 +1168,7 @@ fn remember_and_get_write_atomic_memory_records() {
             tags: vec!["memory".to_string(), "sqlite".to_string()],
             entity_key: Some("project:memkeeper".to_string()),
             claim_key: Some("mvp.boundary".to_string()),
+            graph: None,
             confidence: 1.0,
             observed_at: Some("2026-05-25T21:00:00.000Z".to_string()),
             valid_from: None,
@@ -4618,13 +4621,12 @@ fn dream_link_discriminative_tag_frequency_is_space_local() {
     cleanup_store(&path);
 }
 
-fn routing_metadata(object_memory_id: &str) -> String {
+fn routing_metadata() -> String {
     serde_json::json!({
         "routing": true,
-        "origin": "adjudicated_capture",
-        "routing_contract": "evidence_join_v1",
-        "routing_contract_version": 1,
-        "object_memory_id": object_memory_id,
+        "origin": "automatic_capture",
+        "routing_contract": "evidence_join_v2",
+        "routing_contract_version": 2,
     })
     .to_string()
 }
@@ -4696,12 +4698,12 @@ fn evidence_graph_join_entity_span_and_seed_bounds_are_deterministic() {
     let connection = Connection::open(&path).expect("open store");
     let entity_seeds =
         super::evidence_entity_seeds(&connection, &request, &filters).expect("entity seeds");
-    assert_eq!(entity_seeds.len(), super::MAX_EVIDENCE_ENTITY_SEEDS);
+    assert_eq!(entity_seeds.len(), 3);
     cleanup_store(&path);
 }
 
 #[test]
-fn evidence_graph_join_candidate_allocation_prevents_source_and_depth_starvation() {
+fn evidence_graph_join_candidate_allocation_uses_evidence_strength() {
     let route = |source, depth, relationship: &str| super::GraphRouteObservation {
         seed_source: source,
         seed_memory_id: (source == super::GraphSeedSource::Memory)
@@ -4729,8 +4731,8 @@ fn evidence_graph_join_candidate_allocation_prevents_source_and_depth_starvation
             route(source, 1, memory_id),
         );
     }
-    let selected = super::evidence_candidate_order(&both_sources, 2, &["routes".to_string()]);
-    assert_eq!(&selected[..2], ["memory-best", "entity-best"]);
+    let selected = super::evidence_candidate_order(&both_sources);
+    assert_eq!(&selected[..2], ["memory-best", "memory-next"]);
 
     let mut depth_pressure = super::EvidenceCandidateRoutes::new();
     for index in 0..8 {
@@ -4748,8 +4750,8 @@ fn evidence_graph_join_candidate_allocation_prevents_source_and_depth_starvation
         0.1,
         route(super::GraphSeedSource::Memory, 2, "depth-two"),
     );
-    let selected = super::evidence_candidate_order(&depth_pressure, 2, &["routes".to_string()]);
-    assert_eq!(selected[0], "depth-two");
+    let selected = super::evidence_candidate_order(&depth_pressure);
+    assert_eq!(selected[0], "depth-one-0");
     assert!(selected.iter().any(|memory_id| memory_id == "depth-two"));
 
     super::record_evidence_candidate(
@@ -4817,31 +4819,11 @@ fn evidence_graph_join_preserves_distinct_memory_seed_routes_for_depth_allocatio
         2,
         "routes from distinct semantic seeds must remain independently visible"
     );
-    let selected = super::evidence_candidate_order(&candidates, 2, &["orchard".to_string()]);
+    let selected = super::evidence_candidate_order(&candidates);
     assert_eq!(
         selected[0], "gold",
-        "the strongest seed's two-hop route must retain depth-reservation priority"
+        "the candidate's best one-hop route must determine its priority"
     );
-}
-
-#[test]
-fn evidence_graph_join_entity_routes_use_predicate_query_alignment_for_allocation() {
-    assert!(super::evidence_predicate_path_matches_queries(
-        &["Where does Steve work?".to_string()],
-        &["works_at".to_string()],
-    ));
-    assert!(super::evidence_predicate_path_matches_queries(
-        &["Where is Elena's association based?".to_string()],
-        &["member_of".to_string(), "based_in".to_string()],
-    ));
-    assert!(!super::evidence_predicate_path_matches_queries(
-        &["Where does Steve work?".to_string()],
-        &["lives_in".to_string()],
-    ));
-    assert!(!super::evidence_predicate_path_matches_queries(
-        &["Steve profile".to_string()],
-        &["works_at".to_string()],
-    ));
 }
 
 #[test]
@@ -4876,7 +4858,7 @@ fn evidence_graph_join_exact_entity_seed_recovers_endpoint_support() {
             relation_type: "works_at".to_string(),
             object_entity_key: Some("org:acme".to_string()),
             memory_id: Some(subject_id),
-            metadata_json: Some(routing_metadata(&object_id)),
+            metadata_json: Some(routing_metadata()),
             confidence: 1.0,
             ..relationship_upsert_request_defaults()
         },
@@ -5050,9 +5032,9 @@ fn evidence_graph_join_semantic_seed_recovers_two_hop_endpoint_support() {
         .memory
         .id;
 
-    for (subject, relation, object, memory_id, object_memory_id) in [
-        ("node:alpha", "routes_to", "node:beta", &alpha_id, &beta_id),
-        ("node:beta", "supports", "node:gamma", &beta_id, &gamma_id),
+    for (subject, relation, object, memory_id) in [
+        ("node:alpha", "routes_to", "node:beta", &alpha_id),
+        ("node:beta", "supports", "node:gamma", &beta_id),
     ] {
         upsert_relationship(
             &path,
@@ -5061,7 +5043,7 @@ fn evidence_graph_join_semantic_seed_recovers_two_hop_endpoint_support() {
                 relation_type: relation.to_string(),
                 object_entity_key: Some(object.to_string()),
                 memory_id: Some(memory_id.clone()),
-                metadata_json: Some(routing_metadata(object_memory_id)),
+                metadata_json: Some(routing_metadata()),
                 confidence: 1.0,
                 ..relationship_upsert_request_defaults()
             },
@@ -5164,7 +5146,7 @@ fn evidence_graph_join_ambiguous_entity_span_abstains() {
             relation_type: "works_at".to_string(),
             object_entity_key: Some("org:target".to_string()),
             memory_id: Some(subject_id),
-            metadata_json: Some(routing_metadata(&object_id)),
+            metadata_json: Some(routing_metadata()),
             confidence: 1.0,
             ..relationship_upsert_request_defaults()
         },
@@ -5255,7 +5237,7 @@ fn evidence_graph_join_entity_seed_traverses_reverse_and_ignores_unmarked_routes
             relation_type: "works_at".to_string(),
             object_entity_key: Some("org:acme".to_string()),
             memory_id: Some(subject_id.clone()),
-            metadata_json: Some(routing_metadata(&object_id)),
+            metadata_json: Some(routing_metadata()),
             confidence: 1.0,
             ..relationship_upsert_request_defaults()
         },
@@ -5337,41 +5319,24 @@ fn evidence_graph_join_routing_relationship_lifecycle_is_evidence_specific() {
     let subject_one = remember_for("Steve profile one", "person:steve");
     let subject_two = remember_for("Steve profile two", "person:steve");
     let subject_three = remember_for("Steve profile three", "person:steve");
-    let object_one = remember_for("Acme profile one", "org:acme");
-    let object_two = remember_for("Acme profile two", "org:acme");
+    let relationship_request = |relation: &str, evidence_memory: &str| RelationshipUpsertRequest {
+        subject_entity_key: Some("person:steve".to_string()),
+        relation_type: relation.to_string(),
+        object_entity_key: Some("org:acme".to_string()),
+        memory_id: Some(evidence_memory.to_string()),
+        metadata_json: Some(routing_metadata()),
+        confidence: 1.0,
+        ..relationship_upsert_request_defaults()
+    };
 
-    let relationship_request =
-        |relation: &str, subject_memory: &str, object_memory: &str| RelationshipUpsertRequest {
-            subject_entity_key: Some("person:steve".to_string()),
-            relation_type: relation.to_string(),
-            object_entity_key: Some("org:acme".to_string()),
-            memory_id: Some(subject_memory.to_string()),
-            metadata_json: Some(routing_metadata(object_memory)),
-            confidence: 1.0,
-            ..relationship_upsert_request_defaults()
-        };
-
-    let first = upsert_relationship(
-        &path,
-        &relationship_request("works_at", &subject_one, &object_one),
-    )
-    .expect("first routing relationship");
+    let first = upsert_relationship(&path, &relationship_request("works_at", &subject_one))
+        .expect("first routing relationship");
     assert!(first.created);
-    let replay = upsert_relationship(
-        &path,
-        &relationship_request("works_at", &subject_one, &object_one),
-    )
-    .expect("exact replay");
+    let replay = upsert_relationship(&path, &relationship_request("works_at", &subject_one))
+        .expect("exact replay");
     assert!(!replay.created);
     assert_eq!(replay.relationship.id, first.relationship.id);
 
-    let object_update = upsert_relationship(
-        &path,
-        &relationship_request("works_at", &subject_one, &object_two),
-    )
-    .expect("object support update");
-    assert!(!object_update.created);
-    assert_eq!(object_update.relationship.id, first.relationship.id);
     let connection = Connection::open(&path).expect("open store");
     let metadata: String = connection
         .query_row(
@@ -5380,19 +5345,14 @@ fn evidence_graph_join_routing_relationship_lifecycle_is_evidence_specific() {
             |row| row.get(0),
         )
         .expect("routing metadata");
-    assert_eq!(
-        serde_json::from_str::<serde_json::Value>(&metadata).expect("metadata json")
-            ["object_memory_id"],
-        object_two
-    );
+    let metadata = serde_json::from_str::<serde_json::Value>(&metadata).expect("metadata json");
+    assert_eq!(metadata["routing_contract"], "evidence_join_v2");
+    assert!(metadata.get("object_memory_id").is_none());
 
-    let new_subject = upsert_relationship(
-        &path,
-        &relationship_request("works_at", &subject_two, &object_two),
-    )
-    .expect("new subject support");
-    assert!(new_subject.created);
-    assert_ne!(new_subject.relationship.id, first.relationship.id);
+    let new_evidence = upsert_relationship(&path, &relationship_request("works_at", &subject_two))
+        .expect("new evidence support");
+    assert!(new_evidence.created);
+    assert_ne!(new_evidence.relationship.id, first.relationship.id);
 
     let unmarked = upsert_relationship(
         &path,
@@ -5406,11 +5366,8 @@ fn evidence_graph_join_routing_relationship_lifecycle_is_evidence_specific() {
         },
     )
     .expect("unmarked relationship");
-    let upgraded = upsert_relationship(
-        &path,
-        &relationship_request("advises", &subject_three, &object_two),
-    )
-    .expect("same-identity routing upgrade");
+    let upgraded = upsert_relationship(&path, &relationship_request("advises", &subject_three))
+        .expect("same-identity routing upgrade");
     assert!(!upgraded.created);
     assert_eq!(upgraded.relationship.id, unmarked.relationship.id);
 
@@ -5441,7 +5398,6 @@ fn evidence_graph_join_rejects_structural_inactive_expired_and_filtered_routes()
             .memory
             .id
     };
-    let subject = remember_for("Steve routing anchor", "person:steve", "eligible");
     let target_specs = [
         ("org:generic", "generic endpoint", "eligible"),
         ("org:inactive", "inactive endpoint", "eligible"),
@@ -5469,10 +5425,10 @@ fn evidence_graph_join_rejects_structural_inactive_expired_and_filtered_routes()
                 subject_entity_key: Some("person:steve".to_string()),
                 relation_type: relation_type.to_string(),
                 object_entity_key: Some((*entity).to_string()),
-                memory_id: Some(subject.clone()),
+                memory_id: Some(target.clone()),
                 status,
                 valid_to,
-                metadata_json: Some(routing_metadata(target)),
+                metadata_json: Some(routing_metadata()),
                 confidence: 1.0,
                 ..relationship_upsert_request_defaults()
             },
@@ -5568,10 +5524,7 @@ fn evidence_graph_join_invalid_routing_record_fails_visibly() {
         },
     )
     .expect_err("invalid routing record must not silently degrade");
-    assert!(
-        error.to_string().contains("missing object_memory_id"),
-        "{error}"
-    );
+    assert!(error.to_string().contains("evidence_join_v2"), "{error}");
     cleanup_store(&path);
 }
 
@@ -5597,6 +5550,7 @@ fn rc(id: &str, content: &str, score: f32) -> RerankCandidate {
         content: content.to_string(),
         rerank_score: score,
         activation: None,
+        consensus: false,
     }
 }
 
@@ -5606,6 +5560,7 @@ fn rc_reachable(id: &str, content: &str, score: f32, activation: f64) -> RerankC
         content: content.to_string(),
         rerank_score: score,
         activation: Some(activation),
+        consensus: false,
     }
 }
 
@@ -5668,6 +5623,22 @@ fn assemble_reranked_pack_uses_activation_only_for_exact_rerank_ties() {
 }
 
 #[test]
+fn assemble_reranked_pack_gives_bounded_priority_to_graph_semantic_consensus() {
+    let request = rerank_pack_request(2, 10_000, 0.0);
+    let mut agreed = rc_reachable("agreed", "both routes agree", 0.50, 0.40);
+    agreed.consensus = true;
+    let candidates = vec![rc("direct", "direct only", 0.51), agreed];
+
+    let report = assemble_reranked_pack(&request, &candidates);
+    assert_eq!(report.memory_ids, vec!["agreed", "direct"]);
+    assert_eq!(
+        report.scores,
+        vec![f64::from(0.50_f32), f64::from(0.51_f32)],
+        "reported scores remain raw reranker output"
+    );
+}
+
+#[test]
 fn assemble_reranked_pack_top_score_gate_blocks_off_topic() {
     let request = rerank_pack_request(5, 10_000, 0.2);
     let candidates = vec![rc("a", "x", 0.05), rc("b", "y", 0.10)];
@@ -5722,18 +5693,21 @@ fn assemble_reranked_pack_sets_top_score_to_max_rerank() {
             content: "alpha".into(),
             rerank_score: 0.20,
             activation: None,
+            consensus: false,
         },
         RerankCandidate {
             memory_id: "b".into(),
             content: "beta".into(),
             rerank_score: 0.70,
             activation: None,
+            consensus: false,
         },
         RerankCandidate {
             memory_id: "c".into(),
             content: "gamma".into(),
             rerank_score: 0.40,
             activation: None,
+            consensus: false,
         },
     ];
     let report = assemble_reranked_pack(&request, &candidates);
@@ -8224,6 +8198,7 @@ fn remember_dry_run_rolls_back() {
         observed_at: None,
         valid_from: None,
         valid_to: None,
+        graph: None,
         expires_at: None,
         source_ref_json: None,
         metadata_json: None,
@@ -8253,6 +8228,197 @@ fn remember_dry_run_rolls_back() {
     .expect_err("dry run should not persist");
     assert!(matches!(error, Error::NotFound { .. }));
     assert_eq!(store_stats(&path, true).expect("stats").memory_count, 0);
+
+    cleanup_store(&path);
+}
+
+fn employment_graph(
+    person_key: &str,
+    person_name: &str,
+    person_aliases: &[&str],
+    organization_key: &str,
+    extractor_version: &str,
+) -> GraphCapture {
+    GraphCapture {
+        extractor: "test-extractor".to_string(),
+        extractor_version: Some(extractor_version.to_string()),
+        entities: vec![
+            CapturedEntity {
+                entity_key: person_key.to_string(),
+                entity_type: "person".to_string(),
+                canonical_name: person_name.to_string(),
+                aliases: person_aliases
+                    .iter()
+                    .map(|alias| (*alias).to_string())
+                    .collect(),
+            },
+            CapturedEntity {
+                entity_key: organization_key.to_string(),
+                entity_type: "organization".to_string(),
+                canonical_name: "Memkeeper".to_string(),
+                aliases: Vec::new(),
+            },
+        ],
+        relationships: vec![CapturedRelationship {
+            subject_entity_key: person_key.to_string(),
+            relation_type: "works_at".to_string(),
+            object_entity_key: organization_key.to_string(),
+            confidence: 0.98,
+        }],
+    }
+}
+
+#[test]
+fn remember_graph_capture_uses_one_memory_as_atomic_routing_evidence() {
+    let path = temp_store_path("remember_graph_capture");
+    cleanup_store(&path);
+    init_store(&path).expect("init succeeds");
+
+    let graph = employment_graph(
+        "person:steve",
+        "Steve",
+        &["Stephen", "I"],
+        "org:memkeeper",
+        "1",
+    );
+    let mut request = basic_request("Steve works at Memkeeper.");
+    request.graph = Some(graph.clone());
+
+    let report = remember_memory(&path, &request).expect("graph capture succeeds");
+    assert_eq!(
+        report.graph_capture.as_ref().map(|status| (
+            status.routing_contract,
+            status.entities,
+            status.relationships
+        )),
+        Some(("evidence_join_v2", 2, 1))
+    );
+
+    let stephen = search_entities(
+        &path,
+        &EntitySearchRequest {
+            query: Some("Stephen".to_string()),
+            ..entity_search_defaults()
+        },
+    )
+    .expect("alias search succeeds");
+    assert_eq!(stephen.results.len(), 1);
+    assert_eq!(stephen.results[0].entity.entity_key, "person:steve");
+
+    let connection = Connection::open(&path).expect("open store");
+    let (memory_id, metadata_json): (String, String) = connection
+        .query_row(
+            "SELECT memory_id, metadata_json FROM relationships",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("relationship evidence");
+    assert_eq!(memory_id, report.memory.id);
+    let metadata: serde_json::Value =
+        serde_json::from_str(&metadata_json).expect("valid relationship metadata");
+    assert_eq!(metadata["routing_contract"], "evidence_join_v2");
+    assert_eq!(metadata["routing_contract_version"], 2);
+    assert!(metadata.get("object_memory_id").is_none());
+    drop(connection);
+
+    let pool = build_hybrid_rerank_pool_with_evidence_options(
+        &path,
+        &PackRequest {
+            title: "alias route".to_string(),
+            queries: vec!["Where is Stephen employed?".to_string()],
+            filters: SearchFilters::default(),
+            max_memories: 5,
+            max_chars: 4_000,
+            format: "markdown".to_string(),
+            min_score: 0.0,
+            rerank_candidates: 0,
+            query_embeddings: None,
+            query_token_embeddings: None,
+            token_model_id: None,
+        },
+        5,
+        EvidenceJoinOptions::default(),
+    )
+    .expect("alias-seeded evidence join");
+    let candidate = pool
+        .candidates
+        .iter()
+        .find(|candidate| candidate.memory_id == report.memory.id)
+        .expect("single evidence memory recovered");
+    assert!(candidate.admissions.iter().any(|admission| {
+        admission
+            .graph_route
+            .as_ref()
+            .is_some_and(|route| route.matched_query_span.as_deref() == Some("stephen"))
+    }));
+
+    let mut dry_run = basic_request("Steve founded Memkeeper.");
+    dry_run.dry_run = true;
+    dry_run.graph = Some(GraphCapture {
+        relationships: vec![CapturedRelationship {
+            relation_type: "founded".to_string(),
+            ..graph.relationships[0].clone()
+        }],
+        ..graph
+    });
+    let dry_report = remember_memory(&path, &dry_run).expect("dry-run graph validates");
+    assert!(dry_report.dry_run);
+    let connection = Connection::open(&path).expect("open store");
+    let memory_count: i64 = connection
+        .query_row("SELECT COUNT(*) FROM memories", [], |row| row.get(0))
+        .expect("memory count");
+    let relationship_count: i64 = connection
+        .query_row("SELECT COUNT(*) FROM relationships", [], |row| row.get(0))
+        .expect("relationship count");
+    assert_eq!(memory_count, 1);
+    assert_eq!(relationship_count, 1);
+    drop(connection);
+
+    cleanup_store(&path);
+}
+
+#[test]
+fn remember_graph_capture_reuses_entities_found_by_exact_alias() {
+    let path = temp_store_path("remember_graph_alias_reuse");
+    cleanup_store(&path);
+    init_store(&path).expect("init succeeds");
+
+    let mut initial = basic_request("Steve works at Memkeeper.");
+    initial.graph = Some(employment_graph(
+        "person:steve",
+        "Steve",
+        &["Stephen", "I"],
+        "org:memkeeper",
+        "1",
+    ));
+    remember_memory(&path, &initial).expect("initial graph capture succeeds");
+
+    let mut alias_reuse = basic_request("Stephen remains employed by Memkeeper.");
+    alias_reuse.graph = Some(employment_graph(
+        "person:stephen",
+        "Stephen",
+        &["Steve"],
+        "org:memkeeper-proposed",
+        "2",
+    ));
+    remember_memory(&path, &alias_reuse).expect("exact aliases reuse canonical entities");
+    let connection = Connection::open(&path).expect("open store");
+    let entity_count: i64 = connection
+        .query_row("SELECT COUNT(*) FROM entities", [], |row| row.get(0))
+        .expect("entity count");
+    let distinct_subjects: i64 = connection
+        .query_row(
+            "SELECT COUNT(DISTINCT subject_entity_id) FROM relationships",
+            [],
+            |row| row.get(0),
+        )
+        .expect("subject count");
+    assert_eq!(
+        entity_count, 2,
+        "alias reuse must not create parallel nodes"
+    );
+    assert_eq!(distinct_subjects, 1);
+    drop(connection);
 
     cleanup_store(&path);
 }
@@ -9346,6 +9512,7 @@ fn remember_request(content: &str) -> RememberRequest {
         observed_at: None,
         valid_from: None,
         valid_to: None,
+        graph: None,
         expires_at: None,
         source_ref_json: None,
         metadata_json: None,
@@ -9460,6 +9627,7 @@ fn basic_request(content: &str) -> RememberRequest {
         observed_at: None,
         valid_from: None,
         valid_to: None,
+        graph: None,
         expires_at: None,
         source_ref_json: None,
         metadata_json: None,

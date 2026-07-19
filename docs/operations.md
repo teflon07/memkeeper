@@ -63,6 +63,11 @@ proposals), and `graph` (reconcile projection drift **and** materialize
 link-derived relationship edges into the entity graph). It is **dry-run by
 default**; pass `--apply` (or `--commit`) to write.
 
+The link-derived `related_to` rows support dashboard visualization and generic
+graph browsing only. They are not routing evidence and never participate in
+`evidence_join_v2`. Typed routing edges are written atomically by `remember`
+with one supporting memory ID.
+
 Preview, then apply:
 
 ```

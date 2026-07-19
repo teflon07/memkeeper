@@ -553,8 +553,7 @@ def capture_routing_relationship_payload(
     subject_key: str,
     relation: str,
     object_key: str,
-    subject_memory_id: str,
-    object_memory_id: str,
+    evidence_memory_id: str,
 ) -> dict[str, Any]:
     """Build the evidence-backed relationship written by full capture seeding."""
     return {
@@ -562,13 +561,12 @@ def capture_routing_relationship_payload(
         "relation_type": relation,
         "object_entity_key": object_key,
         "space": "workspace-memory",
-        "memory_id": subject_memory_id,
+        "memory_id": evidence_memory_id,
         "metadata": {
             "routing": True,
-            "origin": "adjudicated_capture",
-            "routing_contract": "evidence_join_v1",
-            "routing_contract_version": 1,
-            "object_memory_id": object_memory_id,
+            "origin": "benchmark_capture",
+            "routing_contract": "evidence_join_v2",
+            "routing_contract_version": 2,
         },
     }
 
@@ -693,8 +691,7 @@ def seed_capture_full_store(
                         )
                         continue
                     subject_memory_id = promoted_memory_id.get(subj)
-                    object_memory_id = promoted_memory_id.get(obj)
-                    if not subject_memory_id or not object_memory_id:
+                    if not subject_memory_id:
                         continue
                     run_memkeeper(
                         binary,
@@ -704,8 +701,7 @@ def seed_capture_full_store(
                             subject_key=sk,
                             relation=rel,
                             object_key=ok,
-                            subject_memory_id=subject_memory_id,
-                            object_memory_id=object_memory_id,
+                            evidence_memory_id=subject_memory_id,
                         ),
                     )
     if canonical_sidecars:
@@ -768,8 +764,7 @@ def seed_capture_full_store(
                         subject_key=sk,
                         relation=rel,
                         object_key=ok,
-                        subject_memory_id=dia_to_memory[subject_turn_key],
-                        object_memory_id=dia_to_memory[object_turn_key],
+                        evidence_memory_id=dia_to_memory[subject_turn_key],
                     ),
                 )
     if unmapped:

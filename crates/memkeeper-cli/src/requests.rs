@@ -239,6 +239,86 @@ fn optional_retrieval_representation(
     }))
 }
 
+fn graph_capture_from_json(object: &JsonObject) -> Result<Option<GraphCapture>, CliError> {
+    let Some(value) = object.get("graph") else {
+        return Ok(None);
+    };
+    if matches!(value, JsonValue::Null) {
+        return Ok(None);
+    }
+    let JsonValue::Object(fields) = value else {
+        return Err(CliError::InvalidRequest(
+            "field graph must be an object".to_string(),
+        ));
+    };
+    reject_unknown_fields(
+        fields,
+        &[
+            "extractor",
+            "extractor_version",
+            "entities",
+            "relationships",
+        ],
+    )?;
+    let Some(JsonValue::Array(entity_values)) = fields.get("entities") else {
+        return Err(CliError::InvalidRequest(
+            "graph.entities must be an array".to_string(),
+        ));
+    };
+    let mut entities = Vec::with_capacity(entity_values.len());
+    for value in entity_values {
+        let JsonValue::Object(entity) = value else {
+            return Err(CliError::InvalidRequest(
+                "graph.entities entries must be objects".to_string(),
+            ));
+        };
+        reject_unknown_fields(
+            entity,
+            &["entity_key", "entity_type", "canonical_name", "aliases"],
+        )?;
+        entities.push(CapturedEntity {
+            entity_key: required_string_field(entity, "entity_key")?,
+            entity_type: required_string_field(entity, "entity_type")?,
+            canonical_name: required_string_field(entity, "canonical_name")?,
+            aliases: optional_string_array_field(entity, "aliases")?.unwrap_or_default(),
+        });
+    }
+    let Some(JsonValue::Array(relationship_values)) = fields.get("relationships") else {
+        return Err(CliError::InvalidRequest(
+            "graph.relationships must be an array".to_string(),
+        ));
+    };
+    let mut relationships = Vec::with_capacity(relationship_values.len());
+    for value in relationship_values {
+        let JsonValue::Object(relationship) = value else {
+            return Err(CliError::InvalidRequest(
+                "graph.relationships entries must be objects".to_string(),
+            ));
+        };
+        reject_unknown_fields(
+            relationship,
+            &[
+                "subject_entity_key",
+                "relation_type",
+                "object_entity_key",
+                "confidence",
+            ],
+        )?;
+        relationships.push(CapturedRelationship {
+            subject_entity_key: required_string_field(relationship, "subject_entity_key")?,
+            relation_type: required_string_field(relationship, "relation_type")?,
+            object_entity_key: required_string_field(relationship, "object_entity_key")?,
+            confidence: optional_number_field(relationship, "confidence")?.unwrap_or(1.0),
+        });
+    }
+    Ok(Some(GraphCapture {
+        extractor: required_string_field(fields, "extractor")?,
+        extractor_version: optional_string_field(fields, "extractor_version")?,
+        entities,
+        relationships,
+    }))
+}
+
 pub(crate) fn remember_request_from_json(input: &str) -> Result<RememberRequest, CliError> {
     let value = parse_json(input)?;
     let object = value.as_object().ok_or_else(|| {
@@ -259,6 +339,7 @@ pub(crate) fn remember_request_from_json(input: &str) -> Result<RememberRequest,
             "entity_key",
             "claim_key",
             "derive_keys",
+            "graph",
             "confidence",
             "observed_at",
             "valid_from",
@@ -292,6 +373,7 @@ pub(crate) fn remember_request_from_json(input: &str) -> Result<RememberRequest,
         .flatten();
 
     let summary = optional_string_field(object, "summary")?;
+    let graph = graph_capture_from_json(object)?;
     let mut entity_key = optional_string_field(object, "entity_key")?;
     let mut claim_key = optional_string_field(object, "claim_key")?;
     // Derive deterministic keys by default so every adapter using the generic
@@ -301,7 +383,7 @@ pub(crate) fn remember_request_from_json(input: &str) -> Result<RememberRequest,
     if optional_bool_field(object, "derive_keys")?.unwrap_or(true) {
         let (derived_entity, derived_claim) =
             memkeeper_core::derive::keys(&content, summary.as_deref());
-        if entity_key.is_none() {
+        if entity_key.is_none() && graph.is_none() {
             entity_key = derived_entity;
         }
         if claim_key.is_none() {
@@ -321,6 +403,7 @@ pub(crate) fn remember_request_from_json(input: &str) -> Result<RememberRequest,
         tags: optional_string_array_field(object, "tags")?.unwrap_or_default(),
         entity_key,
         claim_key,
+        graph,
         confidence: optional_number_field(object, "confidence")?.unwrap_or(1.0),
         observed_at: optional_string_field(object, "observed_at")?,
         valid_from: optional_string_field(object, "valid_from")?,

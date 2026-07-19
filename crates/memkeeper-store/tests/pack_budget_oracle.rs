@@ -108,6 +108,7 @@ fn rc(id: &str, content: &str, score: f32) -> RerankCandidate {
         content: content.to_string(),
         rerank_score: score,
         activation: None,
+        consensus: false,
     }
 }
 

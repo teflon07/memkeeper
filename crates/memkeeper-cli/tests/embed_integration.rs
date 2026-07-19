@@ -126,8 +126,7 @@ fn upsert_test_route(
     subject_key: &str,
     predicate: &str,
     object_key: &str,
-    subject_memory_id: &str,
-    object_memory_id: &str,
+    evidence_memory_id: &str,
 ) {
     run_json_command(
         store,
@@ -136,13 +135,12 @@ fn upsert_test_route(
             "subject_entity_key": subject_key,
             "relation_type": predicate,
             "object_entity_key": object_key,
-            "memory_id": subject_memory_id,
+            "memory_id": evidence_memory_id,
             "metadata_json": serde_json::json!({
                 "routing": true,
-                "origin": "adjudicated_capture",
-                "routing_contract": "evidence_join_v1",
-                "routing_contract_version": 1,
-                "object_memory_id": object_memory_id
+                "origin": "automatic_capture",
+                "routing_contract": "evidence_join_v2",
+                "routing_contract_version": 2
             }).to_string()
         }),
     );
@@ -172,16 +170,12 @@ fn evidence_graph_join_recovers_exact_entity_seed() {
 
     upsert_test_entity(&store, "person:steve", "Steve");
     upsert_test_entity(&store, "org:acme", "Acme Labs");
-    let subject_id = remember_semantic(
+    remember_semantic(
         &store,
         "Steve profile identity record.",
         Some("person:steve"),
     );
-    let object_id = remember_semantic(
-        &store,
-        "ZXQ-771 canonical organization endpoint evidence.",
-        Some("org:acme"),
-    );
+    let evidence_id = remember_semantic(&store, "ZXQ-771: Steve works at Acme Labs.", None);
     for content in [
         "Where a remote employee completes payroll forms.",
         "How an architect chooses a productive workplace.",
@@ -190,14 +184,7 @@ fn evidence_graph_join_recovers_exact_entity_seed() {
     ] {
         remember_semantic(&store, content, None);
     }
-    upsert_test_route(
-        &store,
-        "person:steve",
-        "works_at",
-        "org:acme",
-        &subject_id,
-        &object_id,
-    );
+    upsert_test_route(&store, "person:steve", "works_at", "org:acme", &evidence_id);
 
     let base_payload = serde_json::json!({
         "title": "exact entity integration",
@@ -207,7 +194,7 @@ fn evidence_graph_join_recovers_exact_entity_seed() {
         "rerank_candidates": 2
     });
     let treatment = run_json_command(&store, "pool-trace", &base_payload);
-    let target = trace_memory(&treatment, &object_id).expect("entity route recovers endpoint");
+    let target = trace_memory(&treatment, &evidence_id).expect("entity route recovers evidence");
     assert!(target["sources"].as_array().is_some_and(|sources| {
         sources.iter().any(|source| {
             source["graph_route"]["seed_source"] == "entity"
@@ -252,13 +239,13 @@ fn evidence_graph_join_recovers_semantic_bridge_two_hop() {
     );
     let beta_id = remember_semantic(
         &store,
-        "intermediate cobalt bridge support",
-        Some("node:beta"),
+        "Alpha Node routes to Beta Node through the intermediate cobalt bridge.",
+        None,
     );
     let gamma_id = remember_semantic(
         &store,
-        "CAPYBARA-992 terminal evidence record",
-        Some("node:gamma"),
+        "Beta Node supports Gamma Node; CAPYBARA-992 is the terminal evidence.",
+        None,
     );
     for index in 0..8 {
         remember_semantic(
@@ -267,22 +254,8 @@ fn evidence_graph_join_recovers_semantic_bridge_two_hop() {
             None,
         );
     }
-    upsert_test_route(
-        &store,
-        "node:alpha",
-        "routes_to",
-        "node:beta",
-        &alpha_id,
-        &beta_id,
-    );
-    upsert_test_route(
-        &store,
-        "node:beta",
-        "supports",
-        "node:gamma",
-        &beta_id,
-        &gamma_id,
-    );
+    upsert_test_route(&store, "node:alpha", "routes_to", "node:beta", &beta_id);
+    upsert_test_route(&store, "node:beta", "supports", "node:gamma", &gamma_id);
 
     let base_payload = serde_json::json!({
         "title": "semantic bridge integration",
