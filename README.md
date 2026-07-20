@@ -35,7 +35,7 @@ no required network or LLM calls.
 
 <p align="center"><sub>Real CLI output, formatted for readability via <a href="scripts/mkfmt"><code>scripts/mkfmt</code></a>. The search query shares no keywords with the memory it surfaces.</sub></p>
 
-> Status: pre-release (v0.4.0). APIs and the wire protocol may change before 1.0.
+> Status: pre-release (v0.5.0). APIs and the wire protocol may change before 1.0.
 
 ## Quickstart
 
@@ -63,10 +63,10 @@ pitfalls (handy in Windows PowerShell).
 
 ## Upgrade from v0.2.x
 
-v0.3.0 introduced the schema 5 to schema 6 upgrade; v0.4.0 keeps schema 6
-unchanged. The migration is transactional, but schema 6 stores cannot be opened
-by v0.2.x. Stop any long-running `memkeeper` process and keep a schema 5 backup
-until you verify the upgrade.
+v0.3.0 introduced the schema 5 to schema 6 upgrade; v0.4.0 and v0.5.0 keep
+schema 6 unchanged. The migration is transactional, but schema 6 stores cannot
+be opened by v0.2.x. Stop any long-running `memkeeper` process and keep a
+schema 5 backup until you verify the upgrade.
 
 Back up the store with your v0.2.x binary before installing the current release:
 
@@ -75,8 +75,8 @@ STORE=~/.memkeeper/store.sqlite
 memkeeper backup --store "$STORE" --output "$STORE.schema5.bak" --json
 ```
 
-Install v0.4.0, run the migration explicitly, and verify the result before
-restarting any long-running process:
+Install the current release, run the migration explicitly, and verify the result
+before restarting any long-running process:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/teflon07/memkeeper/main/install.sh | bash
