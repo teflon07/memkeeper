@@ -307,6 +307,20 @@ pub(crate) fn normalize_imported_schema_metadata(
             [],
         )?;
     }
+    // Import replaces config_kv wholesale from the archive, so this row still
+    // carries the protocol string of the build that wrote it. A build whose own
+    // wire name differs (the internal/public rename) would then fail its own
+    // validate_initialized on a store it had just written, reporting an internal
+    // temp path with a "run init first" hint that cannot help. The header
+    // protocol check has already accepted this archive, so a disagreeing row is
+    // stale metadata rather than a difference worth preserving.
+    // Only rewrite on an actual mismatch: touching `updated_at` unconditionally
+    // would break the byte-identical export/import/export round trip.
+    transaction.execute(
+        "UPDATE config_kv SET value = 'memkeeper.v0.1', updated_at = CURRENT_TIMESTAMP
+         WHERE key = 'protocol_version' AND value != 'memkeeper.v0.1'",
+        [],
+    )?;
     Ok(())
 }
 
@@ -571,16 +585,34 @@ pub(crate) fn ensure_source_episode_vector_table(
 
 #[cfg(feature = "semantic")]
 pub(crate) fn drop_all_vector_tables(transaction: &Transaction<'_>) -> Result<()> {
-    let tables: Vec<String> = {
-        let mut statement = transaction.prepare(
-            "SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE 'memory_vec_%'",
-        )?;
-        let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
-        rows.collect::<rusqlite::Result<Vec<_>>>()?
-    };
-    for table in tables {
+    // Drop the vec0 virtual tables first: each one drops its own shadow tables
+    // (`_info`/`_chunks`/`_rowids`/...). Dropping a shadow directly corrupts the
+    // virtual table, and sqlite_master lists them in creation order, which does
+    // not guarantee the virtual table comes before its shadows.
+    for table in memory_vec_tables(transaction, true)? {
         // Table name comes from sqlite_master and is therefore trusted.
         transaction.execute(&format!("DROP TABLE IF EXISTS {table}"), [])?;
     }
+    // Every live vec0 table is gone now, so whatever still matches is an orphan
+    // shadow from an older drop path; it would collide with the next CREATE.
+    for table in memory_vec_tables(transaction, false)? {
+        transaction.execute(&format!("DROP TABLE IF EXISTS {table}"), [])?;
+    }
     Ok(())
+}
+
+/// `memory_vec_%` table names, restricted to the `vec0` virtual tables when
+/// `vec0_only`, otherwise everything still matching (shadow tables included).
+#[cfg(feature = "semantic")]
+fn memory_vec_tables(transaction: &Transaction<'_>, vec0_only: bool) -> Result<Vec<String>> {
+    let filter = if vec0_only {
+        " AND sql LIKE '%USING vec0%'"
+    } else {
+        ""
+    };
+    let mut statement = transaction.prepare(&format!(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE 'memory_vec_%'{filter}"
+    ))?;
+    let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
 }

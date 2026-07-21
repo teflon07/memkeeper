@@ -6,6 +6,39 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html) once it reache
 1.0. Until then, minor releases may include breaking changes to the storage
 schema and wire protocol.
 
+## [0.5.1] - 2026-07-21
+
+### Fixed
+- **Import accepts an archive written by a differently named build.** Import
+  replaces `config_kv` wholesale from the archive, so the stored
+  `protocol_version` survived from whichever build wrote the archive. A build
+  whose own wire name differed then failed its own initialization check against
+  a store it had just written, reporting `store is not initialized` for an
+  internal temporary path. The value is now reconciled during import, and only
+  when it actually differs, so a byte-identical export/import/export round trip
+  still holds.
+- **`reindex --embed` no longer fails after a vector-table rebuild.**
+  `drop_all_vector_tables` dropped `memory_vec_%` tables in `sqlite_master`
+  order, which put the vec0 shadow tables ahead of the virtual table that owns
+  them and corrupted it. Every subsequent `reindex --embed` died with
+  `SQL logic error`.
+- **Recency no longer reads two different clocks.** `now_julian_day`
+  reimplemented `julianday('now')` in Rust, so SQL-side recency ordering and the
+  authoritative re-scoring pass disagreed by construction. It now queries SQLite.
+- **Graph capture no longer creates colliding aliases.** Generated slugs already
+  owned by another canonical entity are filtered, and aliases are deduplicated
+  case-insensitively and never repeat the entity key or canonical name.
+- **`schema remember` documents `graph` and `derive_keys`.** Both were accepted
+  but neither was listed, leaving atomic graph capture undiscoverable from the
+  CLI that advertises it.
+
+### Changed
+- Split the graph subsystem into `graph.rs` and dream consolidation into
+  `dream.rs`. No behavior change.
+- Cache the entity lookup and the entity-alias statement in `load_entity`.
+- Strip the release binary, 32 MB down to 23 MB.
+- Gate the retrieval oracle baseline in CI.
+
 ## [0.5.0] - 2026-07-19
 
 ### Added
@@ -379,6 +412,8 @@ Initial public release. A local-first memory engine for AI agents.
 - **Adapters**: an MCP bridge and a thin extension client.
 - Dual-licensed **MIT OR Apache-2.0**.
 
+[0.5.1]: https://github.com/teflon07/memkeeper/compare/v0.5.0...v0.5.1
+[0.5.0]: https://github.com/teflon07/memkeeper/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/teflon07/memkeeper/compare/v0.3.1...v0.4.0
 [0.3.1]: https://github.com/teflon07/memkeeper/compare/v0.3.0...v0.3.1
 [0.2.11]: https://github.com/teflon07/memkeeper/releases/tag/v0.2.11

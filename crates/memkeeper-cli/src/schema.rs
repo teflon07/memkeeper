@@ -100,6 +100,13 @@ pub(crate) static COMMAND_SCHEMAS: &[CommandSchema] = &[
             opt("tags", "string[]", Some("[]"), "Free-form tags."),
             opt("entity_key", "string", None, "Grouping key; derived if omitted."),
             opt("claim_key", "string", None, "Claim key for supersession grouping."),
+            opt("derive_keys", "bool", Some("false"), "Derive entity_key/claim_key from content when omitted."),
+            opt(
+                "graph",
+                "object",
+                None,
+                "Evidence-backed graph capture written in the same transaction: {extractor, extractor_version?, entities:[{entity_key,entity_type,canonical_name,aliases?}], relationships:[{subject_entity_key,relation_type,object_entity_key,confidence?}]}. Every relationship endpoint must appear in entities; an entity whose key/name/alias resolves to more than one existing entity fails the write.",
+            ),
             opt("confidence", "float", Some("1.0"), "Confidence 0.0-1.0."),
             opt("observed_at", "string", None, "ISO-8601 UTC when observed."),
             opt("valid_from", "string", None, "ISO-8601 UTC validity start."),

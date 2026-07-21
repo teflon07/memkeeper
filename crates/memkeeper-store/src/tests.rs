@@ -34,6 +34,11 @@ use super::{
 };
 use memkeeper_core::DEFAULT_SPACE;
 use rusqlite::{params, Connection};
+
+/// Stable Julian day (2023-02-24) for recency-curve tests. The curve
+/// assertions are relative to this reference, so pinning it keeps them
+/// independent of the wall clock.
+const FIXED_TEST_JULIAN_DAY: f64 = 2_460_000.0;
 use std::{collections::BTreeMap, env, fs, path::Path, path::PathBuf, process, time::SystemTime};
 
 #[test]
@@ -2780,6 +2785,120 @@ fn semantic_export_import_round_trip_rebuilds_vector_index() {
     assert_eq!(report.strategy, "semantic_primary_v0");
     assert_eq!(report.results.len(), 1);
     assert_eq!(report.results[0].memory_id, remembered.memory.id);
+
+    cleanup_store(&source);
+    cleanup_store(&target);
+    cleanup_store(&export_path);
+}
+
+/// Import must accept an archive whose stored `protocol_version` came from the
+/// other-named build. Import replaces `config_kv` wholesale from the archive, so
+/// that row used to survive and the import then failed its own
+/// `validate_initialized`, reporting `store is not initialized` against an
+/// internal temp path. An empty self-round-trip passed only because it carried
+/// this build's own value, which is why the defect looked like "any archive with
+/// real data" rather than "any archive from the other build".
+#[cfg(feature = "semantic")]
+#[test]
+fn import_accepts_archive_carrying_foreign_protocol_version() {
+    let source = temp_store_path("foreign_protocol_source");
+    let target = temp_store_path("foreign_protocol_target");
+    let export_path = temp_store_path("foreign_protocol_export").with_extension("jsonl");
+    cleanup_store(&source);
+    cleanup_store(&target);
+    cleanup_store(&export_path);
+    init_store(&source).expect("init source");
+
+    let mut request = basic_request("decision: archive spans every exported table");
+    request.embedding = Some(vec![0.25_f32; crate::DEFAULT_SEMANTIC_EMBEDDING_DIMS]);
+    request.embedding_model_id = Some("round-trip-model".to_string());
+    remember_memory(&source, &request).expect("remember source");
+
+    upsert_entity(
+        &source,
+        &entity_upsert_request("project:memkeeper", "Memkeeper"),
+    )
+    .expect("subject entity");
+    upsert_entity(
+        &source,
+        &entity_upsert_request("component:sqlite", "SQLite"),
+    )
+    .expect("object entity");
+    upsert_relationship(
+        &source,
+        &RelationshipUpsertRequest {
+            subject_entity_key: Some("project:memkeeper".to_string()),
+            relation_type: "uses".to_string(),
+            object_entity_key: Some("component:sqlite".to_string()),
+            confidence: 0.7,
+            ..relationship_upsert_request_defaults()
+        },
+    )
+    .expect("relationship upsert");
+
+    export_store(
+        &source,
+        &ExportRequest {
+            output_path: export_path.clone(),
+            format: "jsonl".to_string(),
+        },
+    )
+    .expect("export source");
+
+    // Rewrite only the stored row, exactly as an archive from the other-named
+    // build carries it. The header stays valid for this build, which is the case
+    // that reached the failing validation instead of being rejected at parse.
+    // The substituted value is deliberately not either build's own name: this
+    // file is rebranded when the public tree is generated, and a value carrying
+    // a real brand would be rewritten into the value it is supposed to differ
+    // from, silently turning this replace into a no-op there.
+    let archive = std::fs::read_to_string(&export_path).expect("read archive");
+    let rewritten = archive.replace(
+        r#"{"key":"protocol_version","value":"memkeeper.v0.1""#,
+        r#"{"key":"protocol_version","value":"otherbuild.v0.1""#,
+    );
+    assert_ne!(
+        archive, rewritten,
+        "archive must carry a protocol_version config row"
+    );
+    std::fs::write(&export_path, rewritten).expect("write archive");
+
+    let report = import_store(
+        &target,
+        &ImportRequest {
+            input_path: export_path.clone(),
+            format: "jsonl".to_string(),
+            dry_run: false,
+            conflict_policy: "fail_if_exists".to_string(),
+        },
+    )
+    .expect("import must accept an archive from the other-named build");
+    assert_eq!(report.schema_version, SCHEMA_VERSION);
+
+    let connection = Connection::open(&target).expect("open imported store");
+    for (table, expected) in [
+        ("memories", 1_i64),
+        ("memory_versions", 1),
+        ("entities", 2),
+        ("relationships", 1),
+        ("embeddings", 1),
+    ] {
+        let actual: i64 = connection
+            .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                row.get(0)
+            })
+            .unwrap_or_else(|error| panic!("count {table}: {error}"));
+        assert_eq!(actual, expected, "{table} rows after import");
+    }
+    let protocol: String = connection
+        .query_row(
+            "SELECT value FROM config_kv WHERE key = 'protocol_version'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("protocol_version row");
+    assert_eq!(protocol, "memkeeper.v0.1");
+    drop(connection);
 
     cleanup_store(&source);
     cleanup_store(&target);
@@ -9756,6 +9875,58 @@ fn schema_v4_uses_1024_dim_vec_table() {
 }
 
 #[test]
+#[cfg(feature = "semantic")]
+fn drop_all_vector_tables_survives_shadows_listed_first() {
+    use crate::schema::drop_all_vector_tables;
+    use crate::{ensure_memory_vector_table, SEMANTIC_TABLE_SQL};
+    let store_path = temp_store_path("drop_all_vector_tables_shadows_first");
+    cleanup_store(&store_path);
+    init_store(&store_path).expect("init store");
+    let conn = open_initialized_write(&store_path).expect("open conn");
+    conn.execute_batch(SEMANTIC_TABLE_SQL)
+        .expect("create vec table");
+    conn.execute(
+        "INSERT INTO memory_vec_1024 (memory_id, embedding) VALUES ('mem_a', ?1)",
+        [crate::embedding_json(&vec![0.0_f32; 1024]).expect("json")],
+    )
+    .expect("seed vector");
+    // Reproduce the production store: sqlite_master lists the vec0 shadow tables
+    // before the virtual table itself, so a naive drop hits a shadow first.
+    conn.execute_batch(
+        "PRAGMA writable_schema=ON;
+         UPDATE sqlite_master SET rowid = (SELECT MAX(rowid) + 1 FROM sqlite_master)
+         WHERE name = 'memory_vec_1024';
+         PRAGMA writable_schema=OFF;",
+    )
+    .expect("reorder schema");
+    drop(conn);
+
+    let mut conn = open_initialized_write(&store_path).expect("reopen conn");
+    let first: String = conn
+        .query_row(
+            "SELECT name FROM sqlite_master WHERE name LIKE 'memory_vec_%' ORDER BY rowid LIMIT 1",
+            [],
+            |r| r.get(0),
+        )
+        .expect("first vec table");
+    assert_ne!(
+        first, "memory_vec_1024",
+        "test setup should list a shadow table first"
+    );
+
+    let tx = conn.transaction().expect("tx");
+    drop_all_vector_tables(&tx).expect("drop vector tables");
+    // The whole point: the table has to come back and accept writes afterwards.
+    let table = ensure_memory_vector_table(&tx, 1024).expect("recreate vec table");
+    tx.execute(
+        &format!("INSERT INTO {table} (memory_id, embedding) VALUES ('mem_b', ?1)"),
+        [crate::embedding_json(&vec![0.0_f32; 1024]).expect("json")],
+    )
+    .expect("insert after drop");
+    tx.commit().expect("commit");
+}
+
+#[test]
 fn verify_stamps_verified_at_and_preserves_pointer() {
     let path = temp_store_path("verify_stamps");
     cleanup_store(&path);
@@ -9984,8 +10155,44 @@ fn pack_durable_memory_has_no_freshness_marker() {
 }
 
 #[test]
+fn now_julian_day_matches_sqlite_and_agrees_with_stored_recency() {
+    let connection = Connection::open_in_memory().expect("open in-memory connection");
+    let now_jd = now_julian_day(&connection).expect("read julian day");
+
+    // Same clock SQLite stamps rows with, so the Rust re-scoring pass and the
+    // SQL-side recency ordering cannot drift apart.
+    let sqlite_jd: f64 = connection
+        .query_row("SELECT julianday('now')", [], |row| row.get(0))
+        .expect("sqlite julianday");
+    assert!(
+        (now_jd - sqlite_jd).abs() < 1e-4,
+        "now_julian_day {now_jd} should match sqlite julianday {sqlite_jd}"
+    );
+
+    // Guards against a malformed query silently yielding 0.0 or an epoch-offset
+    // value: 2020-01-01 is JD 2458849.5, 2100-01-01 is JD 2488069.5.
+    assert!(
+        (2_458_849.5..2_488_069.5).contains(&now_jd),
+        "now_julian_day {now_jd} is not a plausible current Julian day"
+    );
+
+    // An age computed against a SQLite-produced timestamp must be non-negative,
+    // which is what `recency_score_for_silo` relies on for its clamp.
+    let stored_jd: f64 = connection
+        .query_row("SELECT julianday('now', '-1 day')", [], |row| row.get(0))
+        .expect("sqlite julianday offset");
+    let age_days = now_jd - stored_jd;
+    assert!(
+        (age_days - 1.0).abs() < 1e-3,
+        "a row stamped one day ago should read as ~1 day old, got {age_days}"
+    );
+}
+
+#[test]
 fn volatile_recency_outweighs_durable_recency_for_recent_memory() {
-    let now_jd = now_julian_day();
+    // Fixed reference point: these assertions are about the shape of the decay
+    // curve relative to `now_jd`, not about the absolute clock.
+    let now_jd = FIXED_TEST_JULIAN_DAY;
     let recent_jd = Some(now_jd - 1.0);
     let durable = recency_score_for_silo(recent_jd, "durable", now_jd);
     let volatile = recency_score_for_silo(recent_jd, "short-term", now_jd);
@@ -9999,7 +10206,7 @@ fn volatile_recency_outweighs_durable_recency_for_recent_memory() {
 
 #[test]
 fn recency_half_life_decays_decisively_at_realistic_timescales() {
-    let now_jd = now_julian_day();
+    let now_jd = FIXED_TEST_JULIAN_DAY;
     // A volatile claim from yesterday vs one from three months ago must
     // differ by more than any single metadata boost (max 0.10), so
     // recency is decisive between otherwise-equal volatile claims.

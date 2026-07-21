@@ -319,43 +319,46 @@ fn graph_capture_from_json(object: &JsonObject) -> Result<Option<GraphCapture>, 
     }))
 }
 
+/// Every field `remember` accepts. Shared with the `schema` docs so an added
+/// parser field cannot go undocumented: `graph` and `derive_keys` were both
+/// accepted but missing from `memkeeper schema remember` until 2026-07-20, which
+/// left callers unable to discover atomic graph capture from the CLI itself.
+pub(crate) const REMEMBER_FIELDS: &[&str] = &[
+    "space",
+    "silo",
+    "scope",
+    "project",
+    "kind",
+    "content",
+    "summary",
+    "retrieval_representation",
+    "tags",
+    "entity_key",
+    "claim_key",
+    "derive_keys",
+    "graph",
+    "confidence",
+    "observed_at",
+    "valid_from",
+    "valid_to",
+    "expires_at",
+    "source",
+    "metadata_json",
+    "pinned",
+    "supersedes",
+    "contradicts",
+    "embedding",
+    "embedding_model_id",
+    "dry_run",
+    "mode",
+];
+
 pub(crate) fn remember_request_from_json(input: &str) -> Result<RememberRequest, CliError> {
     let value = parse_json(input)?;
     let object = value.as_object().ok_or_else(|| {
         CliError::InvalidRequest("remember request must be a JSON object".to_string())
     })?;
-    reject_unknown_fields(
-        object,
-        &[
-            "space",
-            "silo",
-            "scope",
-            "project",
-            "kind",
-            "content",
-            "summary",
-            "retrieval_representation",
-            "tags",
-            "entity_key",
-            "claim_key",
-            "derive_keys",
-            "graph",
-            "confidence",
-            "observed_at",
-            "valid_from",
-            "valid_to",
-            "expires_at",
-            "source",
-            "metadata_json",
-            "pinned",
-            "supersedes",
-            "contradicts",
-            "embedding",
-            "embedding_model_id",
-            "dry_run",
-            "mode",
-        ],
-    )?;
+    reject_unknown_fields(object, REMEMBER_FIELDS)?;
     let content = required_string_field(object, "content")?;
     let source_object = match object.get("source") {
         None | Some(JsonValue::Null) => None,

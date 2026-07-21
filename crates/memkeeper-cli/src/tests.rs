@@ -1626,6 +1626,8 @@ fn dummy_value(field: &crate::schema::FieldDoc) -> &'static str {
         "bool" => "true",
         "object" => match field.name {
             "retrieval_representation" => r#"{"kind":"contextual-card-v1","text":"context card"}"#,
+            // Graph capture requires both arrays; an empty object is rejected.
+            "graph" => r#"{"extractor":"x","entities":[],"relationships":[]}"#,
             _ => "{}",
         },
         "float[]" => "[0.1]",
@@ -1760,6 +1762,27 @@ fn schema_documents_only_accepted_fields() {
             )
         });
     }
+}
+
+#[test]
+fn schema_documents_every_accepted_remember_field() {
+    // The companion test above only catches documented-but-rejected fields, so a
+    // field added to the parser and not to the docs passed silently -- `graph`
+    // and `derive_keys` shipped that way and left atomic graph capture
+    // undiscoverable from `memkeeper schema remember`. Assert the other direction.
+    let documented: std::collections::BTreeSet<&str> = crate::schema::schema_for("remember")
+        .expect("remember must have a documented schema")
+        .fields
+        .iter()
+        .map(|f| f.name)
+        .collect();
+    let accepted: std::collections::BTreeSet<&str> =
+        crate::requests::REMEMBER_FIELDS.iter().copied().collect();
+    let undocumented: Vec<&&str> = accepted.difference(&documented).collect();
+    assert!(
+        undocumented.is_empty(),
+        "remember accepts fields the schema does not document: {undocumented:?}"
+    );
 }
 
 #[test]
