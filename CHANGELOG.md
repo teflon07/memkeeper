@@ -6,6 +6,20 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html) once it reache
 1.0. Until then, minor releases may include breaking changes to the storage
 schema and wire protocol.
 
+## [0.5.2] - 2026-07-21
+
+### Fixed
+- **Import accepts an archive that carries no schema or config metadata.**
+  `schema_migrations` and `config_kv` hold store-identity metadata but are also
+  export tables, so import clears them and the archive is the only thing that
+  restores them. An archive produced by a store that does not maintain those
+  tables left the imported store failing its own initialization check, reporting
+  `store is not initialized` against an internal temporary path. Import now
+  re-asserts the schema-version migration row and the `schema_version`,
+  `protocol_version`, and `default_space` config keys when the archive omits
+  them. Metadata the archive does carry is left untouched, so a byte-identical
+  export/import/export round trip still holds.
+
 ## [0.5.1] - 2026-07-21
 
 ### Fixed
@@ -412,6 +426,7 @@ Initial public release. A local-first memory engine for AI agents.
 - **Adapters**: an MCP bridge and a thin extension client.
 - Dual-licensed **MIT OR Apache-2.0**.
 
+[0.5.2]: https://github.com/teflon07/memkeeper/compare/v0.5.1...v0.5.2
 [0.5.1]: https://github.com/teflon07/memkeeper/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/teflon07/memkeeper/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/teflon07/memkeeper/compare/v0.3.1...v0.4.0

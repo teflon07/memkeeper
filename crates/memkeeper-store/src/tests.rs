@@ -2905,6 +2905,114 @@ fn import_accepts_archive_carrying_foreign_protocol_version() {
     cleanup_store(&export_path);
 }
 
+/// Import must accept an archive that carries no `schema_migrations` and no
+/// `config_kv` rows. Both are export tables, so `clear_import_tables` wipes them
+/// and the archive is the only thing that restores them; a producer that does not
+/// maintain them (the hosted Durable Object store declares both in its header and
+/// emits zero rows) previously left the store failing its own
+/// `validate_initialized` with `store is not initialized` against a temp path.
+#[cfg(feature = "semantic")]
+#[test]
+fn import_accepts_archive_without_schema_or_config_metadata() {
+    let source = temp_store_path("metadata_light_source");
+    let target = temp_store_path("metadata_light_target");
+    let export_path = temp_store_path("metadata_light_export").with_extension("jsonl");
+    cleanup_store(&source);
+    cleanup_store(&target);
+    cleanup_store(&export_path);
+    init_store(&source).expect("init source");
+
+    let mut request = basic_request("decision: metadata-light archive still restores");
+    request.embedding = Some(vec![0.4_f32; crate::DEFAULT_SEMANTIC_EMBEDDING_DIMS]);
+    request.embedding_model_id = Some("metadata-light-model".to_string());
+    let remembered = remember_memory(&source, &request).expect("remember source");
+
+    upsert_entity(&source, &entity_upsert_request("project:hosted", "Hosted"))
+        .expect("subject entity");
+    upsert_entity(&source, &entity_upsert_request("component:store", "Store"))
+        .expect("object entity");
+    upsert_relationship(
+        &source,
+        &RelationshipUpsertRequest {
+            subject_entity_key: Some("project:hosted".to_string()),
+            relation_type: "uses".to_string(),
+            object_entity_key: Some("component:store".to_string()),
+            confidence: 0.6,
+            ..relationship_upsert_request_defaults()
+        },
+    )
+    .expect("relationship upsert");
+
+    export_store(
+        &source,
+        &ExportRequest {
+            output_path: export_path.clone(),
+            format: "jsonl".to_string(),
+        },
+    )
+    .expect("export source");
+
+    // Strip both metadata tables and reconcile the footer, reproducing the shape
+    // a hosted export actually has: the header still declares both tables.
+    strip_metadata_rows(&export_path);
+
+    let report = import_store(
+        &target,
+        &ImportRequest {
+            input_path: export_path.clone(),
+            format: "jsonl".to_string(),
+            dry_run: false,
+            conflict_policy: "fail_if_exists".to_string(),
+        },
+    )
+    .expect("import must accept an archive with no schema/config metadata");
+    assert_eq!(report.schema_version, SCHEMA_VERSION);
+
+    // The store must be usable, not merely loaded: identity metadata restored,
+    // content intact, and retrieval working on the recovered rows.
+    assert_store_identity_metadata(&target);
+    let connection = Connection::open(&target).expect("open imported store");
+    for (table, expected) in [
+        ("memories", 1_i64),
+        ("memory_versions", 1),
+        ("entities", 2),
+        ("relationships", 1),
+        ("embeddings", 1),
+    ] {
+        let actual: i64 = connection
+            .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                row.get(0)
+            })
+            .unwrap_or_else(|error| panic!("count {table}: {error}"));
+        assert_eq!(actual, expected, "{table} rows after import");
+    }
+    drop(connection);
+
+    let search = search_memories(
+        &target,
+        &SearchRequest {
+            query: "metadata-light archive".to_string(),
+            filters: SearchFilters::default(),
+            limit: 5,
+            offset: 0,
+            snippet_chars: 80,
+            include_content: false,
+            include_source: false,
+            semantic_fallback: "disabled".to_string(),
+            lexical_fallback: "conservative".to_string(),
+            embedding: None,
+            query_token_embedding: None,
+            token_model_id: None,
+        },
+    )
+    .expect("search the restored store");
+    assert_eq!(search.results[0].memory_id, remembered.memory.id);
+
+    cleanup_store(&source);
+    cleanup_store(&target);
+    cleanup_store(&export_path);
+}
+
 #[cfg(feature = "semantic")]
 #[test]
 fn embedding_model_change_is_rejected() {
@@ -9149,6 +9257,68 @@ fn assert_score_components_add_up(result: &SearchResult) {
         (result.score - expected).abs() < 1e-12,
         "score should equal score components: {result:?}"
     );
+}
+
+/// Assert the store-identity metadata `validate_initialized` depends on, which
+/// import must re-assert when the archive carries none of it.
+#[cfg(feature = "semantic")]
+fn assert_store_identity_metadata(store_path: &Path) {
+    let connection = Connection::open(store_path).expect("open imported store");
+    let applied: i64 = connection
+        .query_row(
+            &format!("SELECT COUNT(*) FROM schema_migrations WHERE version = {SCHEMA_VERSION}"),
+            [],
+            |row| row.get(0),
+        )
+        .expect("schema_migrations count");
+    assert_eq!(applied, 1, "the current migration row must be re-asserted");
+    for (key, expected) in [
+        ("schema_version", SCHEMA_VERSION.to_string()),
+        ("protocol_version", "memkeeper.v0.1".to_string()),
+        ("default_space", DEFAULT_SPACE.to_string()),
+    ] {
+        let actual: String = connection
+            .query_row("SELECT value FROM config_kv WHERE key = ?1", [key], |row| {
+                row.get(0)
+            })
+            .unwrap_or_else(|error| panic!("config_kv {key}: {error}"));
+        assert_eq!(actual, expected, "config_kv {key}");
+    }
+}
+
+/// Rewrite a JSONL archive in place with every `schema_migrations` and
+/// `config_kv` row removed and the footer reconciled, reproducing the shape a
+/// hosted export actually has: the header still declares both tables.
+#[cfg(feature = "semantic")]
+fn strip_metadata_rows(archive_path: &Path) {
+    let archive = std::fs::read_to_string(archive_path).expect("read archive");
+    let mut kept = Vec::new();
+    let mut dropped = 0_u64;
+    for line in archive.lines() {
+        let mut value: serde_json::Value = serde_json::from_str(line).expect("archive line");
+        match value.get("type").and_then(serde_json::Value::as_str) {
+            Some("row") => {
+                let table = value.get("table").and_then(serde_json::Value::as_str);
+                if matches!(table, Some("schema_migrations" | "config_kv")) {
+                    dropped += 1;
+                    continue;
+                }
+            }
+            Some("footer") => {
+                let count = value["row_count"].as_u64().expect("footer row_count") - dropped;
+                value["row_count"] = serde_json::json!(count);
+                value["table_counts"]["schema_migrations"] = serde_json::json!(0);
+                value["table_counts"]["config_kv"] = serde_json::json!(0);
+            }
+            _ => {}
+        }
+        kept.push(serde_json::to_string(&value).expect("reserialize"));
+    }
+    assert!(
+        dropped > 0,
+        "source archive must carry metadata rows to strip"
+    );
+    std::fs::write(archive_path, kept.join("\n") + "\n").expect("write archive");
 }
 
 fn entity_upsert_request(entity_key: &str, canonical_name: &str) -> EntityUpsertRequest {

@@ -321,6 +321,37 @@ pub(crate) fn normalize_imported_schema_metadata(
          WHERE key = 'protocol_version' AND value != 'memkeeper.v0.1'",
         [],
     )?;
+    // `schema_migrations` and `config_kv` are store-identity metadata, but they
+    // are also export tables, so `clear_import_tables` wipes them and the archive
+    // is the only thing that puts them back. A producer that does not maintain
+    // them (the hosted Durable Object store declares both in its header and emits
+    // zero rows for each) therefore leaves the store failing its own
+    // `validate_initialized`, reporting an internal temp path. `apply_schema`
+    // computed these correctly moments earlier; re-assert only what is missing.
+    // Insert-if-absent rather than upsert, so an archive that does carry this
+    // metadata is untouched and the byte-identical export/import/export round
+    // trip still holds.
+    transaction.execute(
+        &format!(
+            "INSERT OR IGNORE INTO schema_migrations
+             (version, name, applied_at, checksum_sha256)
+             VALUES ({SCHEMA_VERSION}, 'schema-v0.6-memory-representations',
+                     CURRENT_TIMESTAMP, NULL)"
+        ),
+        [],
+    )?;
+    for (key, value) in [
+        ("schema_version", SCHEMA_VERSION.to_string()),
+        ("protocol_version", "memkeeper.v0.1".to_string()),
+        ("default_space", DEFAULT_SPACE.to_string()),
+    ] {
+        transaction.execute(
+            "INSERT INTO config_kv (key, value, updated_at)
+             VALUES (?1, ?2, CURRENT_TIMESTAMP)
+             ON CONFLICT(key) DO NOTHING",
+            rusqlite::params![key, value],
+        )?;
+    }
     Ok(())
 }
 
