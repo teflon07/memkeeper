@@ -6,6 +6,26 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html) once it reache
 1.0. Until then, minor releases may include breaking changes to the storage
 schema and wire protocol.
 
+## [0.5.3] - 2026-07-23
+
+### Added
+- **Local model usage telemetry.** Semantic builds record local embedding,
+  reranking, and late-interaction inference totals and expose them through the
+  `local-usage` command.
+
+### Fixed
+- **Graph capture honors exact entity keys before alias resolution.** A supplied
+  key that already names an active entity now wins immediately, so overlapping
+  names or aliases cannot make an otherwise exact capture ambiguous.
+
+### Changed
+- Consolidated the semantic runtime guards behind one shared decision path. No
+  behavior change.
+
+### Compatibility
+- No storage schema, embedding model, reranker model, provider default, or local
+  model requirement changed in this release.
+
 ## [0.5.2] - 2026-07-21
 
 ### Fixed
@@ -426,6 +446,7 @@ Initial public release. A local-first memory engine for AI agents.
 - **Adapters**: an MCP bridge and a thin extension client.
 - Dual-licensed **MIT OR Apache-2.0**.
 
+[0.5.3]: https://github.com/teflon07/memkeeper/compare/v0.5.2...v0.5.3
 [0.5.2]: https://github.com/teflon07/memkeeper/compare/v0.5.1...v0.5.2
 [0.5.1]: https://github.com/teflon07/memkeeper/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/teflon07/memkeeper/compare/v0.4.0...v0.5.0

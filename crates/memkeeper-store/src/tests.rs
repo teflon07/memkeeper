@@ -8672,6 +8672,98 @@ fn remember_graph_capture_reuses_entities_found_by_exact_alias() {
 }
 
 #[test]
+fn remember_graph_capture_prefers_exact_entity_key_over_ambiguous_name() {
+    let path = temp_store_path("remember_graph_exact_key_precedence");
+    cleanup_store(&path);
+    init_store(&path).expect("init succeeds");
+
+    for (entity_key, canonical_name) in [
+        ("system:memkeeper", "Memkeeper"),
+        ("project:memkeeper", "Memkeeper"),
+        ("org:workspace", "Workspace"),
+    ] {
+        upsert_entity(&path, &entity_upsert_request(entity_key, canonical_name))
+            .expect("entity upsert succeeds");
+    }
+
+    let mut request = basic_request("Memkeeper is part of the Workspace.");
+    request.graph = Some(GraphCapture {
+        extractor: "test-extractor".to_string(),
+        extractor_version: Some("1".to_string()),
+        entities: vec![
+            CapturedEntity {
+                entity_key: "system:memkeeper".to_string(),
+                entity_type: "system".to_string(),
+                canonical_name: "Memkeeper".to_string(),
+                aliases: Vec::new(),
+            },
+            CapturedEntity {
+                entity_key: "org:workspace".to_string(),
+                entity_type: "organization".to_string(),
+                canonical_name: "Workspace".to_string(),
+                aliases: Vec::new(),
+            },
+        ],
+        relationships: vec![CapturedRelationship {
+            subject_entity_key: "system:memkeeper".to_string(),
+            relation_type: "part_of".to_string(),
+            object_entity_key: "org:workspace".to_string(),
+            confidence: 0.98,
+        }],
+    });
+
+    remember_memory(&path, &request).expect("exact entity key resolves");
+
+    let connection = Connection::open(&path).expect("open store");
+    let subject_key: String = connection
+        .query_row(
+            "SELECT subject.entity_key
+               FROM relationships relationship
+               JOIN entities subject ON subject.id = relationship.subject_entity_id",
+            [],
+            |row| row.get(0),
+        )
+        .expect("relationship subject");
+    assert_eq!(subject_key, "system:memkeeper");
+    drop(connection);
+
+    let mut ambiguous = basic_request("Memkeeper is still part of the Workspace.");
+    ambiguous.dry_run = true;
+    ambiguous.graph = Some(GraphCapture {
+        extractor: "test-extractor".to_string(),
+        extractor_version: Some("1".to_string()),
+        entities: vec![
+            CapturedEntity {
+                entity_key: "proposed:memkeeper".to_string(),
+                entity_type: "system".to_string(),
+                canonical_name: "Memkeeper".to_string(),
+                aliases: Vec::new(),
+            },
+            CapturedEntity {
+                entity_key: "org:workspace".to_string(),
+                entity_type: "organization".to_string(),
+                canonical_name: "Workspace".to_string(),
+                aliases: Vec::new(),
+            },
+        ],
+        relationships: vec![CapturedRelationship {
+            subject_entity_key: "proposed:memkeeper".to_string(),
+            relation_type: "part_of".to_string(),
+            object_entity_key: "org:workspace".to_string(),
+            confidence: 0.98,
+        }],
+    });
+    let error = remember_memory(&path, &ambiguous).expect_err("ambiguous fallback must abstain");
+    assert!(matches!(
+        error,
+        Error::InvalidRequest { message }
+            if message == "graph entity proposed:memkeeper matches multiple canonical entities"
+    ));
+
+    cleanup_store(&path);
+}
+
+#[test]
 #[allow(clippy::too_many_lines)]
 fn forget_tombstones_memory_and_history_hides_source_when_requested() {
     let path = temp_store_path("forget_tombstones_memory_and_history_hides_source_when_requested");

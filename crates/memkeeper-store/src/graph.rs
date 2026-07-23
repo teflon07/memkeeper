@@ -1921,31 +1921,43 @@ fn resolve_graph_capture_keys(
     let mut resolved_keys = BTreeMap::new();
     let mut seen_resolved = BTreeSet::new();
     for entity in &graph.entities {
-        let mut matches = BTreeSet::new();
-        for surface in std::iter::once(entity.entity_key.as_str())
-            .chain(std::iter::once(entity.canonical_name.as_str()))
-            .chain(entity.aliases.iter().map(String::as_str))
-        {
-            for (_, entity_key, _) in exact_entities_for_span(
-                transaction,
-                &[space.to_string()],
-                &normalized_alias(surface),
-            )? {
-                matches.insert(entity_key);
+        let exact_key = transaction
+            .query_row(
+                "SELECT entity_key
+                   FROM entities
+                  WHERE space_name = ?1 AND entity_key = ?2 AND status = 'active'",
+                params![space, entity.entity_key],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let resolved_key = if let Some(exact_key) = exact_key {
+            exact_key
+        } else {
+            let mut matches = BTreeSet::new();
+            for surface in std::iter::once(entity.canonical_name.as_str())
+                .chain(entity.aliases.iter().map(String::as_str))
+            {
+                for (_, entity_key, _) in exact_entities_for_span(
+                    transaction,
+                    &[space.to_string()],
+                    &normalized_alias(surface),
+                )? {
+                    matches.insert(entity_key);
+                }
             }
-        }
-        if matches.len() > 1 {
-            return Err(Error::InvalidRequest {
-                message: format!(
-                    "graph entity {} matches multiple canonical entities",
-                    entity.entity_key
-                ),
-            });
-        }
-        let resolved_key = matches
-            .into_iter()
-            .next()
-            .unwrap_or_else(|| entity.entity_key.clone());
+            if matches.len() > 1 {
+                return Err(Error::InvalidRequest {
+                    message: format!(
+                        "graph entity {} matches multiple canonical entities",
+                        entity.entity_key
+                    ),
+                });
+            }
+            matches
+                .into_iter()
+                .next()
+                .unwrap_or_else(|| entity.entity_key.clone())
+        };
         if !seen_resolved.insert(resolved_key.clone()) {
             return Err(Error::InvalidRequest {
                 message: format!(

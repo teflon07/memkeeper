@@ -190,6 +190,7 @@ fn main() {
             let args = args.collect::<Vec<_>>();
             run_stats(&args)
         }
+        "local-usage" => run_local_usage(),
         "space-list" => {
             let args = args.collect::<Vec<_>>();
             run_space_list(&args)
@@ -419,6 +420,18 @@ fn run_stats(args: &[String]) -> i32 {
             )
         });
     print_result(command, started, result)
+}
+
+#[cfg(feature = "semantic")]
+fn run_local_usage() -> i32 {
+    println!("{}", memkeeper_embed::local_usage_report());
+    0
+}
+
+#[cfg(not(feature = "semantic"))]
+fn run_local_usage() -> i32 {
+    eprintln!("local usage requires the semantic build");
+    1
 }
 
 fn run_space_list(args: &[String]) -> i32 {
@@ -670,7 +683,7 @@ fn run_search(args: &[String]) -> i32 {
 }
 
 /// Pure fail-closed decision for the one-shot search path, mirroring serve's
-/// `runtime_semantic_guard`: refuse when the operator requires semantic
+/// the serve `guard`: refuse when the operator requires semantic
 /// retrieval but this request cannot be embedded — no caller-supplied vector
 /// (`request_has_embedding`) and no active embedder (`embed_active`, always
 /// false on a non-semantic build). Kept pure so it is unit-testable without
@@ -4320,6 +4333,7 @@ fn print_help() {
            init --store <path> --json             Initialize a local store.\n\
            doctor [--store <path>] --json         Diagnose binary/config/store readiness.\n\
            stats --store <path> --json            Show deterministic store stats.\n\
+           local-usage                              Show local model inference totals.\n\
            space-list --store <path> --json       List configured spaces.\n\
            space-create --store <path> --json '{{}}' Create a space and default silos.\n\
            silo-list --store <path> [--space <name>] --json List silos.\n\

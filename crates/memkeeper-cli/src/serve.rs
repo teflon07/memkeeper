@@ -9,114 +9,30 @@ use crate::output::*;
 #[allow(clippy::wildcard_imports)]
 use crate::requests::*;
 
-/// Serve posture when the binary's semantic capability is checked at startup.
+/// Serve posture for one capability (semantic build, embedder, reranker,
+/// `ColBERT`). Every subsystem answers the same three-way question, so they
+/// share one type; the per-subsystem rationale lives at each call site,
+/// because what differs is the operator-facing warning, not the decision.
 #[derive(Debug, PartialEq, Eq)]
-pub(crate) enum SemanticGuard {
-    /// Built with semantic features — serve normally.
+pub(crate) enum Guard {
+    /// Capability present — serve normally.
     Ok,
-    /// Non-semantic build, no hard requirement — serve FTS-only but warn loudly.
+    /// Capability absent, no hard requirement — serve degraded but warn loudly.
     Degraded,
-    /// Non-semantic build and `MEMKEEPER_REQUIRE_SEMANTIC` set — refuse to serve.
+    /// Capability absent and the operator required it — refuse to serve.
     Refuse,
 }
 
-/// Pure decision: given whether this binary was built with semantic features
-/// and whether the operator requires semantic, what should `serve` do? Kept
-/// pure so it is unit-testable without spawning a daemon.
-pub(crate) fn semantic_guard(semantic_built: bool, require_semantic: bool) -> SemanticGuard {
-    if semantic_built {
-        SemanticGuard::Ok
-    } else if require_semantic {
-        SemanticGuard::Refuse
+/// Pure decision shared by every serve guard: present wins, then a hard
+/// requirement refuses, otherwise degrade loudly. Kept pure so it is
+/// unit-testable without spawning a daemon.
+pub(crate) fn guard(active: bool, required: bool) -> Guard {
+    if active {
+        Guard::Ok
+    } else if required {
+        Guard::Refuse
     } else {
-        SemanticGuard::Degraded
-    }
-}
-
-/// Serve posture *after* models are loaded. A semantic build whose model files
-/// are missing at runtime (`MEMKEEPER_EMBED_MODEL_DIR` unset, or the files gone)
-/// silently produces no vectors and degrades retrieval to BM25 — the same silent
-/// failure the build-time guard exists to prevent, one layer deeper. This catches
-/// the runtime case so the daemon can refuse (or at least shout) instead of
-/// quietly serving worse results.
-#[cfg(feature = "embed")]
-#[derive(Debug, PartialEq, Eq)]
-pub(crate) enum RuntimeGuard {
-    /// Embedder loaded — serve normally.
-    Ok,
-    /// Models absent, no hard requirement — serve FTS-only but warn loudly.
-    Degraded,
-    /// Models absent and `MEMKEEPER_REQUIRE_SEMANTIC` set — refuse to serve.
-    Refuse,
-}
-
-/// Pure decision mirroring `semantic_guard`, but keyed on whether the embedder
-/// actually loaded rather than on the build features.
-#[cfg(feature = "embed")]
-pub(crate) fn runtime_semantic_guard(embed_active: bool, require_semantic: bool) -> RuntimeGuard {
-    if embed_active {
-        RuntimeGuard::Ok
-    } else if require_semantic {
-        RuntimeGuard::Refuse
-    } else {
-        RuntimeGuard::Degraded
-    }
-}
-
-/// Serve posture for the primary reranker once models are loaded. Missing models
-/// degrade loudly by default; `MEMKEEPER_REQUIRE_RERANK=1` makes the same condition
-/// fail closed for deployments that require cross-encoder ordering.
-#[derive(Debug, PartialEq, Eq)]
-pub(crate) enum RerankGuard {
-    /// Reranker loaded — rerank applies.
-    Ok,
-    /// Reranker absent, no hard requirement — serve plain order but warn (NOTE).
-    Degraded,
-    /// Reranker absent and `MEMKEEPER_REQUIRE_RERANK` set — refuse to serve.
-    Refuse,
-}
-
-/// Pure decision for the primary-reranker posture.
-pub(crate) fn rerank_guard(rerank_active: bool, require_rerank: bool) -> RerankGuard {
-    if rerank_active {
-        RerankGuard::Ok
-    } else if require_rerank {
-        RerankGuard::Refuse
-    } else {
-        RerankGuard::Degraded
-    }
-}
-
-/// Serve posture for the `ColBERT` late-interaction model. Unlike rerank, `ColBERT`
-/// is only loaded when the operator *explicitly* opts in with
-/// `MEMKEEPER_LATE_INTERACTION=1`, so a requested-but-absent model is a real
-/// misconfiguration: it is always loud, and refuses under
-/// `MEMKEEPER_REQUIRE_SEMANTIC` rather than silently skipping late-interaction.
-#[cfg(feature = "embed")]
-#[derive(Debug, PartialEq, Eq)]
-pub(crate) enum ColbertGuard {
-    /// Not requested (late-interaction off) or the model loaded — nothing to flag.
-    Ok,
-    /// Requested via `MEMKEEPER_LATE_INTERACTION` but absent — warn loudly (NOTE).
-    Degraded,
-    /// Requested + absent + `MEMKEEPER_REQUIRE_SEMANTIC` — refuse to serve.
-    Refuse,
-}
-
-/// Pure decision for the `ColBERT` posture, keyed on whether late-interaction was
-/// requested, whether the model loaded, and whether semantic is required.
-#[cfg(feature = "embed")]
-pub(crate) fn colbert_guard(
-    late_interaction: bool,
-    colbert_active: bool,
-    require_semantic: bool,
-) -> ColbertGuard {
-    if !late_interaction || colbert_active {
-        ColbertGuard::Ok
-    } else if require_semantic {
-        ColbertGuard::Refuse
-    } else {
-        ColbertGuard::Degraded
+        Guard::Degraded
     }
 }
 
@@ -300,23 +216,29 @@ fn apply_rerank_colbert_guards(
 ) -> Result<(), i32> {
     #[cfg(not(feature = "embed"))]
     let _ = require_semantic;
-    match rerank_guard(models.rerank_active(), require_rerank) {
-        RerankGuard::Ok => {}
-        RerankGuard::Degraded => warn_rerank_absent(false),
-        RerankGuard::Refuse => {
+    // Reranker: missing models degrade loudly by default; `MEMKEEPER_REQUIRE_RERANK`
+    // makes the same condition fail closed where cross-encoder ordering is required.
+    match guard(models.rerank_active(), require_rerank) {
+        Guard::Ok => {}
+        Guard::Degraded => warn_rerank_absent(false),
+        Guard::Refuse => {
             warn_rerank_absent(true);
             return Err(2);
         }
     }
+    // ColBERT: unlike rerank, it only loads when the operator *explicitly* opts in
+    // with `MEMKEEPER_LATE_INTERACTION=1`, so requested-but-absent is a real
+    // misconfiguration — always loud, and refusing under `MEMKEEPER_REQUIRE_SEMANTIC`
+    // rather than silently skipping late-interaction. Hence "active" here means
+    // not-requested OR loaded.
     #[cfg(feature = "embed")]
-    match colbert_guard(
-        crate::late_interaction_enabled(),
-        models.colbert_active(),
+    match guard(
+        !crate::late_interaction_enabled() || models.colbert_active(),
         require_semantic,
     ) {
-        ColbertGuard::Ok => {}
-        ColbertGuard::Degraded => warn_colbert_absent(false),
-        ColbertGuard::Refuse => {
+        Guard::Ok => {}
+        Guard::Degraded => warn_colbert_absent(false),
+        Guard::Refuse => {
             warn_colbert_absent(true);
             return Err(2);
         }
@@ -369,10 +291,11 @@ fn capture_adjudication_startup_note(require: bool) -> Option<&'static str> {
 pub(crate) fn serve_semantic_models_or_refuse() -> Result<SemanticModels, i32> {
     let require_semantic = require_semantic_env();
     let require_rerank = require_rerank_env();
-    match semantic_guard(cfg!(feature = "embed"), require_semantic) {
-        SemanticGuard::Ok => {}
-        SemanticGuard::Degraded => warn_non_semantic(false),
-        SemanticGuard::Refuse => {
+    // First guard, build time: a non-semantic binary serves FTS-only.
+    match guard(cfg!(feature = "embed"), require_semantic) {
+        Guard::Ok => {}
+        Guard::Degraded => warn_non_semantic(false),
+        Guard::Refuse => {
             warn_non_semantic(true);
             return Err(2);
         }
@@ -382,10 +305,10 @@ pub(crate) fn serve_semantic_models_or_refuse() -> Result<SemanticModels, i32> {
     // Second guard, one layer deeper: a semantic build whose model files are
     // missing at runtime would silently serve BM25. Refuse (or shout) instead.
     #[cfg(feature = "embed")]
-    match runtime_semantic_guard(semantic_models.embed_active(), require_semantic) {
-        RuntimeGuard::Ok => {}
-        RuntimeGuard::Degraded => warn_models_absent(false),
-        RuntimeGuard::Refuse => {
+    match guard(semantic_models.embed_active(), require_semantic) {
+        Guard::Ok => {}
+        Guard::Degraded => warn_models_absent(false),
+        Guard::Refuse => {
             warn_models_absent(true);
             return Err(2);
         }
@@ -401,10 +324,11 @@ pub(crate) fn serve_semantic_models_or_refuse() -> Result<SemanticModels, i32> {
 pub(crate) fn run_serve(args: &[String]) -> i32 {
     let require_semantic = require_semantic_env();
     let require_rerank = require_rerank_env();
-    match semantic_guard(cfg!(feature = "embed"), require_semantic) {
-        SemanticGuard::Ok => {}
-        SemanticGuard::Degraded => warn_non_semantic(false),
-        SemanticGuard::Refuse => {
+    // First guard, build time: a non-semantic binary serves FTS-only.
+    match guard(cfg!(feature = "embed"), require_semantic) {
+        Guard::Ok => {}
+        Guard::Degraded => warn_non_semantic(false),
+        Guard::Refuse => {
             warn_non_semantic(true);
             return 2;
         }
@@ -426,10 +350,10 @@ pub(crate) fn run_serve(args: &[String]) -> i32 {
     // Second guard, one layer deeper: a semantic build whose model files are
     // missing at runtime would silently serve BM25. Refuse (or shout) instead.
     #[cfg(feature = "embed")]
-    match runtime_semantic_guard(semantic_models.embed_active(), require_semantic) {
-        RuntimeGuard::Ok => {}
-        RuntimeGuard::Degraded => warn_models_absent(false),
-        RuntimeGuard::Refuse => {
+    match guard(semantic_models.embed_active(), require_semantic) {
+        Guard::Ok => {}
+        Guard::Degraded => warn_models_absent(false),
+        Guard::Refuse => {
             warn_models_absent(true);
             return 2;
         }
@@ -1225,23 +1149,14 @@ mod tests {
         assert!(capture_adjudication_startup_note(false).is_none());
     }
 
-    #[cfg(feature = "embed")]
     #[test]
-    fn runtime_guard_serves_when_embedder_loaded() {
-        assert_eq!(runtime_semantic_guard(true, false), RuntimeGuard::Ok);
-        assert_eq!(runtime_semantic_guard(true, true), RuntimeGuard::Ok);
-    }
-
-    #[cfg(feature = "embed")]
-    #[test]
-    fn runtime_guard_refuses_when_required_and_models_absent() {
-        assert_eq!(runtime_semantic_guard(false, true), RuntimeGuard::Refuse);
-    }
-
-    #[cfg(feature = "embed")]
-    #[test]
-    fn runtime_guard_degrades_loud_when_models_absent_and_not_required() {
-        assert_eq!(runtime_semantic_guard(false, false), RuntimeGuard::Degraded);
+    fn guard_truth_table() {
+        // One table for every serve guard: present wins, then require refuses,
+        // otherwise degrade loudly. Never silently serve worse results.
+        assert_eq!(guard(true, false), Guard::Ok);
+        assert_eq!(guard(true, true), Guard::Ok);
+        assert_eq!(guard(false, false), Guard::Degraded);
+        assert_eq!(guard(false, true), Guard::Refuse);
     }
 
     #[test]

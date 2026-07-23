@@ -77,6 +77,11 @@ mod colbert;
 pub use colbert::ColBertModel;
 pub use colbert::{colbert_from_env, TokenEmbedder};
 
+#[cfg(feature = "local")]
+mod metrics;
+#[cfg(feature = "local")]
+pub use metrics::report as local_usage_report;
+
 /// Default embedding dimension of the shipping local model
 /// (mxbai-embed-large-v1) and the default requested from API providers.
 pub const DEFAULT_EMBED_DIMS: usize = 1024;
@@ -427,7 +432,7 @@ impl EmbedModel {
         let needs_token_type_ids =
             declares_token_type_ids(session.inputs().iter().map(ort::value::Outlet::name));
         let max_seq_len = embed_max_seq_len();
-        let probe = Self::run_session(
+        let (probe, _) = Self::run_session(
             &mut session,
             &tokenizer,
             &["probe"],
@@ -461,14 +466,25 @@ impl EmbedModel {
     ///
     /// Returns an error if tokenization or the ONNX inference run fails.
     pub fn embed(&mut self, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
-        Self::run_session(
+        let started = std::time::Instant::now();
+        let result = Self::run_session(
             &mut self.session,
             &self.tokenizer,
             texts,
             self.pooling,
             self.needs_token_type_ids,
             self.max_seq_len,
-        )
+        );
+        let tokens = result.as_ref().map_or(0, |(_, tokens)| *tokens);
+        metrics::record(
+            &self.model_id,
+            "embed",
+            texts.len(),
+            tokens,
+            u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+            result.is_ok(),
+        );
+        result.map(|(embeddings, _)| embeddings)
     }
 
     /// Embed a single text.
@@ -488,10 +504,10 @@ impl EmbedModel {
         pooling: Pooling,
         needs_token_type_ids: bool,
         max_seq_len: usize,
-    ) -> Result<Vec<Vec<f32>>> {
+    ) -> Result<(Vec<Vec<f32>>, usize)> {
         let batch_size = texts.len();
         if batch_size == 0 {
-            return Ok(vec![]);
+            return Ok((vec![], 0));
         }
 
         let encodings: Vec<_> = texts
@@ -509,6 +525,10 @@ impl EmbedModel {
             .max()
             .unwrap_or(1)
             .min(max_seq_len);
+        let token_count = encodings
+            .iter()
+            .map(|e| e.get_ids().len().min(max_seq_len))
+            .sum();
 
         for enc in &encodings {
             if enc.get_ids().len() > max_seq_len {
@@ -597,7 +617,7 @@ impl EmbedModel {
             }
             embeddings.push(pooled);
         }
-        Ok(embeddings)
+        Ok((embeddings, token_count))
     }
 }
 
@@ -668,6 +688,7 @@ impl RerankerModel {
         if documents.is_empty() {
             return Ok(vec![]);
         }
+        let started = std::time::Instant::now();
         let batch_size = documents.len();
         let encodings: Vec<_> = documents
             .iter()
@@ -684,6 +705,10 @@ impl RerankerModel {
             .max()
             .unwrap_or(1)
             .min(MAX_SEQ_LEN);
+        let token_count = encodings
+            .iter()
+            .map(|e| e.get_ids().len().min(MAX_SEQ_LEN))
+            .sum();
 
         for enc in &encodings {
             if enc.get_ids().len() > MAX_SEQ_LEN {
@@ -753,6 +778,14 @@ impl RerankerModel {
                 })
                 .collect()
         };
+        metrics::record(
+            &self.model_id,
+            "rerank",
+            documents.len(),
+            token_count,
+            u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+            true,
+        );
         Ok(scores)
     }
 }

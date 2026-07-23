@@ -5,6 +5,9 @@
 <p align="center"><em>Most software has the memory of a goldfish. This one doesn&rsquo;t.</em></p>
 
 <p align="center">
+  <a href="https://github.com/teflon07/memkeeper/actions/workflows/ci.yml"><img src="https://github.com/teflon07/memkeeper/actions/workflows/ci.yml/badge.svg" alt="CI status" /></a>
+  <a href="https://github.com/teflon07/memkeeper/releases"><img src="https://img.shields.io/github/v/release/teflon07/memkeeper?sort=semver" alt="Latest release" /></a>
+  <a href="#license"><img src="https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue" alt="License: MIT OR Apache-2.0" /></a>
   <a href="https://glama.ai/mcp/servers/teflon07/memkeeper"><img src="https://glama.ai/mcp/servers/teflon07/memkeeper/badges/score.svg" alt="memkeeper MCP server quality score on Glama" /></a>
 </p>
 
@@ -35,7 +38,7 @@ no required network or LLM calls.
 
 <p align="center"><sub>Real CLI output, formatted for readability via <a href="scripts/mkfmt"><code>scripts/mkfmt</code></a>. The search query shares no keywords with the memory it surfaces.</sub></p>
 
-> Status: pre-release (v0.5.2). APIs and the wire protocol may change before 1.0.
+> Status: pre-release (v0.5.3). APIs and the wire protocol may change before 1.0.
 
 ## Quickstart
 
@@ -63,7 +66,7 @@ pitfalls (handy in Windows PowerShell).
 
 ## Upgrade from v0.2.x
 
-v0.3.0 introduced the schema 5 to schema 6 upgrade; v0.4.0 through v0.5.2 keep
+v0.3.0 introduced the schema 5 to schema 6 upgrade; v0.4.0 through v0.5.3 keep
 schema 6 unchanged. The migration is transactional, but schema 6 stores cannot
 be opened by v0.2.x. Stop any long-running `memkeeper` process and keep a
 schema 5 backup until you verify the upgrade.

@@ -1512,24 +1512,9 @@ fn default_build_includes_semantic() {
     );
 }
 
-#[test]
-fn semantic_guard_decides_serve_posture() {
-    use super::serve::{semantic_guard, SemanticGuard};
-    assert_eq!(semantic_guard(true, false), SemanticGuard::Ok);
-    assert_eq!(semantic_guard(true, true), SemanticGuard::Ok);
-    assert_eq!(semantic_guard(false, false), SemanticGuard::Degraded);
-    assert_eq!(semantic_guard(false, true), SemanticGuard::Refuse);
-}
-
-#[cfg(feature = "embed")]
-#[test]
-fn rerank_guard_refuses_when_primary_required() {
-    use super::serve::{rerank_guard, RerankGuard};
-    assert_eq!(rerank_guard(true, false), RerankGuard::Ok);
-    assert_eq!(rerank_guard(true, true), RerankGuard::Ok);
-    assert_eq!(rerank_guard(false, false), RerankGuard::Degraded);
-    assert_eq!(rerank_guard(false, true), RerankGuard::Refuse);
-}
+// The shared `guard` truth table (semantic build, embedder, reranker) is covered
+// by `serve::tests::guard_truth_table`. Only ColBERT's composed condition, below,
+// needs its own case.
 
 #[test]
 fn required_reranker_only_refuses_requested_missing_path() {
@@ -1543,17 +1528,22 @@ fn required_reranker_only_refuses_requested_missing_path() {
 #[test]
 fn colbert_guard_refuses_only_when_explicitly_required() {
     // ColBERT is loaded only on the explicit MEMKEEPER_LATE_INTERACTION opt-in, so
-    // a requested-but-absent model is always loud and refuses under require.
-    use super::serve::{colbert_guard, ColbertGuard};
+    // a requested-but-absent model is always loud and refuses under require. That
+    // makes its "active" input the composed `!late_interaction || colbert_active`
+    // used at the call site; this pins that composition, not the shared table.
+    use super::serve::{guard, Guard};
+    let colbert = |late_interaction: bool, colbert_active: bool, require: bool| {
+        guard(!late_interaction || colbert_active, require)
+    };
     // Not requested: never flagged, regardless of require.
-    assert_eq!(colbert_guard(false, false, false), ColbertGuard::Ok);
-    assert_eq!(colbert_guard(false, false, true), ColbertGuard::Ok);
+    assert_eq!(colbert(false, false, false), Guard::Ok);
+    assert_eq!(colbert(false, false, true), Guard::Ok);
     // Requested and loaded: fine.
-    assert_eq!(colbert_guard(true, true, false), ColbertGuard::Ok);
-    assert_eq!(colbert_guard(true, true, true), ColbertGuard::Ok);
+    assert_eq!(colbert(true, true, false), Guard::Ok);
+    assert_eq!(colbert(true, true, true), Guard::Ok);
     // Requested but absent: loud NOTE by default, refuse under require.
-    assert_eq!(colbert_guard(true, false, false), ColbertGuard::Degraded);
-    assert_eq!(colbert_guard(true, false, true), ColbertGuard::Refuse);
+    assert_eq!(colbert(true, false, false), Guard::Degraded);
+    assert_eq!(colbert(true, false, true), Guard::Refuse);
 }
 
 #[test]

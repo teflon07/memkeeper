@@ -153,24 +153,38 @@ mod local {
         }
 
         fn encode_query(&mut self, text: &str) -> Result<Vec<Vec<f32>>> {
+            let started = std::time::Instant::now();
             let mut ids = self.tokenize_with_prefix(
                 text,
                 self.config.query_prefix_id,
                 self.config.query_length,
             )?;
+            let tokens = ids.len();
             let mut mask = vec![1u32; ids.len()];
             let attend = u32::from(self.config.attend_to_expansion_tokens);
             while ids.len() < self.config.query_length {
                 ids.push(self.config.mask_token_id);
                 mask.push(attend);
             }
-            Ok(self.run(&[ids], &[mask])?.pop().unwrap_or_default())
+            let result = self
+                .run(&[ids], &[mask])
+                .map(|mut encoded| encoded.pop().unwrap_or_default());
+            super::super::metrics::record(
+                &self.config.model_id,
+                "colbert_query",
+                1,
+                tokens,
+                u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+                result.is_ok(),
+            );
+            result
         }
 
         fn encode_docs(&mut self, texts: &[&str]) -> Result<Vec<Vec<Vec<f32>>>> {
             if texts.is_empty() {
                 return Ok(vec![]);
             }
+            let started = std::time::Instant::now();
             let mut all_ids = Vec::with_capacity(texts.len());
             let mut all_masks = Vec::with_capacity(texts.len());
             for text in texts {
@@ -182,12 +196,21 @@ mod local {
                 all_masks.push(vec![1u32; ids.len()]);
                 all_ids.push(ids);
             }
+            let tokens: usize = all_ids.iter().map(Vec::len).sum();
             let mut encoded = self.run(&all_ids, &all_masks)?;
             // pylate drops skiplist (punctuation) tokens from DOC outputs only.
             for (doc, ids) in encoded.iter_mut().zip(&all_ids) {
                 let mut keep = ids.iter().map(|id| !self.skiplist_ids.contains(id));
                 doc.retain(|_| keep.next().unwrap_or(true));
             }
+            super::super::metrics::record(
+                &self.config.model_id,
+                "colbert_docs",
+                texts.len(),
+                tokens,
+                u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+                true,
+            );
             Ok(encoded)
         }
     }

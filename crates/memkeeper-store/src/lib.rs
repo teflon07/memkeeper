@@ -586,7 +586,7 @@ pub enum AdjudicationGuard {
     Refuse,
 }
 
-/// Pure decision mirroring `semantic_guard`: may a capture candidate be promoted
+/// Pure decision mirroring the serve `guard`: may a capture candidate be promoted
 /// given whether it carries an adjudication verdict and whether the deployment
 /// requires adjudication? Kept pure (no I/O) so it is unit-testable.
 #[must_use]
