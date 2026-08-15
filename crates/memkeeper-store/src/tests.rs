@@ -349,6 +349,7 @@ fn fts_uses_retrieval_representation_instead_of_summary() {
                 embedding: None,
                 query_token_embedding: None,
                 token_model_id: None,
+                maxsim_shortlist: 0,
             },
         )
         .expect("search succeeds")
@@ -1050,6 +1051,7 @@ fn prompt_read_ops_refuse_unrelated_wal_database_without_sidecars() {
             embedding: None,
             query_token_embedding: None,
             token_model_id: None,
+            maxsim_shortlist: 0,
         },
     )
     .expect_err("search should fail");
@@ -2673,6 +2675,7 @@ fn search_uses_semantic_fallback_when_fts_has_no_results() {
             embedding: Some(vec![0.25; crate::DEFAULT_SEMANTIC_EMBEDDING_DIMS]),
             query_token_embedding: None,
             token_model_id: None,
+            maxsim_shortlist: 0,
         },
     )
     .expect("search succeeds");
@@ -2714,6 +2717,7 @@ fn semantic_supports_non_default_embedding_dimension() {
             embedding: Some(vec![0.1_f32; dims]),
             query_token_embedding: None,
             token_model_id: None,
+            maxsim_shortlist: 0,
         },
     )
     .expect("search succeeds");
@@ -2779,6 +2783,7 @@ fn semantic_export_import_round_trip_rebuilds_vector_index() {
             embedding: Some(vec![0.3_f32; crate::DEFAULT_SEMANTIC_EMBEDDING_DIMS]),
             query_token_embedding: None,
             token_model_id: None,
+            maxsim_shortlist: 0,
         },
     )
     .expect("semantic search on imported store");
@@ -3003,6 +3008,7 @@ fn import_accepts_archive_without_schema_or_config_metadata() {
             embedding: None,
             query_token_embedding: None,
             token_model_id: None,
+            maxsim_shortlist: 0,
         },
     )
     .expect("search the restored store");
@@ -3115,6 +3121,7 @@ fn reembed_replaces_vectors_and_switches_active_model() {
             embedding: Some(vec![0.2_f32; new_dims]),
             query_token_embedding: None,
             token_model_id: None,
+            maxsim_shortlist: 0,
         },
     )
     .expect("search");
@@ -3158,6 +3165,7 @@ fn search_uses_fts_and_metadata_filters() {
             embedding: None,
             query_token_embedding: None,
             token_model_id: None,
+            maxsim_shortlist: 0,
         },
     )
     .expect("search succeeds");
@@ -3202,6 +3210,7 @@ fn search_matches_any_query_term_with_bm25_ranking() {
             embedding: None,
             query_token_embedding: None,
             token_model_id: None,
+            maxsim_shortlist: 0,
         },
     )
     .expect("search succeeds");
@@ -3248,6 +3257,7 @@ fn search_prefers_all_terms_before_any_term_fallback() {
             embedding: None,
             query_token_embedding: None,
             token_model_id: None,
+            maxsim_shortlist: 0,
         },
     )
     .expect("search succeeds");
@@ -3294,6 +3304,7 @@ fn search_falls_back_to_prefix_terms() {
             embedding: None,
             query_token_embedding: None,
             token_model_id: None,
+            maxsim_shortlist: 0,
         },
     )
     .expect("search succeeds");
@@ -3340,6 +3351,7 @@ fn search_prefix_fallback_fills_after_exact_matches() {
             embedding: None,
             query_token_embedding: None,
             token_model_id: None,
+            maxsim_shortlist: 0,
         },
     )
     .expect("search succeeds");
@@ -3386,6 +3398,7 @@ fn search_lexical_fallback_disabled_keeps_exact_only_results() {
             embedding: None,
             query_token_embedding: None,
             token_model_id: None,
+            maxsim_shortlist: 0,
         },
     )
     .expect("search succeeds");
@@ -3432,6 +3445,7 @@ fn search_matches_inflected_term_variants() {
             embedding: None,
             query_token_embedding: None,
             token_model_id: None,
+            maxsim_shortlist: 0,
         },
     )
     .expect("search succeeds");
@@ -3466,6 +3480,7 @@ fn search_matches_inflected_term_variants() {
             embedding: None,
             query_token_embedding: None,
             token_model_id: None,
+            maxsim_shortlist: 0,
         },
     )
     .expect("rebuilt search succeeds");
@@ -3506,6 +3521,7 @@ fn search_ignores_question_stopwords_and_possessive_artifacts() {
             embedding: None,
             query_token_embedding: None,
             token_model_id: None,
+            maxsim_shortlist: 0,
         },
     )
     .expect("search succeeds");
@@ -3631,6 +3647,7 @@ fn search_without_source_uses_source_free_bm25_score() {
             embedding: None,
             query_token_embedding: None,
             token_model_id: None,
+            maxsim_shortlist: 0,
         },
     )
     .expect("search succeeds");
@@ -3676,6 +3693,7 @@ fn search_without_source_does_not_match_source_only_terms() {
             embedding: None,
             query_token_embedding: None,
             token_model_id: None,
+            maxsim_shortlist: 0,
         },
     )
     .expect("no-source search succeeds");
@@ -3696,6 +3714,7 @@ fn search_without_source_does_not_match_source_only_terms() {
             embedding: None,
             query_token_embedding: None,
             token_model_id: None,
+            maxsim_shortlist: 0,
         },
     )
     .expect("mixed no-source search succeeds");
@@ -3718,6 +3737,7 @@ fn search_without_source_does_not_match_source_only_terms() {
             embedding: None,
             query_token_embedding: None,
             token_model_id: None,
+            maxsim_shortlist: 0,
         },
     )
     .expect("source-enabled search succeeds");
@@ -3770,6 +3790,7 @@ fn search_excludes_expired_and_past_valid_to_but_memory_list_keeps_them() {
             embedding: None,
             query_token_embedding: None,
             token_model_id: None,
+            maxsim_shortlist: 0,
         },
     )
     .expect("search succeeds");
@@ -3847,6 +3868,7 @@ fn search_defaults_to_active_workspace_and_supports_explicit_superseded_filter()
             embedding: None,
             query_token_embedding: None,
             token_model_id: None,
+            maxsim_shortlist: 0,
         },
     )
     .expect("search succeeds");
@@ -3877,6 +3899,7 @@ fn search_defaults_to_active_workspace_and_supports_explicit_superseded_filter()
             embedding: None,
             query_token_embedding: None,
             token_model_id: None,
+            maxsim_shortlist: 0,
         },
     )
     .expect("superseded search succeeds");
@@ -3915,6 +3938,7 @@ fn search_recency_boosts_newer_observed_and_updated_timestamps() {
             embedding: None,
             query_token_embedding: None,
             token_model_id: None,
+            maxsim_shortlist: 0,
         },
     )
     .expect("search succeeds");
@@ -3951,6 +3975,7 @@ fn search_recency_boosts_newer_observed_and_updated_timestamps() {
             embedding: None,
             query_token_embedding: None,
             token_model_id: None,
+            maxsim_shortlist: 0,
         },
     )
     .expect("updated search succeeds");
@@ -3996,6 +4021,7 @@ fn search_bm25_dominates_recency_when_relevance_is_stronger() {
             embedding: None,
             query_token_embedding: None,
             token_model_id: None,
+            maxsim_shortlist: 0,
         },
     )
     .expect("search succeeds");
@@ -4079,6 +4105,7 @@ fn search_scores_discriminate_and_do_not_saturate() {
             embedding: None,
             query_token_embedding: None,
             token_model_id: None,
+            maxsim_shortlist: 0,
         },
     )
     .expect("search succeeds");
@@ -4139,6 +4166,7 @@ fn search_sql_limit_uses_final_score_order() {
             embedding: None,
             query_token_embedding: None,
             token_model_id: None,
+            maxsim_shortlist: 0,
         },
     )
     .expect("search succeeds");
@@ -4187,6 +4215,7 @@ fn search_normalizes_trimmed_tag_filter() {
             embedding: None,
             query_token_embedding: None,
             token_model_id: None,
+            maxsim_shortlist: 0,
         },
     )
     .expect("search succeeds");
@@ -4289,6 +4318,7 @@ fn pack_builds_bounded_deduped_markdown_without_source() {
             query_embeddings: None,
             query_token_embeddings: None,
             token_model_id: None,
+            maxsim_shortlist: 0,
         },
     )
     .expect("pack succeeds");
@@ -4319,6 +4349,7 @@ fn pack_builds_bounded_deduped_markdown_without_source() {
             query_embeddings: None,
             query_token_embeddings: None,
             token_model_id: None,
+            maxsim_shortlist: 0,
         },
     )
     .expect("tiny pack succeeds");
@@ -4363,6 +4394,7 @@ fn pack_injects_truncated_top_memory_when_it_exceeds_char_budget() {
             query_embeddings: None,
             query_token_embeddings: None,
             token_model_id: None,
+            maxsim_shortlist: 0,
         },
     )
     .expect("pack succeeds");
@@ -4422,6 +4454,7 @@ fn pack_reports_per_memory_scores_aligned_with_ids() {
             query_embeddings: None,
             query_token_embeddings: None,
             token_model_id: None,
+            maxsim_shortlist: 0,
         },
     )
     .expect("pack");
@@ -4454,6 +4487,7 @@ fn pack_min_score_floor_filters_low_scoring_memories() {
         query_embeddings: None,
         query_token_embeddings: None,
         token_model_id: None,
+        maxsim_shortlist: 0,
     };
 
     let included = build_pack(&path, &make(0.0)).expect("pack without floor");
@@ -4491,6 +4525,7 @@ fn pack_pool_retains_query_variant_overlap_for_admitted_candidate() {
         query_embeddings: None,
         query_token_embeddings: None,
         token_model_id: None,
+        maxsim_shortlist: 0,
     };
 
     let pool = build_pack_pool(&path, &request).expect("pool builds");
@@ -4920,6 +4955,7 @@ fn evidence_graph_join_entity_span_and_seed_bounds_are_deterministic() {
         query_embeddings: None,
         query_token_embeddings: None,
         token_model_id: None,
+        maxsim_shortlist: 0,
     };
     let filters = super::evidence_join_filters(&request).expect("filters");
     let connection = Connection::open(&path).expect("open store");
@@ -5104,6 +5140,7 @@ fn evidence_graph_join_exact_entity_seed_recovers_endpoint_support() {
         query_embeddings: None,
         query_token_embeddings: None,
         token_model_id: None,
+        maxsim_shortlist: 0,
     };
     let off = build_hybrid_rerank_pool_with_evidence_options(
         &path,
@@ -5290,6 +5327,7 @@ fn evidence_graph_join_semantic_seed_recovers_two_hop_endpoint_support() {
         query_embeddings: None,
         query_token_embeddings: None,
         token_model_id: None,
+        maxsim_shortlist: 0,
     };
     let on = build_hybrid_rerank_pool_with_evidence_options(
         &path,
@@ -5392,6 +5430,7 @@ fn evidence_graph_join_ambiguous_entity_span_abstains() {
         query_embeddings: None,
         query_token_embeddings: None,
         token_model_id: None,
+        maxsim_shortlist: 0,
     };
     let off = build_hybrid_rerank_pool_with_evidence_options(
         &path,
@@ -5496,6 +5535,7 @@ fn evidence_graph_join_entity_seed_traverses_reverse_and_ignores_unmarked_routes
         query_embeddings: None,
         query_token_embeddings: None,
         token_model_id: None,
+        maxsim_shortlist: 0,
     };
     let on = build_hybrid_rerank_pool_with_evidence_options(
         &path,
@@ -5678,6 +5718,7 @@ fn evidence_graph_join_rejects_structural_inactive_expired_and_filtered_routes()
         query_embeddings: None,
         query_token_embeddings: None,
         token_model_id: None,
+        maxsim_shortlist: 0,
     };
     let pool = build_hybrid_rerank_pool_with_evidence_options(
         &path,
@@ -5741,6 +5782,7 @@ fn evidence_graph_join_invalid_routing_record_fails_visibly() {
         query_embeddings: None,
         query_token_embeddings: None,
         token_model_id: None,
+        maxsim_shortlist: 0,
     };
     let error = build_hybrid_rerank_pool_with_evidence_options(
         &path,
@@ -5768,6 +5810,7 @@ fn rerank_pack_request(max_memories: usize, max_chars: usize, min_score: f64) ->
         query_embeddings: None,
         query_token_embeddings: None,
         token_model_id: None,
+        maxsim_shortlist: 0,
     }
 }
 
@@ -6034,6 +6077,7 @@ fn pack_rejects_excessive_rerank_candidates() {
         query_embeddings: None,
         query_token_embeddings: None,
         token_model_id: None,
+        maxsim_shortlist: 0,
     };
     assert!(build_pack(&path, &request).is_err());
 
@@ -6081,6 +6125,7 @@ fn pack_round_robins_query_results_to_avoid_starving_later_queries() {
             query_embeddings: None,
             query_token_embeddings: None,
             token_model_id: None,
+            maxsim_shortlist: 0,
         },
     )
     .expect("pack succeeds");
@@ -6123,6 +6168,7 @@ fn pack_with_query_embedding_uses_ann_search() {
             query_embeddings: Some(vec![fake_embedding]),
             query_token_embeddings: None,
             token_model_id: None,
+            maxsim_shortlist: 0,
         },
     )
     .expect("pack with ANN embedding succeeds");
@@ -7373,6 +7419,7 @@ fn export_import_preserves_retrieval_representation() {
             embedding: None,
             query_token_embedding: None,
             token_model_id: None,
+            maxsim_shortlist: 0,
         },
     )
     .expect("search imported card");
@@ -7716,6 +7763,7 @@ fn import_accepts_v5_archive_with_identity_fallback() {
             embedding: None,
             query_token_embedding: None,
             token_model_id: None,
+            maxsim_shortlist: 0,
         },
     )
     .expect("source search");
@@ -7734,6 +7782,7 @@ fn import_accepts_v5_archive_with_identity_fallback() {
             embedding: None,
             query_token_embedding: None,
             token_model_id: None,
+            maxsim_shortlist: 0,
         },
     )
     .expect("target search");
@@ -8348,6 +8397,7 @@ fn batch_search_and_pack_reject_invalid_requests() {
             query_embeddings: None,
             query_token_embeddings: None,
             token_model_id: None,
+            maxsim_shortlist: 0,
         },
     )
     .expect_err("bad format should fail");
@@ -8377,6 +8427,7 @@ fn search_rejects_invalid_request() {
             embedding: None,
             query_token_embedding: None,
             token_model_id: None,
+            maxsim_shortlist: 0,
         },
     )
     .expect_err("invalid search should fail");
@@ -8397,6 +8448,7 @@ fn search_rejects_invalid_request() {
             embedding: None,
             query_token_embedding: None,
             token_model_id: None,
+            maxsim_shortlist: 0,
         },
     )
     .expect_err("oversized limit should fail");
@@ -8417,6 +8469,7 @@ fn search_rejects_invalid_request() {
             embedding: None,
             query_token_embedding: None,
             token_model_id: None,
+            maxsim_shortlist: 0,
         },
     )
     .expect_err("unknown lexical fallback should fail");
@@ -8583,6 +8636,7 @@ fn remember_graph_capture_uses_one_memory_as_atomic_routing_evidence() {
             query_embeddings: None,
             query_token_embeddings: None,
             token_model_id: None,
+            maxsim_shortlist: 0,
         },
         5,
         EvidenceJoinOptions::default(),
@@ -8822,6 +8876,7 @@ fn forget_tombstones_memory_and_history_hides_source_when_requested() {
             embedding: None,
             query_token_embedding: None,
             token_model_id: None,
+            maxsim_shortlist: 0,
         },
     )
     .expect("default search succeeds");
@@ -8845,6 +8900,7 @@ fn forget_tombstones_memory_and_history_hides_source_when_requested() {
             embedding: None,
             query_token_embedding: None,
             token_model_id: None,
+            maxsim_shortlist: 0,
         },
     )
     .expect("tombstoned search succeeds");
@@ -10309,6 +10365,7 @@ fn pack_marks_stale_volatile_external_state_memory() {
             query_embeddings: None,
             query_token_embeddings: None,
             token_model_id: None,
+            maxsim_shortlist: 0,
         },
     )
     .unwrap();
@@ -10354,6 +10411,7 @@ fn pack_marks_fresh_volatile_external_state_memory() {
             query_embeddings: None,
             query_token_embeddings: None,
             token_model_id: None,
+            maxsim_shortlist: 0,
         },
     )
     .unwrap();
@@ -10401,6 +10459,7 @@ fn pack_durable_memory_has_no_freshness_marker() {
             query_embeddings: None,
             query_token_embeddings: None,
             token_model_id: None,
+            maxsim_shortlist: 0,
         },
     )
     .unwrap();
@@ -10616,6 +10675,7 @@ fn widened_pool_surfaces_recent_volatile_above_older_durable() {
             embedding: None,
             query_token_embedding: None,
             token_model_id: None,
+            maxsim_shortlist: 0,
         },
     )
     .unwrap();
@@ -10785,6 +10845,7 @@ fn build_hybrid_rerank_pool_fetches_contents_on_one_snapshot() {
             query_embeddings: None,
             query_token_embeddings: None,
             token_model_id: None,
+            maxsim_shortlist: 0,
         },
         5,
     )
@@ -10849,6 +10910,7 @@ fn rerank_pool_always_materializes_canonical_content() {
         query_embeddings: dense.then(|| vec![vec![1.0, 0.0]]),
         query_token_embeddings: li.then(|| vec![vec![vec![1.0, 0.0]]]),
         token_model_id: li.then(|| model.to_string()),
+        maxsim_shortlist: 0,
     };
 
     let pool = build_hybrid_rerank_pool(&path, &request(true, true), 5).expect("LI pool builds");
@@ -10937,6 +10999,7 @@ fn hybrid_maxsim_applies_entity_filter_before_selection() {
             query_embeddings: None,
             query_token_embeddings: Some(vec![vec![vec![1.0, 0.0]]]),
             token_model_id: Some(model.to_string()),
+            maxsim_shortlist: 0,
         },
         1,
     )
@@ -11005,6 +11068,7 @@ fn semantic_maxsim_applies_entity_filter_before_selection() {
             embedding: Some(vec![1.0, 0.0, 0.0, 0.0]),
             query_token_embedding: Some(vec![vec![1.0, 0.0]]),
             token_model_id: Some(token_model.to_string()),
+            maxsim_shortlist: 0,
         },
     )
     .expect("semantic search succeeds");
@@ -11845,6 +11909,7 @@ fn representation_migration_search_ids(path: &Path) -> Vec<String> {
             embedding: None,
             query_token_embedding: None,
             token_model_id: None,
+            maxsim_shortlist: 0,
         },
     )
     .expect("lexical search")
@@ -11869,6 +11934,7 @@ fn representation_migration_pack_ids(path: &Path) -> Vec<String> {
             query_embeddings: None,
             query_token_embeddings: None,
             token_model_id: None,
+            maxsim_shortlist: 0,
         },
     )
     .expect("pack")
@@ -12995,6 +13061,7 @@ fn alias_tag_boost_outranks_topical_neighbor() {
             embedding: None,
             query_token_embedding: None,
             token_model_id: None,
+            maxsim_shortlist: 0,
         },
     )
     .expect("search succeeds");
@@ -13107,6 +13174,7 @@ fn search_ids_for_spaces(path: &Path, spaces: Vec<String>) -> Vec<String> {
             embedding: None,
             query_token_embedding: None,
             token_model_id: None,
+            maxsim_shortlist: 0,
         },
     )
     .expect("search succeeds");
@@ -13204,6 +13272,7 @@ fn cross_space_pack_pool_unions_all_spaces() {
                 query_embeddings: None,
                 query_token_embeddings: None,
                 token_model_id: None,
+                maxsim_shortlist: 0,
             },
         )
         .expect("pack pool")
@@ -13251,6 +13320,234 @@ fn write_paths_reject_all_spaces_sentinel() {
     )
     .expect_err("create_space(*) must fail");
     assert!(matches!(err, Error::InvalidRequest { .. }), "got {err:?}");
+
+    cleanup_store(&path);
+}
+
+/// Regression for the single-vector scope-starvation defect: the vec0 KNN
+/// used to take the GLOBAL top-k and only then apply scope filters via the
+/// join, so enough near-duplicate vectors in another space pushed every
+/// in-scope memory out of the pool and the semantic path returned nothing.
+/// The `rowid IN` prefilter restricts the KNN to eligible rowids up front.
+#[cfg(feature = "semantic")]
+#[test]
+fn search_semantic_prefilters_scope_before_global_top_k() {
+    let path = temp_store_path("search_semantic_prefilters_scope_before_global_top_k");
+    cleanup_store(&path);
+    init_store(&path).expect("init succeeds");
+    create_space(
+        &path,
+        &SpaceCreateRequest {
+            name: "other-notes".to_string(),
+            display_name: None,
+            description: None,
+            default_silo: None,
+            ontology: None,
+            config_json: None,
+            if_not_exists: false,
+        },
+    )
+    .expect("space create succeeds");
+
+    // 50 out-of-scope memories nearly identical to the query vector: more
+    // than the inflated candidate pool for limit=10 (42), so a global top-k
+    // is filled entirely by them.
+    for index in 0..50 {
+        let mut noise = basic_request(&format!("noise memory {index} in other space"));
+        noise.space = Some("other-notes".to_string());
+        noise.embedding = Some(vec![1.0, 0.000_1 * index_f32(index)]);
+        noise.embedding_model_id = Some("dense-prefilter-test".to_string());
+        remember_memory(&path, &noise).expect("remember noise memory");
+    }
+    let mut in_scope = basic_request("decision: the only in-scope semantic memory");
+    in_scope.embedding = Some(vec![0.6, 0.0]);
+    in_scope.embedding_model_id = Some("dense-prefilter-test".to_string());
+    let remembered = remember_memory(&path, &in_scope).expect("remember in-scope memory");
+
+    let report = search_memories(
+        &path,
+        &SearchRequest {
+            query: "zzz unmatched lexical tokens".to_string(),
+            filters: SearchFilters {
+                spaces: vec![DEFAULT_SPACE.to_string()],
+                ..SearchFilters::default()
+            },
+            limit: 10,
+            offset: 0,
+            snippet_chars: 80,
+            include_content: false,
+            include_source: false,
+            semantic_fallback: "fallback".to_string(),
+            lexical_fallback: "conservative".to_string(),
+            embedding: Some(vec![1.0, 0.0]),
+            query_token_embedding: None,
+            token_model_id: None,
+            maxsim_shortlist: 0,
+        },
+    )
+    .expect("search succeeds");
+
+    assert_eq!(report.strategy, "semantic_primary_v0");
+    assert_eq!(report.results.len(), 1, "in-scope memory must survive");
+    assert_eq!(report.results[0].memory_id, remembered.memory.id);
+
+    cleanup_store(&path);
+}
+
+#[cfg(feature = "semantic")]
+fn index_f32(index: usize) -> f32 {
+    u16::try_from(index).map(f32::from).unwrap_or(0.0)
+}
+
+/// The bounded shortlist restricts MaxSim to the top-N eligible memories by
+/// single-vector distance: a memory whose token matrix would win exhaustive
+/// MaxSim is excluded when its single vector is not in the shortlist, and
+/// included again with the cap at 0 (exhaustive default).
+#[cfg(feature = "semantic")]
+#[test]
+fn maxsim_shortlist_bounds_late_interaction_scan() {
+    let path = temp_store_path("maxsim_shortlist_bounds_late_interaction_scan");
+    cleanup_store(&path);
+    init_store(&path).expect("init succeeds");
+
+    let model = "colbert-shortlist-test";
+    let mut near = basic_request("alpha memory near the dense query");
+    near.embedding = Some(vec![1.0, 0.0]);
+    near.embedding_model_id = Some("dense-shortlist-test".to_string());
+    let near = remember_memory(&path, &near).expect("remember near");
+    let mut close = basic_request("beta memory close to the dense query");
+    close.embedding = Some(vec![0.9, 0.1]);
+    close.embedding_model_id = Some("dense-shortlist-test".to_string());
+    let close = remember_memory(&path, &close).expect("remember close");
+    let mut far = basic_request("gamma memory far from the dense query");
+    far.embedding = Some(vec![0.0, 1.0]);
+    far.embedding_model_id = Some("dense-shortlist-test".to_string());
+    let far = remember_memory(&path, &far).expect("remember far");
+
+    {
+        let connection = Connection::open(&path).expect("open");
+        upsert_memory_token_embedding(&connection, &near.memory.id, model, &[vec![1.0, 0.0]])
+            .expect("tokens near");
+        upsert_memory_token_embedding(&connection, &close.memory.id, model, &[vec![1.0, 0.0]])
+            .expect("tokens close");
+        // The far memory's tokens match the query tokens exactly: exhaustive
+        // MaxSim always selects it.
+        upsert_memory_token_embedding(&connection, &far.memory.id, model, &[vec![0.0, 1.0]])
+            .expect("tokens far");
+    }
+
+    let search = |maxsim_shortlist: usize| {
+        search_memories(
+            &path,
+            &SearchRequest {
+                query: "zzz unmatched lexical tokens".to_string(),
+                filters: SearchFilters::default(),
+                limit: 2,
+                offset: 0,
+                snippet_chars: 80,
+                include_content: false,
+                include_source: false,
+                semantic_fallback: "fallback".to_string(),
+                lexical_fallback: "conservative".to_string(),
+                embedding: Some(vec![1.0, 0.0]),
+                query_token_embedding: Some(vec![vec![0.0, 1.0]]),
+                token_model_id: Some(model.to_string()),
+                maxsim_shortlist,
+            },
+        )
+        .expect("search succeeds")
+    };
+
+    let exhaustive = search(0);
+    assert_eq!(exhaustive.strategy, "semantic_primary_v0");
+    assert!(
+        exhaustive
+            .results
+            .iter()
+            .any(|result| result.memory_id == far.memory.id),
+        "exhaustive MaxSim must select the token-matching memory"
+    );
+
+    let bounded = search(2);
+    assert_eq!(bounded.strategy, "semantic_primary_v0");
+    assert!(
+        bounded
+            .results
+            .iter()
+            .all(|result| result.memory_id != far.memory.id),
+        "shortlist of 2 must exclude the memory outside the dense top-2"
+    );
+    assert_eq!(bounded.results.len(), 2);
+
+    cleanup_store(&path);
+}
+
+/// Eligible memories with a token matrix but no single vector cannot be
+/// ranked by the shortlist, so they stay eligible for MaxSim instead of
+/// being silently dropped by the cap.
+#[cfg(feature = "semantic")]
+#[test]
+fn maxsim_shortlist_retains_memories_without_single_vectors() {
+    let path = temp_store_path("maxsim_shortlist_retains_memories_without_single_vectors");
+    cleanup_store(&path);
+    init_store(&path).expect("init succeeds");
+
+    let model = "colbert-vectorless-test";
+    let mut near = basic_request("alpha memory near the dense query");
+    near.embedding = Some(vec![1.0, 0.0]);
+    near.embedding_model_id = Some("dense-vectorless-test".to_string());
+    let near = remember_memory(&path, &near).expect("remember near");
+    // A second vectored memory so the eligible set (3) exceeds the cap (1).
+    let mut close = basic_request("beta memory close to the dense query");
+    close.embedding = Some(vec![0.9, 0.1]);
+    close.embedding_model_id = Some("dense-vectorless-test".to_string());
+    let close = remember_memory(&path, &close).expect("remember close");
+    let close_id = close.memory.id;
+    let vectorless =
+        remember_memory(&path, &basic_request("delta memory without a single vector"))
+            .expect("remember vectorless");
+
+    {
+        let connection = Connection::open(&path).expect("open");
+        upsert_memory_token_embedding(&connection, &near.memory.id, model, &[vec![1.0, 0.0]])
+            .expect("tokens near");
+        upsert_memory_token_embedding(&connection, &close_id, model, &[vec![1.0, 0.0]])
+            .expect("tokens close");
+        upsert_memory_token_embedding(
+            &connection,
+            &vectorless.memory.id,
+            model,
+            &[vec![0.0, 1.0]],
+        )
+        .expect("tokens vectorless");
+    }
+
+    let report = search_memories(
+        &path,
+        &SearchRequest {
+            query: "zzz unmatched lexical tokens".to_string(),
+            filters: SearchFilters::default(),
+            limit: 1,
+            offset: 0,
+            snippet_chars: 80,
+            include_content: false,
+            include_source: false,
+            semantic_fallback: "fallback".to_string(),
+            lexical_fallback: "conservative".to_string(),
+            embedding: Some(vec![1.0, 0.0]),
+            query_token_embedding: Some(vec![vec![0.0, 1.0]]),
+            token_model_id: Some(model.to_string()),
+            maxsim_shortlist: 1,
+        },
+    )
+    .expect("search succeeds");
+
+    assert_eq!(report.strategy, "semantic_primary_v0");
+    assert_eq!(report.results.len(), 1);
+    assert_eq!(
+        report.results[0].memory_id, vectorless.memory.id,
+        "the vectorless memory must remain MaxSim-eligible under the cap"
+    );
 
     cleanup_store(&path);
 }

@@ -6,6 +6,32 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html) once it reache
 1.0. Until then, minor releases may include breaking changes to the storage
 schema and wire protocol.
 
+## [Unreleased]
+
+### Added
+- **Bounded MaxSim shortlist (opt-in).** Late-interaction selection can now be
+  capped: `maxsim_shortlist` on `search`/`pack` requests (daemon default via
+  `MEMKEEPER_MAXSIM_SHORTLIST`) restricts MaxSim scoring to the top-N eligible
+  memories by single-vector distance, bounding the exhaustive scan whose cost
+  grows linearly with the store. Eligible memories without a single vector stay
+  MaxSim-eligible, and the shortlist KNN is scope-filtered before top-N
+  selection. The default (`0`) keeps the exhaustive scan; any nonzero cap is a
+  recall-affecting change that should pass the frozen LoCoMo gate before
+  adoption.
+
+### Fixed
+- **Single-vector semantic search prefilters scope before top-k.** The vec0 KNN
+  previously selected a global top-k and only then applied scope filters, so
+  enough near vectors in other spaces could crowd every in-scope memory out of
+  the candidate pool and silently empty the semantic result set. The KNN is now
+  restricted to eligible rowids (`rowid IN` prefilter) so out-of-scope growth
+  cannot starve scoped queries.
+
+### Compatibility
+- No storage schema, embedding model, reranker model, provider default, or local
+  model requirement changed. Requests that omit `maxsim_shortlist` (and daemons
+  without `MEMKEEPER_MAXSIM_SHORTLIST`) behave exactly as before.
+
 ## [0.5.3] - 2026-07-23
 
 ### Added

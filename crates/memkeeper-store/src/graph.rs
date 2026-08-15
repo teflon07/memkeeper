@@ -843,6 +843,7 @@ fn graph_context_on_connection(
         query_embeddings: None,
         query_token_embeddings: None,
         token_model_id: None,
+        maxsim_shortlist: 0,
     };
     let selected_len = results.len().min(request.max_memories);
     let graph_last_synth: Option<String> = connection
