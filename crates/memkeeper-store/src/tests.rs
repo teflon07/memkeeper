@@ -13503,9 +13503,11 @@ fn maxsim_shortlist_retains_memories_without_single_vectors() {
     close.embedding_model_id = Some("dense-vectorless-test".to_string());
     let close = remember_memory(&path, &close).expect("remember close");
     let close_id = close.memory.id;
-    let vectorless =
-        remember_memory(&path, &basic_request("delta memory without a single vector"))
-            .expect("remember vectorless");
+    let vectorless = remember_memory(
+        &path,
+        &basic_request("delta memory without a single vector"),
+    )
+    .expect("remember vectorless");
 
     {
         let connection = Connection::open(&path).expect("open");
@@ -13513,13 +13515,8 @@ fn maxsim_shortlist_retains_memories_without_single_vectors() {
             .expect("tokens near");
         upsert_memory_token_embedding(&connection, &close_id, model, &[vec![1.0, 0.0]])
             .expect("tokens close");
-        upsert_memory_token_embedding(
-            &connection,
-            &vectorless.memory.id,
-            model,
-            &[vec![0.0, 1.0]],
-        )
-        .expect("tokens vectorless");
+        upsert_memory_token_embedding(&connection, &vectorless.memory.id, model, &[vec![0.0, 1.0]])
+            .expect("tokens vectorless");
     }
 
     let report = search_memories(

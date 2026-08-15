@@ -862,9 +862,8 @@ fn search_json_parses_filters_and_bounds() {
 
 #[test]
 fn search_and_pack_json_parse_maxsim_shortlist() {
-    let request =
-        search_request_from_json(r#"{"query":"sqlite memory","maxsim_shortlist":128}"#)
-            .expect("parse succeeds");
+    let request = search_request_from_json(r#"{"query":"sqlite memory","maxsim_shortlist":128}"#)
+        .expect("parse succeeds");
     assert_eq!(request.maxsim_shortlist, 128);
 
     // Explicit 0 forces the exhaustive scan; omitting the field falls back to
@@ -873,10 +872,8 @@ fn search_and_pack_json_parse_maxsim_shortlist() {
         .expect("parse succeeds");
     assert_eq!(exhaustive.maxsim_shortlist, 0);
 
-    let pack = pack_request_from_json(
-        r#"{"title":"t","queries":["q"],"maxsim_shortlist":64}"#,
-    )
-    .expect("parse succeeds");
+    let pack = pack_request_from_json(r#"{"title":"t","queries":["q"],"maxsim_shortlist":64}"#)
+        .expect("parse succeeds");
     assert_eq!(pack.maxsim_shortlist, 64);
 }
 
