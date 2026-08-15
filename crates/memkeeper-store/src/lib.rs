@@ -3207,39 +3207,25 @@ fn build_hybrid_rerank_pool_with_evidence_options_on_connection(
         (Some(token_queries), Some(token_model)) if !token_queries.is_empty() => {
             let filters = prepare_recall_filters(&pool_request.filters)?;
             let eligible_ids = memory_ids_matching_filters(connection, &filters)?;
-            // Bounded shortlist (see semantic_candidates_late_interaction):
-            // per query, when that query's dense embedding is available to
-            // rank by. Queries without a dense embedding stay exhaustive.
-            let cap = pool_request.maxsim_shortlist;
-            let dense_for_index = |query_index: usize| -> Option<&Vec<f32>> {
-                pool_request
-                    .query_embeddings
-                    .as_ref()
-                    .filter(|embeddings| embeddings.len() == token_queries.len())
-                    .map(|embeddings| &embeddings[query_index])
-            };
             let mut per_query = Vec::with_capacity(token_queries.len());
             for (query_index, tokens) in token_queries.iter().enumerate() {
-                let shortlisted;
-                let query_eligible = match dense_for_index(query_index) {
-                    Some(dense) if cap > 0 && eligible_ids.len() > cap => {
-                        let table = semantic_table_for_dims(dense.len())?;
-                        if table_exists(connection, &table)? {
-                            shortlisted = maxsim_shortlist_ids(
-                                connection,
-                                &table,
-                                dense,
-                                &filters,
-                                &eligible_ids,
-                                cap.max(pool_width),
-                            )?;
-                            &shortlisted
-                        } else {
-                            &eligible_ids
-                        }
-                    }
-                    _ => &eligible_ids,
-                };
+                // Bounded shortlist (see semantic_candidates_late_interaction):
+                // per query, when that query's dense embedding is available to
+                // rank by. Queries without a dense embedding stay exhaustive,
+                // as do non-semantic builds (no vec0 table to shortlist from).
+                #[cfg(feature = "semantic")]
+                let shortlisted = pack_maxsim_shortlist(
+                    connection,
+                    &pool_request,
+                    &filters,
+                    &eligible_ids,
+                    token_queries.len(),
+                    query_index,
+                    pool_width,
+                )?;
+                #[cfg(not(feature = "semantic"))]
+                let shortlisted: Option<BTreeSet<String>> = None;
+                let query_eligible = shortlisted.as_ref().unwrap_or(&eligible_ids);
                 per_query.push(maxsim_candidates(
                     connection,
                     tokens,
@@ -3543,6 +3529,51 @@ fn maxsim_shortlist_ids(
         }
     }
     Ok(shortlist)
+}
+
+/// Pack-path wrapper for `maxsim_shortlist_ids`: returns `Some(shortlist)`
+/// when the cap is active and this query has a dense embedding to rank by
+/// (`query_embeddings` aligned with the token queries), `None` to keep the
+/// exhaustive eligible set.
+///
+/// # Errors
+///
+/// Returns an error on `SQLite` failure.
+#[cfg(feature = "semantic")]
+fn pack_maxsim_shortlist(
+    connection: &Connection,
+    pool_request: &PackRequest,
+    filters: &SearchFilters,
+    eligible_ids: &BTreeSet<String>,
+    query_count: usize,
+    query_index: usize,
+    pool_width: usize,
+) -> Result<Option<BTreeSet<String>>> {
+    let cap = pool_request.maxsim_shortlist;
+    if cap == 0 || eligible_ids.len() <= cap {
+        return Ok(None);
+    }
+    let Some(dense) = pool_request
+        .query_embeddings
+        .as_ref()
+        .filter(|embeddings| embeddings.len() == query_count)
+        .map(|embeddings| &embeddings[query_index])
+    else {
+        return Ok(None);
+    };
+    let table = semantic_table_for_dims(dense.len())?;
+    if !table_exists(connection, &table)? {
+        return Ok(None);
+    }
+    maxsim_shortlist_ids(
+        connection,
+        &table,
+        dense,
+        filters,
+        eligible_ids,
+        cap.max(pool_width),
+    )
+    .map(Some)
 }
 
 /// Interleave per-query candidate pools rank-by-rank, deduplicating by memory

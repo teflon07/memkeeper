@@ -13396,12 +13396,12 @@ fn search_semantic_prefilters_scope_before_global_top_k() {
 
 #[cfg(feature = "semantic")]
 fn index_f32(index: usize) -> f32 {
-    u16::try_from(index).map(f32::from).unwrap_or(0.0)
+    u16::try_from(index).map_or(0.0, f32::from)
 }
 
-/// The bounded shortlist restricts MaxSim to the top-N eligible memories by
+/// The bounded shortlist restricts `MaxSim` to the top-N eligible memories by
 /// single-vector distance: a memory whose token matrix would win exhaustive
-/// MaxSim is excluded when its single vector is not in the shortlist, and
+/// `MaxSim` is excluded when its single vector is not in the shortlist, and
 /// included again with the cap at 0 (exhaustive default).
 #[cfg(feature = "semantic")]
 #[test]
@@ -13483,7 +13483,7 @@ fn maxsim_shortlist_bounds_late_interaction_scan() {
 }
 
 /// Eligible memories with a token matrix but no single vector cannot be
-/// ranked by the shortlist, so they stay eligible for MaxSim instead of
+/// ranked by the shortlist, so they stay eligible for `MaxSim` instead of
 /// being silently dropped by the cap.
 #[cfg(feature = "semantic")]
 #[test]
