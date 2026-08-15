@@ -460,6 +460,7 @@ pub(crate) fn search_request_from_json(input: &str) -> Result<SearchRequest, Cli
             "embedding",
             "rerank",
             "rerank_candidates",
+            "maxsim_shortlist",
         ],
     )?;
     let filters = match object.get("filters") {
@@ -490,7 +491,21 @@ pub(crate) fn search_request_from_json(input: &str) -> Result<SearchRequest, Cli
         // Token embeddings are computed CLI-side (never accepted over the wire).
         query_token_embedding: None,
         token_model_id: None,
+        // Explicit 0 forces the exhaustive MaxSim scan even when the daemon
+        // env sets a default cap.
+        maxsim_shortlist: optional_usize_field(object, "maxsim_shortlist")?
+            .unwrap_or_else(maxsim_shortlist_default),
     })
+}
+
+/// Daemon-level default for the bounded `MaxSim` shortlist, applied when a
+/// request omits `maxsim_shortlist`. Unset, unparsable, or `0` means the
+/// exhaustive scan is kept.
+pub(crate) fn maxsim_shortlist_default() -> usize {
+    std::env::var("MEMKEEPER_MAXSIM_SHORTLIST")
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .unwrap_or(0)
 }
 
 pub(crate) fn entity_upsert_request_from_json(
@@ -888,6 +903,7 @@ fn pack_request_from_json_inner(
             "min_score",
             "rerank_candidates",
             "query_embeddings",
+            "maxsim_shortlist",
             "max_graph_seeds",
             "max_graph_neighbors",
             "graph_decay",
@@ -903,6 +919,7 @@ fn pack_request_from_json_inner(
             "min_score",
             "rerank_candidates",
             "query_embeddings",
+            "maxsim_shortlist",
         ]
     };
     reject_unknown_fields(object, allowed_fields)?;
@@ -966,6 +983,8 @@ fn pack_request_from_json_inner(
         // Token embeddings are computed CLI-side (never accepted over the wire).
         query_token_embeddings: None,
         token_model_id: None,
+        maxsim_shortlist: optional_usize_field(object, "maxsim_shortlist")?
+            .unwrap_or_else(maxsim_shortlist_default),
     })
 }
 

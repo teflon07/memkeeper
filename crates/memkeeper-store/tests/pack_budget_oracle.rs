@@ -101,6 +101,7 @@ fn req(max_memories: usize, max_chars: usize, min_score: f64) -> PackRequest {
         query_embeddings: None,
         query_token_embeddings: None,
         token_model_id: None,
+        maxsim_shortlist: 0,
     }
 }
 

@@ -597,6 +597,11 @@ pub struct SearchRequest {
     pub query_token_embedding: Option<Vec<Vec<f32>>>,
     /// Model id for `query_token_embedding`.
     pub token_model_id: Option<String>,
+    /// Bounded `MaxSim` shortlist cap. When > 0, late-interaction scoring is
+    /// restricted to the top-N eligible memories by single-vector distance
+    /// (plus eligible memories with no single vector, which cannot be ranked
+    /// by that shortlist). `0` keeps the exhaustive scan.
+    pub maxsim_shortlist: usize,
 }
 
 /// Deterministic memory review/list request.
@@ -1192,6 +1197,12 @@ pub struct PackRequest {
     pub query_token_embeddings: Option<Vec<Vec<Vec<f32>>>>,
     /// Model id for `query_token_embeddings`.
     pub token_model_id: Option<String>,
+    /// Bounded `MaxSim` shortlist cap. When > 0 and a dense query embedding is
+    /// available for a query, late-interaction scoring for that query is
+    /// restricted to the top-N eligible memories by single-vector distance
+    /// (plus eligible memories with no single vector). `0` keeps the
+    /// exhaustive scan.
+    pub maxsim_shortlist: usize,
 }
 
 /// Diagnostic evidence-join allocation controls.

@@ -1996,6 +1996,7 @@ fn build_pack_pool_basic_on_connection(
             embedding: None,
             query_token_embedding: None,
             token_model_id: None,
+            maxsim_shortlist: 0,
         };
         query_reports.push(search_memories_on_connection(connection, &search_request)?);
     }
@@ -3208,11 +3209,28 @@ fn build_hybrid_rerank_pool_with_evidence_options_on_connection(
             let eligible_ids = memory_ids_matching_filters(connection, &filters)?;
             let mut per_query = Vec::with_capacity(token_queries.len());
             for (query_index, tokens) in token_queries.iter().enumerate() {
+                // Bounded shortlist (see semantic_candidates_late_interaction):
+                // per query, when that query's dense embedding is available to
+                // rank by. Queries without a dense embedding stay exhaustive,
+                // as do non-semantic builds (no vec0 table to shortlist from).
+                #[cfg(feature = "semantic")]
+                let shortlisted = pack_maxsim_shortlist(
+                    connection,
+                    &pool_request,
+                    &filters,
+                    &eligible_ids,
+                    token_queries.len(),
+                    query_index,
+                    pool_width,
+                )?;
+                #[cfg(not(feature = "semantic"))]
+                let shortlisted: Option<BTreeSet<String>> = None;
+                let query_eligible = shortlisted.as_ref().unwrap_or(&eligible_ids);
                 per_query.push(maxsim_candidates(
                     connection,
                     tokens,
                     token_model,
-                    &eligible_ids,
+                    query_eligible,
                     pool_width,
                     query_index,
                 )?);
@@ -3445,6 +3463,117 @@ fn maxsim_candidates(
         candidate.admissions[0].source_rank = index + 1;
     }
     Ok(scored)
+}
+
+/// Bounded, scope-correct shortlist for late-interaction selection: the top
+/// `n` eligible memories by single-vector distance to `embedding`, unioned
+/// with eligible memories that have no row in the vector table (those cannot
+/// be ranked here, so they stay eligible for `MaxSim` instead of being
+/// silently dropped).
+///
+/// The KNN scan is restricted to eligible rowids via `rowid IN` so the top-N
+/// cannot be crowded out by out-of-scope vectors. The result is intersected
+/// with `eligible_ids` as a guard against drift between the SQL filter
+/// derivation and the caller's eligible set.
+///
+/// # Errors
+///
+/// Returns an error on `SQLite` failure.
+#[cfg(feature = "semantic")]
+fn maxsim_shortlist_ids(
+    connection: &Connection,
+    table: &str,
+    embedding: &[f32],
+    filters: &SearchFilters,
+    eligible_ids: &BTreeSet<String>,
+    n: usize,
+) -> Result<BTreeSet<String>> {
+    let mut args = SqlArgs::with_reserved(1);
+    let where_clause = filters_where_clause(filters, &mut args);
+    // `k` is interpolated like the sibling semantic_search_sql: sqlite-vec
+    // expects an integer constraint, and the cached-statement LRU stays
+    // bounded because the cap takes only a handful of distinct values.
+    let sql = format!(
+        "SELECT t.memory_id FROM {table} t
+         WHERE t.embedding MATCH ?1 AND k = {k}
+         AND t.rowid IN (
+            SELECT v.rowid FROM {table} v
+            JOIN memories m ON m.id = v.memory_id
+            WHERE {where_clause}
+         )",
+        k = i64::try_from(n).unwrap_or(i64::MAX)
+    );
+    let embedding_json = embedding_json(embedding)?;
+    let mut statement = connection.prepare_cached(&sql)?;
+    let params = std::iter::once(embedding_json).chain(args.values);
+    let rows = statement.query_map(params_from_iter(params), |row| row.get::<_, String>(0))?;
+    let mut shortlist: BTreeSet<String> = collect_rows(rows)?
+        .into_iter()
+        .filter(|memory_id| eligible_ids.contains(memory_id))
+        .collect();
+
+    let mut vectorless_args = SqlArgs::with_reserved(0);
+    let vectorless_where = filters_where_clause(filters, &mut vectorless_args);
+    let vectorless_sql = format!(
+        "SELECT m.id FROM memories m WHERE {vectorless_where}
+         AND m.id NOT IN (SELECT memory_id FROM {table})"
+    );
+    let mut vectorless_statement = connection.prepare_cached(&vectorless_sql)?;
+    let vectorless_rows = vectorless_statement
+        .query_map(params_from_iter(vectorless_args.values), |row| {
+            row.get::<_, String>(0)
+        })?;
+    for memory_id in collect_rows(vectorless_rows)? {
+        if eligible_ids.contains(&memory_id) {
+            shortlist.insert(memory_id);
+        }
+    }
+    Ok(shortlist)
+}
+
+/// Pack-path wrapper for `maxsim_shortlist_ids`: returns `Some(shortlist)`
+/// when the cap is active and this query has a dense embedding to rank by
+/// (`query_embeddings` aligned with the token queries), `None` to keep the
+/// exhaustive eligible set.
+///
+/// # Errors
+///
+/// Returns an error on `SQLite` failure.
+#[cfg(feature = "semantic")]
+fn pack_maxsim_shortlist(
+    connection: &Connection,
+    pool_request: &PackRequest,
+    filters: &SearchFilters,
+    eligible_ids: &BTreeSet<String>,
+    query_count: usize,
+    query_index: usize,
+    pool_width: usize,
+) -> Result<Option<BTreeSet<String>>> {
+    let cap = pool_request.maxsim_shortlist;
+    if cap == 0 || eligible_ids.len() <= cap {
+        return Ok(None);
+    }
+    let Some(dense) = pool_request
+        .query_embeddings
+        .as_ref()
+        .filter(|embeddings| embeddings.len() == query_count)
+        .map(|embeddings| &embeddings[query_index])
+    else {
+        return Ok(None);
+    };
+    let table = semantic_table_for_dims(dense.len())?;
+    if !table_exists(connection, &table)? {
+        return Ok(None);
+    }
+    maxsim_shortlist_ids(
+        connection,
+        &table,
+        dense,
+        filters,
+        eligible_ids,
+        cap.max(pool_width),
+    )
+    .map(Some)
 }
 
 /// Interleave per-query candidate pools rank-by-rank, deduplicating by memory
@@ -3896,6 +4025,7 @@ fn batch_search_memories_on_connection(
         embedding: None,
         query_token_embedding: None,
         token_model_id: None,
+        maxsim_shortlist: 0,
     };
     for query in &request.queries {
         search_request.query.clone_from(&query.query);
@@ -3949,6 +4079,7 @@ fn build_pack_on_connection(connection: &Connection, request: &PackRequest) -> R
             embedding: None,
             query_token_embedding: None,
             token_model_id: None,
+            maxsim_shortlist: 0,
         };
         query_reports.push(search_memories_on_connection(connection, &search_request)?);
     }
@@ -4036,6 +4167,7 @@ fn ann_search_for_pack(
             embedding: None,
             query_token_embedding: None,
             token_model_id: None,
+            maxsim_shortlist: 0,
         };
         return search_memories_on_connection(connection, &search_request);
     }
@@ -4054,6 +4186,7 @@ fn ann_search_for_pack(
         embedding: Some(embedding.to_vec()),
         query_token_embedding: None,
         token_model_id: None,
+        maxsim_shortlist: 0,
     };
     let prepared = prepare_search_request(&search_request)?;
 
@@ -7459,6 +7592,8 @@ struct PreparedSearchRequest {
     query_token_embedding: Option<Vec<Vec<f32>>>,
     #[cfg_attr(not(feature = "semantic"), allow(dead_code))]
     token_model_id: Option<String>,
+    #[cfg_attr(not(feature = "semantic"), allow(dead_code))]
+    maxsim_shortlist: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -7856,6 +7991,7 @@ fn prepare_search_request(request: &SearchRequest) -> Result<PreparedSearchReque
         embedding: request.embedding.clone(),
         query_token_embedding: request.query_token_embedding.clone(),
         token_model_id: request.token_model_id.clone(),
+        maxsim_shortlist: request.maxsim_shortlist,
     })
 }
 
@@ -8470,7 +8606,23 @@ fn semantic_candidates_late_interaction(
     // lets the single-vector ranking veto MaxSim's selection and the recall
     // gain disappears (observed in the first acceptance run).
     let selection = request.limit.saturating_add(request.offset);
-    let eligible_ids = memory_ids_matching_filters(connection, &request.filters)?;
+    let mut eligible_ids = memory_ids_matching_filters(connection, &request.filters)?;
+    // Bounded shortlist: cap the MaxSim scan (linear in eligible memories, the
+    // dominant retrieval cost as the store grows) to the top-N eligible by
+    // single-vector distance. 0 keeps the exhaustive scan.
+    if request.maxsim_shortlist > 0 && eligible_ids.len() > request.maxsim_shortlist {
+        let table = semantic_table_for_dims(embedding.len())?;
+        if table_exists(connection, &table)? {
+            eligible_ids = maxsim_shortlist_ids(
+                connection,
+                &table,
+                embedding,
+                &request.filters,
+                &eligible_ids,
+                request.maxsim_shortlist.max(selection),
+            )?;
+        }
+    }
     let pool = maxsim_candidates(
         connection,
         query_tokens,
@@ -8608,6 +8760,8 @@ fn search_sql(request: &PreparedSearchRequest) -> (String, Vec<String>) {
 fn semantic_search_sql(request: &PreparedSearchRequest, table: &str) -> (String, Vec<String>) {
     let mut args = SqlArgs::with_reserved(1);
     let where_clause = filters_where_clause(&request.filters, &mut args);
+    // Same filters, second placeholder set: binds the KNN prefilter subquery.
+    let prefilter_clause = filters_where_clause(&request.filters, &mut args);
     let recency_jd = recency_jd_sql();
     // Use the inflated pool (same logic as FTS search_sql) so Rust re-scoring
     // can surface SQL-undervalued candidates after silo-aware recency boosting.
@@ -8644,7 +8798,13 @@ fn semantic_search_sql(request: &PreparedSearchRequest, table: &str) -> (String,
          FROM {table}
          JOIN memories m ON m.id = {table}.memory_id
          JOIN memory_versions v ON v.id = m.active_version_id
-         WHERE {table}.embedding MATCH ?1 AND k = {candidate_limit} AND {where_clause}
+         WHERE {table}.embedding MATCH ?1 AND k = {candidate_limit}
+         AND {table}.rowid IN (
+            SELECT prefilter.rowid FROM {table} prefilter
+            JOIN memories m ON m.id = prefilter.memory_id
+            WHERE {prefilter_clause}
+         )
+         AND {where_clause}
          ORDER BY {table}.distance ASC, m.observed_at DESC, m.id ASC
          LIMIT {} OFFSET {}",
         request.candidate_pool_limit, request.offset

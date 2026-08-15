@@ -170,6 +170,21 @@ Use this independently from `MEMKEEPER_REQUIRE_SEMANTIC=1`: the semantic flag
 protects embeddings and requested late interaction, while the reranker flag
 protects cross-encoder ordering.
 
+## Bounded MaxSim shortlist
+
+Late-interaction (`MEMKEEPER_LATE_INTERACTION=1`) selection is exhaustive by
+default: every eligible memory's token matrix is MaxSim-scored per query, so
+warm retrieval latency grows linearly with the store. Set
+`MEMKEEPER_MAXSIM_SHORTLIST=<N>` (or pass `maxsim_shortlist` in a `search` or
+`pack` request; the explicit field wins, and `0` forces exhaustive) to restrict
+MaxSim to the top-N eligible memories by single-vector distance. Eligible
+memories with no single vector stay in the MaxSim set, and the shortlist KNN is
+scope-filtered before top-N selection, so out-of-scope growth cannot crowd out
+scoped candidates. The default is exhaustive (`0`); treat any nonzero cap as a
+recall-affecting change and hold it to the frozen LoCoMo gate before adopting
+it (sweep e.g. 64/128/256 by exporting the variable around the benchmark
+harness).
+
 ## Supersession modes
 
 `remember` takes an optional `mode` that governs how a write resolves against

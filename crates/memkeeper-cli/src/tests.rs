@@ -131,6 +131,7 @@ fn rerank_documents_use_bounded_canonical_content_only() {
             query_embeddings: None,
             query_token_embeddings: None,
             token_model_id: None,
+            maxsim_shortlist: 0,
         },
         &[memkeeper_store::RerankCandidate {
             memory_id: "mem-represented".to_string(),
@@ -857,6 +858,23 @@ fn search_json_parses_filters_and_bounds() {
         .expect("parse default source succeeds");
     assert!(!default_source.include_source);
     assert_eq!(default_source.lexical_fallback, "conservative");
+}
+
+#[test]
+fn search_and_pack_json_parse_maxsim_shortlist() {
+    let request = search_request_from_json(r#"{"query":"sqlite memory","maxsim_shortlist":128}"#)
+        .expect("parse succeeds");
+    assert_eq!(request.maxsim_shortlist, 128);
+
+    // Explicit 0 forces the exhaustive scan; omitting the field falls back to
+    // the env default (0 when MEMKEEPER_MAXSIM_SHORTLIST is unset).
+    let exhaustive = search_request_from_json(r#"{"query":"sqlite memory","maxsim_shortlist":0}"#)
+        .expect("parse succeeds");
+    assert_eq!(exhaustive.maxsim_shortlist, 0);
+
+    let pack = pack_request_from_json(r#"{"title":"t","queries":["q"],"maxsim_shortlist":64}"#)
+        .expect("parse succeeds");
+    assert_eq!(pack.maxsim_shortlist, 64);
 }
 
 #[test]

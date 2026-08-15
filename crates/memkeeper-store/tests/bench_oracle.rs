@@ -390,6 +390,7 @@ fn search_request_for(query: &str) -> SearchRequest {
         embedding: None,
         query_token_embedding: None,
         token_model_id: None,
+        maxsim_shortlist: 0,
     }
 }
 
@@ -427,6 +428,7 @@ fn pack_request() -> PackRequest {
         query_embeddings: None,
         query_token_embeddings: None,
         token_model_id: None,
+        maxsim_shortlist: 0,
     }
 }
 
