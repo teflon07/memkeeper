@@ -165,16 +165,16 @@ mod pack;
 pub use pack::{
     assemble_reranked_pack, build_hybrid_rerank_pool, build_hybrid_rerank_pool_trace_with_evidence_options,
     build_hybrid_rerank_pool_with_evidence_options, build_pack, build_pack_pool, empty_pack,
-    RerankCandidate,
+    AdmissionObservation, AdmissionSource, GraphEvidenceClass, GraphRouteObservation, GraphSeedSource,
+    RerankCandidate, RerankPool, RerankPoolCandidate, RerankPoolObservedCandidate,
 };
 pub(crate) use pack::{
     format_pack_markdown, exact_entities_for_span, apply_graph_admission_observations,
     merge_rerank_pools, merge_rerank_pools_with_trace, interleave_pools, evidence_query_spans,
     evidence_join_filters, evidence_entity_seeds, allocate_evidence_seeds,
     record_evidence_candidate, evidence_candidate_order,
-    AdmissionObservation, AdmissionSource, GraphSeedSource, GraphEvidenceClass,
-    GraphRouteObservation, EvidenceGraphSeed, EvidenceCandidateRoutes, EvidenceQuerySpan,
-    PackPoolItem, RerankPoolObservedCandidate, MAX_EVIDENCE_ENTITY_SPANS,
+    EvidenceGraphSeed, EvidenceCandidateRoutes, EvidenceQuerySpan,
+    PackPoolItem, MAX_EVIDENCE_ENTITY_SPANS,
 };
 
 mod vectors;
