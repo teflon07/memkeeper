@@ -695,4 +695,3 @@ fn maxsim_shortlist_retains_memories_without_single_vectors() {
 
     cleanup_store(&path);
 }
-

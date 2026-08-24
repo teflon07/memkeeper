@@ -13,19 +13,19 @@ use std::{
 };
 
 use memkeeper_protocol::{Command, PROTOCOL_VERSION};
-use memkeeper_store::*;
-use std::result::Result;
 #[cfg(feature = "embed")]
 use memkeeper_store::build_hybrid_rerank_pool_trace_with_evidence_options;
+use memkeeper_store::*;
+use std::result::Result;
 
-use crate::{CliError, hook::*, json::*, output::*, requests::*, serve::*};
-use super::{ArgParser, 
+use super::{
     append_csv_values, maybe_colbert_embed_remember_request,
     maybe_colbert_embed_remember_request_with_requirement, maybe_colbert_embed_search_request,
     maybe_embed_document_search_request, maybe_embed_ingest_request, maybe_embed_remember_request,
     maybe_embed_search_request, parse_bool, parse_f64_arg, parse_json_command_args,
-    parse_usize_arg, print_result, SemanticModels,
+    parse_usize_arg, print_result, ArgParser, SemanticModels,
 };
+use crate::{hook::*, json::*, output::*, requests::*, serve::*, CliError};
 
 pub(crate) fn run_pull_models(args: &[String]) -> i32 {
     let mut quantized = false;
@@ -240,4 +240,3 @@ pub(crate) fn print_schema_status() {
         "{{\"protocol_version\":\"{PROTOCOL_VERSION}\",\"schema_version\":{SCHEMA_VERSION},\"user_store_path_hint\":\"{USER_STORE_PATH_HINT}\",\"project_store_relative_path\":\"{PROJECT_STORE_RELATIVE_PATH}\",\"schema_mentions_required_objects\":{schema_mentions_required_objects},\"scaffold_only\":false}}"
     );
 }
-

@@ -5,31 +5,31 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write;
 use std::path::Path;
 
-use rusqlite::{params, OptionalExtension, Row, Transaction, Connection};
+use rusqlite::{params, Connection, OptionalExtension, Row, Transaction};
 
 use memkeeper_core::{
     infer_kind_from_prefix, kind, scope, status, DEFAULT_DURABLE_SILO, DEFAULT_SPACE,
 };
 
 use crate::{
-    apply_graph_capture, bounded_char_slice, collect_rows, collapse_whitespace,
-    default_silo, ensure_memory_candidates, ensure_silo_exists, ensure_space_exists,
-    enforce_active_colbert_model, insert_memory_embedding, insert_representation,
-    json_string_for_store, limit_i64, load_representation, next_id, normalized_tags,
-    normalize_utc_timestamp, now_timestamp, open_initialized_read_fast, open_initialized_write,
-    reject_all_spaces_sentinel, retrieval_companion, sha256_hex, sha256_text, string_array_json,
-    upsert_memory_token_embedding, upsert_relationship_tx, validate_forget_request,
-    validate_graph_capture, validate_history_request, validate_optional_metadata_value,
-    validate_optional_timestamp, validate_remember_request, validate_retrieval_representation,
-    with_read_snapshot, Error, ForgetReport, ForgetRequest, GetOptions, HistoryOptions,
-    HistoryReport, MemoryEventRecord, MemoryLinkRecord, MemoryRecord, MemoryVersionRecord,
-    RememberCandidate, RememberConflictCandidate, RememberReport,
-    RememberRequest, RepresentationWriteStatus, RetrievalRepresentationInput, Result,
-    VerifyReport, VerifyRequest, REMEMBER_MODE_AUTO, MAX_GET_LINKS, MAX_HISTORY_LIMIT,
-    MAX_REMEMBER_CANDIDATES, MAX_REMEMBER_CONFLICT_CANDIDATES, MAX_REMEMBER_LEXICAL_SCAN,
-    MAX_REMEMBER_LEXICAL_TERMS, MAX_SNIPPET_CHARS, MAX_CONTENT_CHARS, MAX_SOURCE_REF_JSON_CHARS,
-    MAX_TIMESTAMP_CHARS, REMEMBER_LEXICAL_THRESHOLD, REMEMBER_SUPERSEDE_MODES, search_terms,
-    MAX_SEARCH_TERMS, search_term_stems, push_unique, is_prefixable_search_term,
+    apply_graph_capture, bounded_char_slice, collapse_whitespace, collect_rows, default_silo,
+    enforce_active_colbert_model, ensure_memory_candidates, ensure_silo_exists,
+    ensure_space_exists, insert_memory_embedding, insert_representation, is_prefixable_search_term,
+    json_string_for_store, limit_i64, load_representation, next_id, normalize_utc_timestamp,
+    normalized_tags, now_timestamp, open_initialized_read_fast, open_initialized_write,
+    push_unique, reject_all_spaces_sentinel, retrieval_companion, search_term_stems, search_terms,
+    sha256_hex, sha256_text, string_array_json, upsert_memory_token_embedding,
+    upsert_relationship_tx, validate_forget_request, validate_graph_capture,
+    validate_history_request, validate_optional_metadata_value, validate_optional_timestamp,
+    validate_remember_request, validate_retrieval_representation, with_read_snapshot, Error,
+    ForgetReport, ForgetRequest, GetOptions, HistoryOptions, HistoryReport, MemoryEventRecord,
+    MemoryLinkRecord, MemoryRecord, MemoryVersionRecord, RememberCandidate,
+    RememberConflictCandidate, RememberReport, RememberRequest, RepresentationWriteStatus, Result,
+    RetrievalRepresentationInput, VerifyReport, VerifyRequest, MAX_CONTENT_CHARS, MAX_GET_LINKS,
+    MAX_HISTORY_LIMIT, MAX_REMEMBER_CANDIDATES, MAX_REMEMBER_CONFLICT_CANDIDATES,
+    MAX_REMEMBER_LEXICAL_SCAN, MAX_REMEMBER_LEXICAL_TERMS, MAX_SEARCH_TERMS, MAX_SNIPPET_CHARS,
+    MAX_SOURCE_REF_JSON_CHARS, MAX_TIMESTAMP_CHARS, REMEMBER_LEXICAL_THRESHOLD, REMEMBER_MODE_AUTO,
+    REMEMBER_SUPERSEDE_MODES,
 };
 
 pub fn remember_memory(
@@ -1113,7 +1113,11 @@ fn jaccard_similarity(left: &BTreeSet<String>, right: &BTreeSet<String>) -> f64 
     }
 }
 
-pub(crate) fn ensure_source_episode_exists(connection: &Connection, space: &str, id: &str) -> Result<()> {
+pub(crate) fn ensure_source_episode_exists(
+    connection: &Connection,
+    space: &str,
+    id: &str,
+) -> Result<()> {
     let exists: i64 = connection.query_row(
         "SELECT COUNT(*) FROM source_episodes WHERE id = ?1 AND space_name = ?2",
         params![id, space],
@@ -1262,7 +1266,11 @@ pub(crate) fn ensure_memory_in_space(connection: &Connection, id: &str, space: &
     Ok(())
 }
 
-pub(crate) fn load_memory(connection: &Connection, id: &str, options: GetOptions) -> Result<MemoryRecord> {
+pub(crate) fn load_memory(
+    connection: &Connection,
+    id: &str,
+    options: GetOptions,
+) -> Result<MemoryRecord> {
     let mut memory = connection
         .query_row(
             "SELECT

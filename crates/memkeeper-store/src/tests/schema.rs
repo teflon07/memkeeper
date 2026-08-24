@@ -1180,4 +1180,3 @@ fn write_paths_reject_all_spaces_sentinel() {
 
     cleanup_store(&path);
 }
-

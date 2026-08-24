@@ -1573,4 +1573,3 @@ fn search_documents_records_retrieval_events() {
 
     cleanup_store(&path);
 }
-

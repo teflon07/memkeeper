@@ -8,13 +8,13 @@ use rusqlite::{params, params_from_iter, Connection, OptionalExtension, Transact
 
 use crate::pack::{AdmissionObservation, AdmissionSource, PackPoolItem};
 use crate::{
-    collect_rows, limit_i64, next_id, now_timestamp, open_initialized_read_fast, open_initialized_write,
-    representation_document, table_exists, Error, Result,
+    collect_rows, limit_i64, next_id, now_timestamp, open_initialized_read_fast,
+    open_initialized_write, representation_document, table_exists, Error, Result,
 };
 
 #[cfg(feature = "semantic")]
 use crate::{
-    drop_all_vector_tables, ensure_memory_vector_table, embedding_json, filters_where_clause,
+    drop_all_vector_tables, embedding_json, ensure_memory_vector_table, filters_where_clause,
     semantic_table_for_dims, PackRequest, SearchFilters, SqlArgs,
 };
 
@@ -190,7 +190,6 @@ pub(crate) fn pack_maxsim_shortlist(
     )
     .map(Some)
 }
-
 
 /// Rows of (memory id, token matrix) loaded for late-interaction scoring.
 type TokenMatrixRows = Vec<(String, Vec<Vec<f32>>)>;
@@ -432,7 +431,12 @@ pub(crate) fn read_config_value(connection: &Connection, key: &str) -> Result<Op
     }
 }
 
-pub(crate) fn set_config_value(connection: &Connection, key: &str, value: &str, now: &str) -> Result<()> {
+pub(crate) fn set_config_value(
+    connection: &Connection,
+    key: &str,
+    value: &str,
+    now: &str,
+) -> Result<()> {
     connection.execute(
         "INSERT INTO config_kv (key, value, updated_at) VALUES (?1, ?2, ?3)
          ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",

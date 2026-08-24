@@ -4,20 +4,19 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::path::Path;
 
-use memkeeper_core::{infer_kind_from_prefix, kind, scope, ALL_SPACES, status};
+use memkeeper_core::{infer_kind_from_prefix, kind, scope, status, ALL_SPACES};
 
 use crate::{
     is_supported_kind, is_supported_scope, is_supported_status, normalized_tags,
     reject_sqlite_sidecar_symlinks, sidecar_path, validate_graph_capture,
-    validate_retrieval_representation, CANDIDATE_SENSITIVITIES, CANDIDATE_SOURCE_TYPES,
-    Error, ForgetRequest, HistoryOptions, JsonValidator, RememberRequest, Result,
-    REMEMBER_SUPERSEDE_MODES, SearchFilters,
-    MAX_BATCH_QUERIES, MAX_BATCH_QUERY_LIMIT, MAX_CONTENT_CHARS, MAX_FORGET_REASON_CHARS,
-    MAX_HISTORY_LIMIT, MAX_METADATA_VALUE_CHARS, MAX_PACK_CHARS, MAX_PACK_MEMORIES,
-    MAX_PACK_TITLE_CHARS, MAX_SEARCH_OFFSET, MAX_SNIPPET_CHARS, MAX_SOURCE_REF_JSON_CHARS,
-    MAX_SUMMARY_CHARS, MAX_TAG_CHARS, MAX_TAGS, MAX_TIMESTAMP_CHARS, MAX_MEMORY_LINKS,
-    MAX_SEMANTIC_EMBEDDING_DIMS, BackupRequest, BatchSearchRequest,
-    ExportRequest, PackRequest,
+    validate_retrieval_representation, BackupRequest, BatchSearchRequest, Error, ExportRequest,
+    ForgetRequest, HistoryOptions, JsonValidator, PackRequest, RememberRequest, Result,
+    SearchFilters, CANDIDATE_SENSITIVITIES, CANDIDATE_SOURCE_TYPES, MAX_BATCH_QUERIES,
+    MAX_BATCH_QUERY_LIMIT, MAX_CONTENT_CHARS, MAX_FORGET_REASON_CHARS, MAX_HISTORY_LIMIT,
+    MAX_MEMORY_LINKS, MAX_METADATA_VALUE_CHARS, MAX_PACK_CHARS, MAX_PACK_MEMORIES,
+    MAX_PACK_TITLE_CHARS, MAX_SEARCH_OFFSET, MAX_SEMANTIC_EMBEDDING_DIMS, MAX_SNIPPET_CHARS,
+    MAX_SOURCE_REF_JSON_CHARS, MAX_SUMMARY_CHARS, MAX_TAGS, MAX_TAG_CHARS, MAX_TIMESTAMP_CHARS,
+    REMEMBER_SUPERSEDE_MODES,
 };
 
 pub(crate) fn validate_export_request(request: &ExportRequest) -> Result<()> {
@@ -290,7 +289,6 @@ pub(crate) fn validate_history_request(id: &str, options: HistoryOptions) -> Res
     }
     Ok(())
 }
-
 
 pub(crate) fn validate_remember_request(request: &RememberRequest) -> Result<()> {
     let content = request.content.trim();

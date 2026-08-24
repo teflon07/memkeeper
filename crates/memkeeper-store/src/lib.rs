@@ -105,19 +105,19 @@ pub(crate) use snapshot::with_read_snapshot;
 
 mod validate;
 pub(crate) use validate::{
-    normalize_filter_values, normalize_search_filters, normalize_utc_timestamp,
-    reject_all_spaces_sentinel, validate_optional_metadata_value, validate_optional_timestamp,
-    validate_export_request, validate_backup_request, validate_output_path,
-    validate_forget_request, validate_history_request, validate_remember_request,
-    validate_batch_search_request, validate_search_filters, validate_pack_request,
-    validate_optional_embedding, validate_memory_link_ids, is_utc_rfc3339_like,
-    timestamp_parts_are_valid,
+    is_utc_rfc3339_like, normalize_filter_values, normalize_search_filters,
+    normalize_utc_timestamp, reject_all_spaces_sentinel, timestamp_parts_are_valid,
+    validate_backup_request, validate_batch_search_request, validate_export_request,
+    validate_forget_request, validate_history_request, validate_memory_link_ids,
+    validate_optional_embedding, validate_optional_metadata_value, validate_optional_timestamp,
+    validate_output_path, validate_pack_request, validate_remember_request,
+    validate_search_filters,
 };
 
 mod documents;
 pub use documents::{
     document_duplicates, get_document, ingest_source, mark_source_episodes_extracted,
-    prune_documents, promotion_candidates, search_documents, DocumentChunk,
+    promotion_candidates, prune_documents, search_documents, DocumentChunk,
     DocumentDuplicatesReport, DocumentDuplicatesRequest, DocumentGetReport, DocumentGetRequest,
     DocumentPruneReport, DocumentPruneRequest, DuplicateChunkCluster, DuplicateChunkMember,
     MarkExtractedReport, MarkExtractedRequest, PromotionCandidate, PromotionCandidatesReport,
@@ -125,73 +125,69 @@ pub use documents::{
 };
 
 mod archive;
-pub use archive::{backup_store, export_store, import_store};
 pub(crate) use archive::rebuild_fts;
 pub(crate) use archive::JsonValidator;
+pub use archive::{backup_store, export_store, import_store};
 pub(crate) use validate::reject_existing_output_sidecars;
 
 mod candidates;
-pub use candidates::{
-    adjudication_guard, approve_candidate, list_candidates, quarantine_candidate,
-    reject_candidate, submit_candidate, AdjudicationGuard,
-};
 pub(crate) use candidates::capture_require_adjudication;
+pub use candidates::{
+    adjudication_guard, approve_candidate, list_candidates, quarantine_candidate, reject_candidate,
+    submit_candidate, AdjudicationGuard,
+};
 
 mod memory;
-pub use memory::{
-    forget_memory, get_memory, memory_history, remember_memory, verify_memory,
-};
 pub(crate) use memory::{
-    forget_memory_tx, load_memory, remember_memory_tx, upsert_memory_entity_projection,
-    ensure_memory_in_space, ensure_source_episode_exists, normalized_alias, memory_fts_metadata_text,
-    correction_event_data_json,
+    correction_event_data_json, ensure_memory_in_space, ensure_source_episode_exists,
+    forget_memory_tx, load_memory, memory_fts_metadata_text, normalized_alias, remember_memory_tx,
+    upsert_memory_entity_projection,
 };
+pub use memory::{forget_memory, get_memory, memory_history, remember_memory, verify_memory};
 
 mod search;
 pub use search::{batch_search_memories, list_memories, search_memories};
 pub(crate) use search::{
-    batch_search_memories_on_connection, list_memories_on_connection, prepare_memory_list_request,
-    prepare_search_request, search_memories_on_connection, search_prepared, split_tags,
-    resolve_space_filter, ALIAS_TAG_PREFIX, ALIAS_MATCH_BOOST, compare_candidates, freshness_marker,
-    now_julian_day, search_terms, SqlArgs, prepare_recall_filters, memory_ids_matching_filters,
-    filters_where_clause, search_term_stems, push_unique, is_prefixable_search_term, query_alias_words,
-    fts_score, recency_score_for_silo, source_tier_score, VOLATILE_MAX_RECENCY_SCORE,
-    query_alias_shingles,
+    batch_search_memories_on_connection, compare_candidates, filters_where_clause,
+    freshness_marker, fts_score, is_prefixable_search_term, list_memories_on_connection,
+    memory_ids_matching_filters, now_julian_day, prepare_memory_list_request,
+    prepare_recall_filters, prepare_search_request, push_unique, query_alias_shingles,
+    query_alias_words, recency_score_for_silo, resolve_space_filter, search_memories_on_connection,
+    search_prepared, search_term_stems, search_terms, source_tier_score, split_tags, SqlArgs,
+    ALIAS_MATCH_BOOST, ALIAS_TAG_PREFIX, VOLATILE_MAX_RECENCY_SCORE,
 };
 #[cfg(feature = "semantic")]
 pub(crate) use search::{embedding_json, score_semantic_candidate, semantic_candidates};
 
 mod pack;
-pub use pack::{
-    assemble_reranked_pack, build_hybrid_rerank_pool, build_hybrid_rerank_pool_trace_with_evidence_options,
-    build_hybrid_rerank_pool_with_evidence_options, build_pack, build_pack_pool, empty_pack,
-    AdmissionObservation, AdmissionSource, GraphEvidenceClass, GraphRouteObservation, GraphSeedSource,
-    RerankCandidate, RerankPool, RerankPoolCandidate, RerankPoolObservedCandidate,
-};
 pub(crate) use pack::{
-    format_pack_markdown, exact_entities_for_span, apply_graph_admission_observations,
-    merge_rerank_pools, merge_rerank_pools_with_trace, interleave_pools, evidence_query_spans,
-    evidence_join_filters, evidence_entity_seeds, allocate_evidence_seeds,
-    record_evidence_candidate, evidence_candidate_order,
-    EvidenceGraphSeed, EvidenceCandidateRoutes, EvidenceQuerySpan,
+    allocate_evidence_seeds, apply_graph_admission_observations, evidence_candidate_order,
+    evidence_entity_seeds, evidence_join_filters, evidence_query_spans, exact_entities_for_span,
+    format_pack_markdown, interleave_pools, merge_rerank_pools, merge_rerank_pools_with_trace,
+    record_evidence_candidate, EvidenceCandidateRoutes, EvidenceGraphSeed, EvidenceQuerySpan,
     PackPoolItem, MAX_EVIDENCE_ENTITY_SPANS,
+};
+pub use pack::{
+    assemble_reranked_pack, build_hybrid_rerank_pool,
+    build_hybrid_rerank_pool_trace_with_evidence_options,
+    build_hybrid_rerank_pool_with_evidence_options, build_pack, build_pack_pool, empty_pack,
+    AdmissionObservation, AdmissionSource, GraphEvidenceClass, GraphRouteObservation,
+    GraphSeedSource, RerankCandidate, RerankPool, RerankPoolCandidate, RerankPoolObservedCandidate,
 };
 
 mod vectors;
-pub use vectors::{
-    apply_token_embeddings, collect_token_backfill_targets,
-};
 #[cfg(feature = "semantic")]
 pub use vectors::{apply_reembed, collect_reembed_targets, reindex_vectors, ReembedTarget};
-pub(crate) use vectors::{
-    blob_to_token_vecs, enforce_active_colbert_model, load_token_embeddings,
-    load_token_embeddings_cached, maxsim_candidates, maxsim_score, read_config_value,
-    set_config_value, token_vecs_to_blob, upsert_memory_token_embedding,
-};
+pub use vectors::{apply_token_embeddings, collect_token_backfill_targets};
 #[cfg(feature = "semantic")]
 pub(crate) use vectors::{
     blob_to_embedding, embedding_to_blob, enforce_active_embedding_model, insert_memory_embedding,
     maxsim_shortlist_ids, pack_maxsim_shortlist, rebuild_vector_index, write_embedding_row,
+};
+pub(crate) use vectors::{
+    blob_to_token_vecs, enforce_active_colbert_model, load_token_embeddings,
+    load_token_embeddings_cached, maxsim_candidates, maxsim_score, read_config_value,
+    set_config_value, token_vecs_to_blob, upsert_memory_token_embedding,
 };
 
 pub(crate) const MAX_CAPTURE_ENTITIES: usize = 32;
@@ -618,7 +614,8 @@ pub(crate) const DEFAULT_CANDIDATE_LIST_LIMIT: usize = 50;
 // ---------------------------------------------------------------------------
 
 /// SELECT column list for `memory_candidates`, matched 1:1 by `memory_candidate_from_row`.
-pub(crate) const CANDIDATE_COLUMNS: &str = "id, status, space, silo, scope, project, kind, content, \
+pub(crate) const CANDIDATE_COLUMNS: &str =
+    "id, status, space, silo, scope, project, kind, content, \
      summary, rationale, tags_json, entity_key, claim_key, confidence, source_type, \
      source_json, sensitivity, supersedes_json, created_at, decided_at, decided_reason, \
      resulting_memory_id";
@@ -1144,7 +1141,6 @@ pub(crate) fn reject_output_sidecar_files(path: &Path) -> Result<()> {
     }
     Ok(())
 }
-
 
 pub(crate) fn cleanup_temp_output(path: &Path) {
     let _ = fs::remove_file(path);

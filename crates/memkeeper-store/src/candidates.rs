@@ -9,17 +9,18 @@ use memkeeper_core::{scope, DEFAULT_SPACE};
 
 use crate::{
     collect_rows, default_silo, ensure_memory_candidates, ensure_silo_exists, ensure_space_exists,
-    json_string_for_store, limit_i64, next_id, normalized_tags, now_timestamp, open_initialized_write,
-    remember_memory_tx, string_array_json, validate_memory_link_ids, validate_optional_metadata_value,
-    validate_remember_request, reject_all_spaces_sentinel, JsonValidator, CANDIDATE_COLUMNS, CANDIDATE_SENSITIVITIES,
-    CANDIDATE_SOURCE_TYPES, CANDIDATE_STATUSES, CANDIDATE_STATUS_APPROVED, CANDIDATE_STATUS_PENDING,
-    CANDIDATE_STATUS_QUARANTINED, CANDIDATE_STATUS_REJECTED, CANDIDATE_SOURCE_CAPTURE,
-    DEFAULT_CANDIDATE_SENSITIVITY, DEFAULT_CANDIDATE_SOURCE_TYPE,
+    json_string_for_store, limit_i64, next_id, normalized_tags, now_timestamp,
+    open_initialized_write, reject_all_spaces_sentinel, remember_memory_tx, string_array_json,
+    validate_memory_link_ids, validate_optional_metadata_value, validate_remember_request,
     CandidateApproveReport, CandidateApproveRequest, CandidateListReport, CandidateListRequest,
     CandidateQuarantineReport, CandidateQuarantineRequest, CandidateRecord, CandidateRejectReport,
-    CandidateRejectRequest, CandidateSubmitReport, CandidateSubmitRequest, Error, RememberRequest,
-    Result, MAX_CONTENT_CHARS, MAX_METADATA_VALUE_CHARS, MAX_SOURCE_REF_JSON_CHARS, MAX_TAGS,
-    DEFAULT_CANDIDATE_LIST_LIMIT, MAX_SUMMARY_CHARS, REMEMBER_MODE_AUTO,
+    CandidateRejectRequest, CandidateSubmitReport, CandidateSubmitRequest, Error, JsonValidator,
+    RememberRequest, Result, CANDIDATE_COLUMNS, CANDIDATE_SENSITIVITIES, CANDIDATE_SOURCE_CAPTURE,
+    CANDIDATE_SOURCE_TYPES, CANDIDATE_STATUSES, CANDIDATE_STATUS_APPROVED,
+    CANDIDATE_STATUS_PENDING, CANDIDATE_STATUS_QUARANTINED, CANDIDATE_STATUS_REJECTED,
+    DEFAULT_CANDIDATE_LIST_LIMIT, DEFAULT_CANDIDATE_SENSITIVITY, DEFAULT_CANDIDATE_SOURCE_TYPE,
+    MAX_CONTENT_CHARS, MAX_METADATA_VALUE_CHARS, MAX_SOURCE_REF_JSON_CHARS, MAX_SUMMARY_CHARS,
+    MAX_TAGS, REMEMBER_MODE_AUTO,
 };
 
 pub(crate) fn capture_require_adjudication() -> bool {

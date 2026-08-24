@@ -1,9 +1,9 @@
 //! Store import/export/backup extracted from `lib.rs` (pure code movement).
 //! Re-exported from the crate root so the public API is unchanged.
 
-use std::fs::OpenOptions;
 use std::collections::BTreeMap;
 use std::env;
+use std::fs::OpenOptions;
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader, BufWriter, Write as IoWrite};
 use std::path::{Path, PathBuf};
@@ -20,25 +20,26 @@ use rusqlite::{
 use memkeeper_core::status;
 
 use crate::{
-    apply_schema, cleanup_inspection_copy, collect_rows, configure_connection, count,
-    create_new_private_file, create_parent_dirs, create_temp_output_file, cleanup_temp_output,
-    enable_wal, ensure_memory_candidates, ensure_recall_events, ensure_source_episode_recall_events,
+    apply_schema, cleanup_inspection_copy, cleanup_temp_output, collect_rows, configure_connection,
+    count, create_new_private_file, create_parent_dirs, create_temp_output_file, enable_wal,
+    ensure_memory_candidates, ensure_recall_events, ensure_source_episode_recall_events,
     init_store, inspection_copy_path, is_supported_kind, is_supported_scope, is_supported_status,
-    limit_i64, memory_fts_metadata_text, next_id, normalize_imported_schema_metadata, normalized_tags,
-    now_timestamp, open_initialized_read_fast, open_initialized_write, publish_temp_output,
-    register_sqlite_vec_extension, reject_existing_output_sidecars, reject_output_sidecar_files,
-    reject_source_sidecar_output, reject_sqlite_sidecar_symlinks, required_config_value,
-    schema_mentions_required_objects, sha256_hex, sha256_path, sha256_text, sidecar_path, table_exists,
-    unique_nanos, user_version, validate_export_request, validate_backup_request,
-    validate_memory_link_ids, validate_optional_metadata_value, validate_optional_timestamp,
-    validate_output_path, validate_remember_request, validate_retrieval_representation,
-    validate_initialized, validate_store_path, with_read_snapshot, is_utc_rfc3339_like,
-    timestamp_parts_are_valid, EXPORT_TABLES, ExportTableReport,
-    ExportTableSpec, Error, BackupReport, BackupRequest, ExportReport, ExportRequest, ImportReport,
-    ImportRequest, Result, RetrievalRepresentationInput, Sha256, ID_COUNTER, REMEMBER_MODE_AUTO,
-    SCHEMA_VERSION, MAX_CONTENT_CHARS, MAX_IMPORT_JSON_ARRAY_ITEMS, MAX_IMPORT_JSON_DEPTH,
+    is_utc_rfc3339_like, limit_i64, memory_fts_metadata_text, next_id,
+    normalize_imported_schema_metadata, normalized_tags, now_timestamp, open_initialized_read_fast,
+    open_initialized_write, publish_temp_output, register_sqlite_vec_extension,
+    reject_existing_output_sidecars, reject_output_sidecar_files, reject_source_sidecar_output,
+    reject_sqlite_sidecar_symlinks, required_config_value, schema_mentions_required_objects,
+    sha256_hex, sha256_path, sha256_text, sidecar_path, table_exists, timestamp_parts_are_valid,
+    unique_nanos, user_version, validate_backup_request, validate_export_request,
+    validate_initialized, validate_memory_link_ids, validate_optional_metadata_value,
+    validate_optional_timestamp, validate_output_path, validate_remember_request,
+    validate_retrieval_representation, validate_store_path, with_read_snapshot, BackupReport,
+    BackupRequest, Error, ExportReport, ExportRequest, ExportTableReport, ExportTableSpec,
+    ImportReport, ImportRequest, Result, RetrievalRepresentationInput, Sha256, EXPORT_TABLES,
+    ID_COUNTER, MAX_CONTENT_CHARS, MAX_IMPORT_JSON_ARRAY_ITEMS, MAX_IMPORT_JSON_DEPTH,
     MAX_IMPORT_JSON_OBJECT_FIELDS, MAX_IMPORT_LINE_BYTES, MAX_METADATA_VALUE_CHARS,
     MAX_SOURCE_REF_JSON_CHARS, MAX_SUMMARY_CHARS, MAX_TAGS, MAX_TIMESTAMP_CHARS,
+    REMEMBER_MODE_AUTO, SCHEMA_VERSION,
 };
 
 #[cfg(feature = "semantic")]

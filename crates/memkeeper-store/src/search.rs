@@ -10,13 +10,13 @@ use memkeeper_core::{status, ALL_SPACES, DEFAULT_DURABLE_SILO, DEFAULT_SPACE};
 
 use crate::{
     bounded_char_slice, collect_rows, is_supported_kind, is_supported_scope, is_supported_status,
-    limit_i64, make_snippet, normalized_tags, normalize_search_filters, open_initialized_read_fast,
+    limit_i64, make_snippet, normalize_search_filters, normalized_tags, open_initialized_read_fast,
     validate_batch_search_request, validate_optional_embedding, validate_search_filters,
-    with_read_snapshot, Error, BatchSearchItemReport, BatchSearchReport, BatchSearchRequest,
-    MemoryListItem, MemoryListReport, MemoryListRequest, ScoreBreakdown, SearchFilters,
-    SearchReport, SearchRequest, SearchResult, Result, MAX_BATCH_QUERY_LIMIT, MAX_MEMORY_LIST_LIMIT,
-    MAX_RECENCY_SCORE, MAX_SEARCH_LIMIT, MAX_SEARCH_OFFSET, MAX_SEARCH_QUERY_CHARS,
-    MAX_SEARCH_TERMS, MAX_SNIPPET_CHARS, MAX_TAGS, DURABLE_RECENCY_HALF_LIFE_DAYS,
+    with_read_snapshot, BatchSearchItemReport, BatchSearchReport, BatchSearchRequest, Error,
+    MemoryListItem, MemoryListReport, MemoryListRequest, Result, ScoreBreakdown, SearchFilters,
+    SearchReport, SearchRequest, SearchResult, DURABLE_RECENCY_HALF_LIFE_DAYS,
+    MAX_BATCH_QUERY_LIMIT, MAX_MEMORY_LIST_LIMIT, MAX_RECENCY_SCORE, MAX_SEARCH_LIMIT,
+    MAX_SEARCH_OFFSET, MAX_SEARCH_QUERY_CHARS, MAX_SEARCH_TERMS, MAX_SNIPPET_CHARS, MAX_TAGS,
     SHORT_TERM_SILO, VOLATILE_RECENCY_HALF_LIFE_DAYS,
 };
 
@@ -486,7 +486,9 @@ impl SearchCandidate {
         }
     }
 }
-pub(crate) fn prepare_memory_list_request(request: &MemoryListRequest) -> Result<PreparedMemoryListRequest> {
+pub(crate) fn prepare_memory_list_request(
+    request: &MemoryListRequest,
+) -> Result<PreparedMemoryListRequest> {
     if request.limit == 0 || request.limit > MAX_MEMORY_LIST_LIMIT {
         return Err(Error::InvalidRequest {
             message: format!("limit must be between 1 and {MAX_MEMORY_LIST_LIMIT}"),
@@ -1747,7 +1749,10 @@ pub(crate) fn recency_score_for_silo(recency_jd: Option<f64>, silo: &str, now_jd
     max_score * 0.5_f64.powf(age_days / half_life_days)
 }
 
-pub(crate) fn compare_candidates(left: &SearchCandidate, right: &SearchCandidate) -> std::cmp::Ordering {
+pub(crate) fn compare_candidates(
+    left: &SearchCandidate,
+    right: &SearchCandidate,
+) -> std::cmp::Ordering {
     left.lexical_tier
         .cmp(&right.lexical_tier)
         .then_with(|| {
@@ -1760,7 +1765,11 @@ pub(crate) fn compare_candidates(left: &SearchCandidate, right: &SearchCandidate
         .then_with(|| left.memory_id.cmp(&right.memory_id))
 }
 
-pub(crate) fn freshness_marker(silo: &str, metadata_json: Option<&str>, last_synth: Option<&str>) -> String {
+pub(crate) fn freshness_marker(
+    silo: &str,
+    metadata_json: Option<&str>,
+    last_synth: Option<&str>,
+) -> String {
     if silo == DEFAULT_DURABLE_SILO {
         return String::new();
     }
@@ -1787,4 +1796,3 @@ pub(crate) fn freshness_marker(silo: &str, metadata_json: Option<&str>, last_syn
         )
     }
 }
-

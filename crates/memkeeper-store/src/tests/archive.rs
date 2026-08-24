@@ -1563,4 +1563,3 @@ fn import_rejects_malformed_jsonl_framing() {
     cleanup_store(&source);
     let _ = fs::remove_dir_all(&dir);
 }
-

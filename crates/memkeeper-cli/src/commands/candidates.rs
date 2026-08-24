@@ -13,27 +13,28 @@ use std::{
 };
 
 use memkeeper_protocol::Command;
-use memkeeper_store::*;
-use std::result::Result;
 #[cfg(feature = "embed")]
 use memkeeper_store::build_hybrid_rerank_pool_trace_with_evidence_options;
+use memkeeper_store::*;
+use std::result::Result;
 
-use crate::{CliError, hook::*, json::*, output::*, requests::*, serve::*};
-use super::{ArgParser, 
+use super::{
     append_csv_values, maybe_colbert_embed_remember_request,
     maybe_colbert_embed_remember_request_with_requirement, maybe_colbert_embed_search_request,
     maybe_embed_document_search_request, maybe_embed_ingest_request, maybe_embed_remember_request,
     maybe_embed_search_request, parse_bool, parse_f64_arg, parse_json_command_args,
-    parse_usize_arg, print_result, SemanticModels,
+    parse_usize_arg, print_result, ArgParser, SemanticModels,
 };
-
+use crate::{hook::*, json::*, output::*, requests::*, serve::*, CliError};
 
 pub(crate) struct CandidateSubmitArgs {
     pub(crate) store: PathBuf,
     pub(crate) request: CandidateSubmitRequest,
 }
 
-pub(crate) fn parse_candidate_submit_args(args: &[String]) -> Result<CandidateSubmitArgs, CliError> {
+pub(crate) fn parse_candidate_submit_args(
+    args: &[String],
+) -> Result<CandidateSubmitArgs, CliError> {
     let (store, request_json) = parse_json_command_args(args, "candidate-submit")?;
     Ok(CandidateSubmitArgs {
         store,
@@ -101,7 +102,9 @@ pub(crate) struct CandidateApproveArgs {
     pub(crate) request: CandidateApproveRequest,
 }
 
-pub(crate) fn parse_candidate_approve_args(args: &[String]) -> Result<CandidateApproveArgs, CliError> {
+pub(crate) fn parse_candidate_approve_args(
+    args: &[String],
+) -> Result<CandidateApproveArgs, CliError> {
     let (store, request_json) = parse_json_command_args(args, "candidate-approve")?;
     Ok(CandidateApproveArgs {
         store,
@@ -135,7 +138,9 @@ pub(crate) struct CandidateRejectArgs {
     pub(crate) request: CandidateRejectRequest,
 }
 
-pub(crate) fn parse_candidate_reject_args(args: &[String]) -> Result<CandidateRejectArgs, CliError> {
+pub(crate) fn parse_candidate_reject_args(
+    args: &[String],
+) -> Result<CandidateRejectArgs, CliError> {
     let (store, request_json) = parse_json_command_args(args, "candidate-reject")?;
     Ok(CandidateRejectArgs {
         store,
@@ -169,7 +174,9 @@ pub(crate) struct CandidateQuarantineArgs {
     pub(crate) request: CandidateQuarantineRequest,
 }
 
-pub(crate) fn parse_candidate_quarantine_args(args: &[String]) -> Result<CandidateQuarantineArgs, CliError> {
+pub(crate) fn parse_candidate_quarantine_args(
+    args: &[String],
+) -> Result<CandidateQuarantineArgs, CliError> {
     let (store, request_json) = parse_json_command_args(args, "candidate-quarantine")?;
     Ok(CandidateQuarantineArgs {
         store,

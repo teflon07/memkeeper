@@ -80,6 +80,8 @@ mod schema;
 mod serve;
 
 #[allow(clippy::wildcard_imports)]
+pub(crate) use commands::*;
+#[allow(clippy::wildcard_imports)]
 pub(crate) use hook::*;
 #[allow(clippy::wildcard_imports)]
 pub(crate) use json::*;
@@ -89,8 +91,6 @@ pub(crate) use mcp::*;
 pub(crate) use output::*;
 #[allow(clippy::wildcard_imports)]
 pub(crate) use requests::*;
-#[allow(clippy::wildcard_imports)]
-pub(crate) use commands::*;
 #[allow(clippy::wildcard_imports)]
 pub(crate) use serve::*;
 

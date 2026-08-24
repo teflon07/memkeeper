@@ -1314,4 +1314,3 @@ fn remember_graph_capture_prefers_exact_entity_key_over_ambiguous_name() {
 
     cleanup_store(&path);
 }
-

@@ -13,20 +13,19 @@ use std::{
 };
 
 use memkeeper_protocol::Command;
-use memkeeper_store::*;
-use std::result::Result;
 #[cfg(feature = "embed")]
 use memkeeper_store::build_hybrid_rerank_pool_trace_with_evidence_options;
+use memkeeper_store::*;
+use std::result::Result;
 
-use crate::{CliError, hook::*, json::*, output::*, requests::*, serve::*};
-use super::{ArgParser, 
+use super::{
     append_csv_values, maybe_colbert_embed_remember_request,
     maybe_colbert_embed_remember_request_with_requirement, maybe_colbert_embed_search_request,
     maybe_embed_document_search_request, maybe_embed_ingest_request, maybe_embed_remember_request,
     maybe_embed_search_request, parse_bool, parse_f64_arg, parse_json_command_args,
-    parse_usize_arg, print_result, SemanticModels,
+    parse_usize_arg, print_result, ArgParser, SemanticModels,
 };
-
+use crate::{hook::*, json::*, output::*, requests::*, serve::*, CliError};
 
 pub(crate) struct IngestArgs {
     pub(crate) store: PathBuf,
@@ -80,7 +79,9 @@ pub(crate) struct PromotionCandidatesArgs {
     pub(crate) request: PromotionCandidatesRequest,
 }
 
-pub(crate) fn parse_promotion_candidates_args(args: &[String]) -> Result<PromotionCandidatesArgs, CliError> {
+pub(crate) fn parse_promotion_candidates_args(
+    args: &[String],
+) -> Result<PromotionCandidatesArgs, CliError> {
     let (store, request_json) = parse_json_command_args(args, "promotion-candidates")?;
     Ok(PromotionCandidatesArgs {
         store,
@@ -114,7 +115,9 @@ pub(crate) struct DocumentDuplicatesArgs {
     pub(crate) request: DocumentDuplicatesRequest,
 }
 
-pub(crate) fn parse_document_duplicates_args(args: &[String]) -> Result<DocumentDuplicatesArgs, CliError> {
+pub(crate) fn parse_document_duplicates_args(
+    args: &[String],
+) -> Result<DocumentDuplicatesArgs, CliError> {
     let (store, request_json) = parse_json_command_args(args, "document-duplicates")?;
     Ok(DocumentDuplicatesArgs {
         store,
@@ -229,7 +232,10 @@ pub(crate) fn run_document_search(args: &[String]) -> i32 {
     run_document_search_with_models(args, &semantic_models)
 }
 
-pub(crate) fn run_document_search_with_models(args: &[String], semantic_models: &SemanticModels) -> i32 {
+pub(crate) fn run_document_search_with_models(
+    args: &[String],
+    semantic_models: &SemanticModels,
+) -> i32 {
     let started = Instant::now();
     let command = Command::DocumentSearch;
     let result = parse_document_search_args(args)

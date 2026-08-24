@@ -11,36 +11,36 @@ use memkeeper_protocol::Command;
 use memkeeper_store::*;
 use std::result::Result;
 
-use crate::{CliError, hook::*, json::*, output::*, requests::*, serve::*};
+use crate::{hook::*, json::*, output::*, requests::*, serve::*, CliError};
 
-mod init;
-mod memory;
-mod search;
-mod pack;
-mod graph;
-mod documents;
 mod archive;
 mod candidates;
+mod documents;
+mod graph;
+mod init;
+mod memory;
 mod models;
+mod pack;
+mod search;
 
-pub(crate) use init::*;
-pub(crate) use memory::*;
-pub(crate) use search::*;
-pub(crate) use pack::*;
-pub(crate) use graph::*;
-pub(crate) use documents::*;
 pub(crate) use archive::*;
 pub(crate) use candidates::*;
+pub(crate) use documents::*;
+pub(crate) use graph::*;
+pub(crate) use init::*;
+pub(crate) use memory::*;
 pub(crate) use models::*;
+pub(crate) use pack::*;
+pub(crate) use search::*;
 
 #[cfg(feature = "embed")]
 use std::sync::Mutex;
 
 #[cfg(feature = "embed")]
 pub(crate) struct SemanticModels {
-    embed: Option<Mutex<Box<dyn memkeeper_embed::Embedder>>>,
-    rerank: Option<Mutex<Box<dyn memkeeper_embed::Reranker>>>,
-    colbert: Option<Mutex<Box<dyn memkeeper_embed::TokenEmbedder>>>,
+    pub(crate) embed: Option<Mutex<Box<dyn memkeeper_embed::Embedder>>>,
+    pub(crate) rerank: Option<Mutex<Box<dyn memkeeper_embed::Reranker>>>,
+    pub(crate) colbert: Option<Mutex<Box<dyn memkeeper_embed::TokenEmbedder>>>,
 }
 
 /// Late-interaction retrieval gate: `MEMKEEPER_LATE_INTERACTION=1` plus
@@ -162,7 +162,10 @@ impl SemanticModels {
 }
 
 #[cfg(feature = "embed")]
-pub(crate) fn maybe_embed_remember_request(request: &mut RememberRequest, semantic_models: &SemanticModels) {
+pub(crate) fn maybe_embed_remember_request(
+    request: &mut RememberRequest,
+    semantic_models: &SemanticModels,
+) {
     if request.embedding.is_some() {
         return;
     }
@@ -182,11 +185,17 @@ pub(crate) fn maybe_embed_remember_request(request: &mut RememberRequest, semant
 }
 
 #[cfg(not(feature = "embed"))]
-pub(crate) fn maybe_embed_remember_request(_request: &mut RememberRequest, _semantic_models: &SemanticModels) {
+pub(crate) fn maybe_embed_remember_request(
+    _request: &mut RememberRequest,
+    _semantic_models: &SemanticModels,
+) {
 }
 
 #[cfg(feature = "embed")]
-pub(crate) fn maybe_embed_ingest_request(request: &mut IngestRequest, semantic_models: &SemanticModels) {
+pub(crate) fn maybe_embed_ingest_request(
+    request: &mut IngestRequest,
+    semantic_models: &SemanticModels,
+) {
     if request.embeddings.is_some() || request.chunks.is_empty() {
         return;
     }
@@ -207,7 +216,11 @@ pub(crate) fn maybe_embed_ingest_request(request: &mut IngestRequest, semantic_m
 }
 
 #[cfg(not(feature = "embed"))]
-pub(crate) fn maybe_embed_ingest_request(_request: &mut IngestRequest, _semantic_models: &SemanticModels) {}
+pub(crate) fn maybe_embed_ingest_request(
+    _request: &mut IngestRequest,
+    _semantic_models: &SemanticModels,
+) {
+}
 
 #[cfg(feature = "embed")]
 pub(crate) fn maybe_embed_document_search_request(
@@ -366,7 +379,10 @@ pub(crate) fn maybe_colbert_embed_search_request(
 }
 
 #[cfg(feature = "embed")]
-pub(crate) fn maybe_colbert_embed_pack_request(request: &mut PackRequest, semantic_models: &SemanticModels) {
+pub(crate) fn maybe_colbert_embed_pack_request(
+    request: &mut PackRequest,
+    semantic_models: &SemanticModels,
+) {
     if request.query_token_embeddings.is_some() {
         return;
     }
@@ -395,7 +411,10 @@ pub(crate) fn maybe_colbert_embed_pack_request(request: &mut PackRequest, semant
 }
 
 #[cfg(not(feature = "embed"))]
-pub(crate) fn maybe_colbert_embed_pack_request(_request: &mut PackRequest, _semantic_models: &SemanticModels) {
+pub(crate) fn maybe_colbert_embed_pack_request(
+    _request: &mut PackRequest,
+    _semantic_models: &SemanticModels,
+) {
 }
 
 #[cfg(feature = "embed")]
@@ -445,7 +464,10 @@ pub(crate) fn maybe_embed_search_request(
 }
 
 #[cfg(feature = "embed")]
-pub(crate) fn maybe_embed_pack_request(request: &mut PackRequest, semantic_models: &SemanticModels) {
+pub(crate) fn maybe_embed_pack_request(
+    request: &mut PackRequest,
+    semantic_models: &SemanticModels,
+) {
     if request.query_embeddings.is_some() {
         return;
     }
@@ -463,7 +485,11 @@ pub(crate) fn maybe_embed_pack_request(request: &mut PackRequest, semantic_model
 }
 
 #[cfg(not(feature = "embed"))]
-pub(crate) fn maybe_embed_pack_request(_request: &mut PackRequest, _semantic_models: &SemanticModels) {}
+pub(crate) fn maybe_embed_pack_request(
+    _request: &mut PackRequest,
+    _semantic_models: &SemanticModels,
+) {
+}
 
 pub(crate) struct ArgParser<'a> {
     args: &'a [String],
@@ -503,7 +529,11 @@ impl<'a> ArgParser<'a> {
     }
 }
 
-pub(crate) fn print_result(command: Command, started: Instant, result: Result<String, CliError>) -> i32 {
+pub(crate) fn print_result(
+    command: Command,
+    started: Instant,
+    result: Result<String, CliError>,
+) -> i32 {
     match result {
         Ok(envelope) => {
             println!("{envelope}");

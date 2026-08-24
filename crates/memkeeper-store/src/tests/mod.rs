@@ -41,7 +41,6 @@ use rusqlite::{params, Connection};
 const FIXED_TEST_JULIAN_DAY: f64 = 2_460_000.0;
 use std::{collections::BTreeMap, env, fs, path::Path, path::PathBuf, process, time::SystemTime};
 
-
 fn represented_request(content: &str, card: &str) -> RememberRequest {
     let mut request = basic_request(content);
     request.summary = Some("deployment summary".to_string());
@@ -762,13 +761,13 @@ fn index_f32(index: usize) -> f32 {
     u16::try_from(index).map_or(0.0, f32::from)
 }
 
-mod vectors;
-mod schema;
 mod archive;
 mod candidates;
-mod dream;
 mod documents;
-mod pack;
+mod dream;
 mod graph;
-mod search;
 mod memory;
+mod pack;
+mod schema;
+mod search;
+mod vectors;

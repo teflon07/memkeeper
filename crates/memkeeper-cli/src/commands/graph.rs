@@ -13,19 +13,20 @@ use std::{
 };
 
 use memkeeper_protocol::Command;
-use memkeeper_store::*;
-use std::result::Result;
 #[cfg(feature = "embed")]
 use memkeeper_store::build_hybrid_rerank_pool_trace_with_evidence_options;
+use memkeeper_store::*;
+use std::result::Result;
 
-use crate::{CliError, hook::*, json::*, output::*, requests::*, serve::*};
-use super::{resolve_store_default, ArgParser, parse_store_args,
+use super::{
     append_csv_values, maybe_colbert_embed_remember_request,
     maybe_colbert_embed_remember_request_with_requirement, maybe_colbert_embed_search_request,
     maybe_embed_document_search_request, maybe_embed_ingest_request, maybe_embed_remember_request,
     maybe_embed_search_request, parse_bool, parse_f64_arg, parse_json_command_args,
-    parse_usize_arg, print_result, SemanticModels,
+    parse_store_args, parse_usize_arg, print_result, resolve_store_default, ArgParser,
+    SemanticModels,
 };
+use crate::{hook::*, json::*, output::*, requests::*, serve::*, CliError};
 
 pub(crate) struct EntityUpsertArgs {
     pub(crate) store: PathBuf,
@@ -67,7 +68,6 @@ pub(crate) struct MemoryListArgs {
     pub(crate) store: PathBuf,
     pub(crate) request: MemoryListRequest,
 }
-
 
 pub(crate) fn run_entity_upsert(args: &[String]) -> i32 {
     let started = Instant::now();
@@ -244,7 +244,9 @@ pub(crate) fn parse_entity_upsert_args(args: &[String]) -> Result<EntityUpsertAr
     })
 }
 
-pub(crate) fn parse_relationship_upsert_args(args: &[String]) -> Result<RelationshipUpsertArgs, CliError> {
+pub(crate) fn parse_relationship_upsert_args(
+    args: &[String],
+) -> Result<RelationshipUpsertArgs, CliError> {
     let (store, request_json) = parse_json_command_args(args, "relationship-upsert")?;
     Ok(RelationshipUpsertArgs {
         store,
@@ -381,4 +383,3 @@ pub(crate) fn parse_memory_list_args(args: &[String]) -> Result<MemoryListArgs, 
         request,
     })
 }
-

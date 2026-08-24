@@ -13,26 +13,25 @@ use std::{
 };
 
 use memkeeper_protocol::Command;
-use memkeeper_store::*;
-use std::result::Result;
 #[cfg(feature = "embed")]
 use memkeeper_store::build_hybrid_rerank_pool_trace_with_evidence_options;
+use memkeeper_store::*;
+use std::result::Result;
 
-use crate::{CliError, hook::*, json::*, output::*, requests::*, serve::*};
-use super::{resolve_store_default, ArgParser, 
+use super::{
     append_csv_values, maybe_colbert_embed_remember_request,
     maybe_colbert_embed_remember_request_with_requirement, maybe_colbert_embed_search_request,
     maybe_embed_document_search_request, maybe_embed_ingest_request, maybe_embed_remember_request,
     maybe_embed_search_request, parse_bool, parse_f64_arg, parse_json_command_args,
-    parse_usize_arg, print_result, SemanticModels,
+    parse_usize_arg, print_result, resolve_store_default, ArgParser, SemanticModels,
 };
+use crate::{hook::*, json::*, output::*, requests::*, serve::*, CliError};
 
 #[derive(Debug)]
 pub(crate) struct RememberArgs {
     pub(crate) store: PathBuf,
     pub(crate) request: RememberRequest,
 }
-
 
 pub(crate) struct GetArgs {
     pub(crate) store: PathBuf,
@@ -59,12 +58,10 @@ pub(crate) struct HistoryArgs {
     pub(crate) options: HistoryOptions,
 }
 
-
 pub(crate) struct RecallLogArgs {
     pub(crate) store: PathBuf,
     pub(crate) request: RecallLogRequest,
 }
-
 
 pub(crate) fn run_remember(args: &[String]) -> i32 {
     let semantic_models = SemanticModels::for_remember_or_search();
@@ -72,7 +69,11 @@ pub(crate) fn run_remember(args: &[String]) -> i32 {
 }
 
 pub(crate) fn run_remember_with_models(args: &[String], semantic_models: &SemanticModels) -> i32 {
-    run_remember_with_models_and_requirement(args, semantic_models, crate::serve::require_semantic_env())
+    run_remember_with_models_and_requirement(
+        args,
+        semantic_models,
+        crate::serve::require_semantic_env(),
+    )
 }
 
 pub(crate) fn run_remember_with_models_and_requirement(
@@ -493,4 +494,3 @@ pub(crate) fn parse_history_args(args: &[String]) -> Result<HistoryArgs, CliErro
         },
     })
 }
-

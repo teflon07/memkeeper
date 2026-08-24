@@ -1503,4 +1503,3 @@ fn dream_promote_threshold_zero_is_rejected() {
 
     assert!(dream_store(&path, &promote_request(0, 0.75, 3, false)).is_err());
 }
-

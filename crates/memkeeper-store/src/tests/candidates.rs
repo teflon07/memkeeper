@@ -334,4 +334,3 @@ fn quarantine_candidate_transitions_pending_and_blocks_decided() {
 
     cleanup_store(&path);
 }
-

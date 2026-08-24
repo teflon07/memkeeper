@@ -1631,4 +1631,3 @@ fn record_recall_logs_events_and_touches_accessed_at() {
     assert!(matches!(empty, Err(Error::InvalidRequest { .. })));
     cleanup_store(&path);
 }
-

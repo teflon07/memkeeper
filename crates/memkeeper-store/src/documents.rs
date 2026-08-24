@@ -3,7 +3,9 @@
 
 use std::path::Path;
 
-use rusqlite::{params, params_from_iter, types::Value, Connection, OptionalExtension, Row, Transaction};
+use rusqlite::{
+    params, params_from_iter, types::Value, Connection, OptionalExtension, Row, Transaction,
+};
 
 use memkeeper_core::{status, DEFAULT_DURABLE_SILO, DEFAULT_SPACE};
 
@@ -12,10 +14,10 @@ use crate::{
     now_timestamp, open_initialized_read_fast, open_initialized_write, reject_all_spaces_sentinel,
     search_terms, seed_standard_silos, sha256_hex, sha256_text, space_exists, table_exists,
     validate_optional_metadata_value, validate_optional_timestamp, with_read_snapshot,
-    JsonValidator, DOCUMENTS_SPACE, DEFAULT_INGEST_SOURCE_TYPE, Error, IngestReport, IngestRequest,
-    Result, DocumentSearchReport, DocumentSearchRequest, DocumentSearchResult,
-    MAX_CONTENT_CHARS, MAX_SOURCE_REF_JSON_CHARS, DEFAULT_DOCUMENT_SEARCH_LIMIT,
-    MAX_SEARCH_LIMIT,
+    DocumentSearchReport, DocumentSearchRequest, DocumentSearchResult, Error, IngestReport,
+    IngestRequest, JsonValidator, Result, DEFAULT_DOCUMENT_SEARCH_LIMIT,
+    DEFAULT_INGEST_SOURCE_TYPE, DOCUMENTS_SPACE, MAX_CONTENT_CHARS, MAX_SEARCH_LIMIT,
+    MAX_SOURCE_REF_JSON_CHARS,
 };
 
 #[cfg(feature = "semantic")]

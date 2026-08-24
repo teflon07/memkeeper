@@ -13,19 +13,19 @@ use std::{
 };
 
 use memkeeper_protocol::Command;
-use memkeeper_store::*;
-use std::result::Result;
 #[cfg(feature = "embed")]
 use memkeeper_store::build_hybrid_rerank_pool_trace_with_evidence_options;
+use memkeeper_store::*;
+use std::result::Result;
 
-use crate::{CliError, hook::*, json::*, output::*, requests::*, serve::*};
-use super::{ArgParser, 
+use super::{
     append_csv_values, maybe_colbert_embed_remember_request,
     maybe_colbert_embed_remember_request_with_requirement, maybe_colbert_embed_search_request,
     maybe_embed_document_search_request, maybe_embed_ingest_request, maybe_embed_remember_request,
     maybe_embed_search_request, parse_bool, parse_f64_arg, parse_json_command_args,
-    parse_usize_arg, print_result, require_primary_reranker, SemanticModels,
+    parse_usize_arg, print_result, require_primary_reranker, ArgParser, SemanticModels,
 };
+use crate::{hook::*, json::*, output::*, requests::*, serve::*, CliError};
 
 pub(crate) struct SearchArgs {
     pub(crate) store: PathBuf,
@@ -35,7 +35,6 @@ pub(crate) struct SearchArgs {
     /// Candidate pool width when reranking.
     pub(crate) rerank_candidates: usize,
 }
-
 
 pub(crate) struct BatchSearchArgs {
     pub(crate) store: PathBuf,
@@ -181,7 +180,7 @@ fn finalize_search_window(
 const DEFAULT_RERANK_DOC_CHARS: usize = 512;
 
 #[cfg(feature = "embed")]
-fn rerank_doc_chars() -> usize {
+pub(crate) fn rerank_doc_chars() -> usize {
     std::env::var("MEMKEEPER_RERANK_DOC_CHARS")
         .ok()
         .and_then(|value| value.parse::<usize>().ok())

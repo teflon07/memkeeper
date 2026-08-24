@@ -2204,4 +2204,3 @@ fn rerank_pool_always_materializes_canonical_content() {
         .all(|candidate| !candidate.content.contains("summary")));
     cleanup_store(&path);
 }
-

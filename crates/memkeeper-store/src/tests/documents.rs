@@ -700,4 +700,3 @@ fn mark_extracted_rejects_empty_request() {
         Err(Error::InvalidRequest { .. })
     ));
 }
-
